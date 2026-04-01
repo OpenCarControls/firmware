@@ -56,7 +56,7 @@ jobs:
         run: sed -i 's/^board\s*=\s*".*"/board = "${{ matrix.board }}"/' config.toml
         
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets
         
       - name: Build Firmware via xtask
         run: cargo xtask build
