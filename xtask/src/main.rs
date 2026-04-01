@@ -48,17 +48,16 @@ pub struct MqttConfig {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() < 2 || (args[1] != "build" && args[1] != "run") {
-        eprintln!("Usage: cargo xtask <build|run> [config_file.toml]");
-        exit(1);
+    let command = args.get(1).map(|s| s.as_str()).unwrap_or("");
+    match command {
+        "build" | "run" | "clippy" => {}
+        _ => {
+            eprintln!("Usage: cargo xtask <build|run|clippy> [config_file.toml]");
+            exit(1);
+        }
     }
 
-    let command = &args[1];
-    let config_path = if args.len() >= 3 {
-        &args[2]
-    } else {
-        "config.toml"
-    };
+    let config_path = args.get(2).map(|s| s.as_str()).unwrap_or("config.toml");
     println!("🚀 Starting custom {} using: {}", command, config_path);
 
     // Read and parse the config file
@@ -76,10 +75,11 @@ fn main() {
     generate_cargo_toml(&config, &*builder);
     generate_main_rs(&config, &*builder);
 
-    if command == "run" {
-        builder.run(&config);
-    } else {
-        builder.compile(&config);
+    match command {
+        "run" => builder.run(&config),
+        "clippy" => builder.clippy(&config),
+        "build" => builder.compile(&config),
+        _ => unreachable!(),
     }
 }
 
@@ -95,6 +95,18 @@ pub trait TargetBuilder {
     fn extend_cargo_toml(&self, config: &Config, toml: &mut String);
     fn generate_main_rs(&self, config: &Config, main_rs: &mut String);
     fn compile(&self, config: &Config);
+
+    // Default implementation for running clippy
+    fn clippy(&self, _config: &Config) {
+        let status = Command::new("cargo")
+            .arg("clippy")
+            .current_dir(".app_build")
+            .status()
+            .expect("Failed to execute cargo clippy");
+        if !status.success() {
+            exit(status.code().unwrap_or(1));
+        }
+    }
 
     // Default implementation for running the project
     fn run(&self, _config: &Config) {

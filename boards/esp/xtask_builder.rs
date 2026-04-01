@@ -159,4 +159,11 @@ MCU = "{1}"
         self.execute_cargo_command(config, "run");
         println!("✅ Firmware image successfully generated!");
     }
+
+    // Override the default clippy method to use the ESP-specific toolchain
+    fn clippy(&self, config: &Config) {
+        println!("🔍 Running clippy on the firmware build pipeline...");
+        self.execute_cargo_command(config, "clippy");
+        println!("✅ Clippy checks completed!");
+    }
 }
