@@ -1,4 +1,3 @@
 #![no_std]
 
-pub trait CarController {
-}
+pub trait CarController {}

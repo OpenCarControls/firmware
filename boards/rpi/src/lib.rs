@@ -9,6 +9,5 @@ impl<'a> RpiBoard<'a> {
         Self { can_interface }
     }
 
-    pub fn run<C: CarController>(&mut self, car: C) {
-    }
+    pub fn run<C: CarController>(&mut self, car: C) {}
 }

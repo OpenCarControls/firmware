@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
-    // Watch the boards directory so cargo automatically rebuilds xtask 
+    // Watch the boards directory so cargo automatically rebuilds xtask
     // if a new board folder is created or removed.
     println!("cargo:rerun-if-changed=../boards");
 
@@ -20,14 +20,14 @@ fn main() {
         for entry in fs::read_dir(boards_dir).expect("Failed to read boards directory") {
             let entry = entry.expect("Failed to read directory entry");
             let path = entry.path();
-            
+
             if path.is_dir() {
                 let board_name = path.file_name().unwrap().to_str().unwrap();
                 let builder_file = path.join("xtask_builder.rs");
 
                 if builder_file.exists() {
                     println!("cargo:rerun-if-changed={}", builder_file.display());
-                    
+
                     // Note: This path is evaluated relative to `xtask/src/main.rs` where the include! macro sits
                     mods.push_str(&format!(
                         "#[path = \"../../boards/{}/xtask_builder.rs\"]\nmod board_{};\n",
@@ -55,7 +55,8 @@ pub fn get_builder(board: &str) -> Box<dyn TargetBuilder> {{
             std::process::exit(1);
         }}
     }}
-}}"#);
+}}"#
+    );
 
     fs::write(&dest_path, generated_code).unwrap();
 }

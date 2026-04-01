@@ -64,8 +64,7 @@ fn main() {
     // Read and parse the config file
     let config_str = fs::read_to_string(config_path)
         .unwrap_or_else(|_| panic!("Failed to read config file: {}", config_path));
-    let config: Config = toml::from_str(&config_str)
-        .expect("Failed to parse TOML configuration");
+    let config: Config = toml::from_str(&config_str).expect("Failed to parse TOML configuration");
 
     let builder = get_builder(&config.target.board);
 
@@ -104,7 +103,9 @@ pub trait TargetBuilder {
             .current_dir(".app_build")
             .status()
             .expect("Failed to execute cargo run");
-        if !status.success() { exit(status.code().unwrap_or(1)); }
+        if !status.success() {
+            exit(status.code().unwrap_or(1));
+        }
     }
 }
 
@@ -126,7 +127,7 @@ fn scaffold_app_dir() {
     // We intentionally leave the `target` directory alone to preserve Cargo's build cache!
     let _ = fs::remove_file(".app_build/build.rs");
     let _ = fs::remove_file(".app_build/runner.sh");
-    
+
     // Delete any old generated .bin firmwares
     if let Ok(entries) = fs::read_dir(".app_build") {
         for entry in entries.filter_map(|e| e.ok()) {
@@ -161,8 +162,7 @@ board-{board} = {{ path = "../boards/{board}" }}
 
     builder.extend_cargo_toml(config, &mut cargo_toml_content);
 
-    fs::write(".app_build/Cargo.toml", cargo_toml_content)
-        .expect("Failed to write Cargo.toml");
+    fs::write(".app_build/Cargo.toml", cargo_toml_content).expect("Failed to write Cargo.toml");
 }
 
 fn generate_main_rs(config: &Config, builder: &dyn TargetBuilder) {
@@ -173,15 +173,23 @@ fn generate_main_rs(config: &Config, builder: &dyn TargetBuilder) {
         let ca = config.network.mqtt.ca_cert_file.as_ref().unwrap();
         let cert = config.network.mqtt.client_cert_file.as_ref().unwrap();
         let key = config.network.mqtt.client_key_file.as_ref().unwrap();
-        
+
         // Note the ../../ to point back to the root of the workspace from .app_build/src
-        main_rs.push_str(&format!("pub const CA_CERT: &[u8] = include_bytes!(\"../../{}\");\n", ca));
-        main_rs.push_str(&format!("pub const CLIENT_CERT: &[u8] = include_bytes!(\"../../{}\");\n", cert));
-        main_rs.push_str(&format!("pub const CLIENT_KEY: &[u8] = include_bytes!(\"../../{}\");\n\n", key));
+        main_rs.push_str(&format!(
+            "pub const CA_CERT: &[u8] = include_bytes!(\"../../{}\");\n",
+            ca
+        ));
+        main_rs.push_str(&format!(
+            "pub const CLIENT_CERT: &[u8] = include_bytes!(\"../../{}\");\n",
+            cert
+        ));
+        main_rs.push_str(&format!(
+            "pub const CLIENT_KEY: &[u8] = include_bytes!(\"../../{}\");\n\n",
+            key
+        ));
     }
 
     builder.generate_main_rs(config, &mut main_rs);
 
-    fs::write(".app_build/src/main.rs", main_rs)
-        .expect("Failed to write main.rs");
+    fs::write(".app_build/src/main.rs", main_rs).expect("Failed to write main.rs");
 }

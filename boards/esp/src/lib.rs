@@ -17,6 +17,5 @@ impl EspBoard {
         }
     }
 
-    pub fn run<C: CarController>(&mut self, car: C) {
-    }
+    pub fn run<C: CarController>(&mut self, car: C) {}
 }
