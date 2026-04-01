@@ -1,4 +1,4 @@
-use core_interface::Car;
+use core_interface::CarController;
 
 pub struct EspBoard {
     can_tx_pin: u8,
@@ -17,6 +17,6 @@ impl EspBoard {
         }
     }
 
-    pub fn run<C: Car>(&mut self, car: C) {
+    pub fn run<C: CarController>(&mut self, car: C) {
     }
 }

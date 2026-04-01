@@ -6,8 +6,9 @@
 # Select which board family you want to use. See the available boards in `boards/`
 board = "esp"
 
-# Select which car you want to use. See the available cars in `cars/`
-car = "virtual"
+# Select which brand and platform you want to use.
+brand = "virtual-car"
+platform = "virtual-car"
 
 # ===================================
 #    BOARD SPECIFIC CONFIGURATIONS

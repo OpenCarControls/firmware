@@ -9,7 +9,7 @@ fn main() {
     // Bind the ESP-IDF patches
     esp_idf_svc::sys::link_patches();
 
-    let car = car_{CAR_MODULE}::init();
+    let car = {PLATFORM}_controller::init();
     let mut board = EspBoard::init(CAN_TX_PIN, CAN_RX_PIN, MODEM_TX_PIN, MODEM_RX_PIN);
     
     // Pass control to your board library

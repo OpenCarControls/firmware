@@ -18,7 +18,8 @@ pub struct Config {
 #[derive(Deserialize, Debug)]
 pub struct TargetConfig {
     pub board: String, // e.g., "esp" or "rpi"
-    pub car: String,   // e.g., "hmg"
+    pub brand: String,
+    pub platform: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -151,10 +152,11 @@ edition = "2024"
 [dependencies]
 core-interface = {{ path = "../core-interface" }}
 board-{board} = {{ path = "../boards/{board}" }}
-car-{car} = {{ path = "../cars/{car}" }}
+{platform}-controller = {{ path = "../cars/{brand}/platforms/{platform}" }}
 "#,
         board = config.target.board,
-        car = config.target.car
+        brand = config.target.brand,
+        platform = config.target.platform
     );
 
     builder.extend_cargo_toml(config, &mut cargo_toml_content);

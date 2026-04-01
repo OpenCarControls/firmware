@@ -134,7 +134,7 @@ MCU = "{1}"
 
     fn generate_main_rs(&self, config: &Config, main_rs: &mut String) {
         let esp_hw = Self::get_esp_config(config);
-        let car_module = config.target.car.replace("-", "_");
+        let platform = config.target.platform.replace("-", "_");
 
         let template = include_str!("main.template.rs");
         let generated = template
@@ -142,7 +142,7 @@ MCU = "{1}"
             .replace("{CAN_RX_PIN}", &esp_hw.can_rx_pin.to_string())
             .replace("{MODEM_TX_PIN}", &esp_hw.modem_tx_pin.to_string())
             .replace("{MODEM_RX_PIN}", &esp_hw.modem_rx_pin.to_string())
-            .replace("{CAR_MODULE}", &car_module);
+            .replace("{PLATFORM}", &platform);
 
         main_rs.push_str(&generated);
     }

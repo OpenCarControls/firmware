@@ -10,10 +10,9 @@ This is the embedded Rust monorepo for the hardware controller (ESP32 / Raspberr
 *   **Dynamic Builds:** A custom `xtask` reads a `config.toml` file to dynamically select the board target and inject the correct vehicle crate into a final, ephemeral `.app_build` crate.
 
 ## 🏷️ Versioning & CI/CD
-*   **Independent Crates:** Managed via `release-plz`. Changes to the core cascade safely to vehicle crates.
+*   **Independent Crates:** Managed via `release-plz` (not implemented yet, waiting for at least one car implementation to work). Changes to the core cascade safely to vehicle crates.
 *   **Tagging:** Uses prefixed tags (e.g., `car-hmg-v0.2.1`).
 *   **Agnostic Pipelines:** GitHub Actions trigger on `*-v*.*.*`. The YAML dynamically parses the tag to extract the car name, passes it to `xtask`, builds the `.bin`, and uploads it to GitHub Releases.
-*   **Exclusions:** `car-virtual` has `publish = false` in its `Cargo.toml` and `release = false` in `release-plz.toml` to prevent it from bleeding into public releases.
 
 ## 📡 OTA Manifest Generation
 The CI/CD pipeline generates static `manifest.json` files hosted on GitHub Pages. This includes a Compatibility Matrix (`min_app_version`) to ensure the hardware is never updated to a Protobuf version the phone app cannot decode.
