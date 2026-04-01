@@ -1,0 +1,14 @@
+[workspace]
+members = [
+    "core-interface",
+    "cars/*",
+    "boards/*",
+    "xtask"
+]
+exclude = [
+    ".app_build"
+]
+resolver = "3"
+
+[workspace.dependencies]
+core-interface = { path = "core-interface" }
