@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  format-and-lint:
+    name: Format & Lint Host
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          
+      - name: Check Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint xtask
+        run: cargo clippy --package xtask
+        
+
+  build-and-lint:
+    name: Build & Lint (${{ matrix.board }})
+    needs: format-and-lint
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [esp, rpi]
+    steps:
+      - uses: actions/checkout@v6.0.2
+      
+      - name: Install Rust toolchain (Standard)
+        if: matrix.board == 'rpi'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          
+      - name: Install Rust toolchain (ESP Xtensa)
+        if: matrix.board == 'esp'
+        uses: esp-rs/xtensa-toolchain@v1.6.0
+        with:
+          default: true
+          buildtargets: esp32
+          ldproxy: true
+        
+      - uses: Swatinem/rust-cache@v2.9.1
+      
+      - name: Override board config
+        run: sed -i 's/^board\s*=\s*".*"/board = "${{ matrix.board }}"/' config.toml
+        
+      - name: Run Clippy via xtask
+        run: cargo xtask clippy
+        
+      - name: Build Firmware via xtask
+        run: cargo xtask build

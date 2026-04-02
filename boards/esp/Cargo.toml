@@ -1,0 +1,8 @@
+[package]
+name = "board-esp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+core-interface = { path = "../../core-interface" }
+esp-idf-svc = "0.52.1"

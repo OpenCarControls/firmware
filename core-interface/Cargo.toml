@@ -1,0 +1,7 @@
+[package]
+name = "core-interface"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+embedded-can = "0.4.1"
