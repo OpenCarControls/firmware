@@ -5,6 +5,7 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive && \
     gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
     python3 python3-pip python3-venv \
     flex bison gperf ninja-build ccache libffi-dev libssl-dev dfu-util libusb-1.0-0 cmake \
+    protobuf-compiler \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

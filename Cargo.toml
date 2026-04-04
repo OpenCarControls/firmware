@@ -10,5 +10,13 @@ exclude = [
 ]
 resolver = "3"
 
+default-members = [
+    "core-interface",
+    "cars/**/platforms/*"
+]
+
 [workspace.dependencies]
 core-interface = { path = "core-interface" }
+prost = { version = "0.14.3", default-features = false, features = [ "derive" ]}
+prost-build = "0.14.3"
+bytes = { version = "=1.11.1", default-features = false }
