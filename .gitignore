@@ -26,4 +26,3 @@ certs/*
 
 # xtask temporary files
 .app_build
-xtask/src/board_registry.rs

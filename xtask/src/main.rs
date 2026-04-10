@@ -91,7 +91,7 @@ fn main() {
 
     builder.validate(&config);
 
-    builder.generate_config_rs(&config);
+    builder.generate_app_build(&config);
 
     match command {
         "run" => builder.run(&config),
@@ -108,7 +108,7 @@ fn main() {
 pub trait TargetBuilder {
     fn validate(&self, config: &Config);
 
-    fn generate_config_rs(&self, config: &Config);
+    fn generate_app_build(&self, config: &Config);
 
     fn compile(&self, config: &Config);
 

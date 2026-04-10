@@ -5,6 +5,5 @@ edition = "2024"
 
 [dependencies]
 core-interface = { path = "../../core-interface" }
-embassy-executor = { version = "0.9.1", features = ["arch-std", "executor-thread"] }
-embassy-time = { version = "0.5.1", features = ["std"] }
+embassy-executor = { version = "0.9.1", default-features = false }
 critical-section = { version = "1", features = ["std"] }

@@ -21,8 +21,6 @@ can_tx_pin = 5
 can_rx_pin = 4
 modem_tx_pin = 17
 modem_rx_pin = 16
-led_pin = 2
-blink_interval_ms = 500
 
 # Configuration for PC board
 [hardware.pc]

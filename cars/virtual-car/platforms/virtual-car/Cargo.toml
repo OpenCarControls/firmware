@@ -6,7 +6,10 @@ edition = "2024"
 [dependencies]
 core-interface = { workspace = true }
 prost = { workspace = true }
-bytes ={ workspace = true }
+bytes = { workspace = true }
+embassy-executor = { version = "0.9.1", default-features = false }
+embassy-sync = "0.7"
+embassy-time = { version = "0.5.1", default-features = false }
 
 [build-dependencies]
 prost-build = { workspace = true }
