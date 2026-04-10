@@ -1,0 +1,10 @@
+[package]
+name = "board-pc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+core-interface = { path = "../../core-interface" }
+embassy-executor = { version = "0.9.1", features = ["arch-std", "executor-thread"] }
+embassy-time = { version = "0.5.1", features = ["std"] }
+critical-section = { version = "1", features = ["std"] }

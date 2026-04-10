@@ -5,4 +5,11 @@ edition = "2024"
 
 [dependencies]
 core-interface = { path = "../../core-interface" }
-esp-idf-svc = "0.52.1"
+esp-hal = { version = "1.0.0", features = ["unstable"] }
+esp-rtos = { version = "0.2.0", features = ["embassy"] }
+esp-backtrace = { version = "0.18.1", features = ["panic-handler", "println"] }
+esp-println = { version = "0.16.1", features = ["log-04"] }
+esp-alloc = "0.7.0"
+log = "0.4.29"
+embassy-executor = "0.9.1"
+embassy-time = "0.5.1"

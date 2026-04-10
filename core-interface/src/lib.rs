@@ -1,25 +1,29 @@
 #![no_std]
 
-extern crate alloc;
-
-use alloc::string::ToString;
-use alloc::vec;
-
 pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/opencar.core.v1.rs"));
 }
 
-use proto::MessageEnvelope;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
+use embassy_time::{Duration, Timer};
 
-pub fn create_test_envelope() -> MessageEnvelope {
-    MessageEnvelope {
-        car_id: "virtual_car".to_string(),
-        message_id: 1,
-        timestamp_ms: 0,
-        r#type: proto::message_envelope::MessageType::StateBroadcast as i32,
-        success: true,
-        error_message: "".to_string(),
-        payload: vec![],
+pub enum LedCommand {
+    On,
+    Off,
+}
+
+pub static LED_CHANNEL: Channel<CriticalSectionRawMutex, LedCommand, 1> = Channel::new();
+
+#[embassy_executor::task]
+pub async fn blinky_task(interval_ms: u64) {
+    let delay = Duration::from_millis(interval_ms);
+    let sender = LED_CHANNEL.sender();
+    loop {
+        sender.send(LedCommand::On).await;
+        Timer::after(delay).await;
+        sender.send(LedCommand::Off).await;
+        Timer::after(delay).await;
     }
 }
 

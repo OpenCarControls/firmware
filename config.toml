@@ -16,14 +16,16 @@ platform = "virtual-car"
 
 # Configuration for ESP family boards
 [hardware.esp]
-mcu = "esp32"
+mcu = "esp32s3"
 can_tx_pin = 5
 can_rx_pin = 4
 modem_tx_pin = 17
 modem_rx_pin = 16
+led_pin = 2
+blink_interval_ms = 500
 
-# Configuration for rpi board
-[hardware.rpi]
+# Configuration for PC board
+[hardware.pc]
 can_interface = "can0"
 
 # ===========================
