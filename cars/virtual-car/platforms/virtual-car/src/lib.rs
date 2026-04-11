@@ -9,9 +9,8 @@ use embedded_can::{Id, StandardId};
 use prost::Message;
 
 use core_interface::{
-    CanFilter, CanFrame, VehicleStatePayload,
     ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, CAN_RX_CHANNEL, CAN_TX_CHANNEL, CMD_RESP_CHANNEL,
-    VEHICLE_STATE_CHANNEL,
+    CanFilter, CanFrame, VEHICLE_STATE_CHANNEL, VehicleStatePayload,
 };
 
 pub mod proto {
@@ -70,9 +69,21 @@ pub(crate) fn encode_state(state: &VirtualCarState) -> VehicleStatePayload {
 ///
 /// Mask 0x7FF = exact standard-ID match (all 11 bits must match).
 pub const CAN_FILTERS: &[CanFilter] = &[
-    CanFilter { bus_id: 0, id: Id::Standard(unsafe { StandardId::new_unchecked(0x100) }), mask: 0x7FF },
-    CanFilter { bus_id: 0, id: Id::Standard(unsafe { StandardId::new_unchecked(0x200) }), mask: 0x7FF },
-    CanFilter { bus_id: 0, id: Id::Standard(unsafe { StandardId::new_unchecked(0x300) }), mask: 0x7FF },
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(unsafe { StandardId::new_unchecked(0x100) }),
+        mask: 0x7FF,
+    },
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(unsafe { StandardId::new_unchecked(0x200) }),
+        mask: 0x7FF,
+    },
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(unsafe { StandardId::new_unchecked(0x300) }),
+        mask: 0x7FF,
+    },
 ];
 
 // ── Vehicle Tasks ─────────────────────────────────────────────────────────────
@@ -141,10 +152,14 @@ async fn send_can_request(id: StandardId, data: &[u8]) {
     buf[..dlc as usize].copy_from_slice(&data[..dlc as usize]);
     CAN_TX_CHANNEL
         .sender()
-        .send(CanFrame { bus_id: 0, id: Id::Standard(id), data: buf, dlc })
+        .send(CanFrame {
+            bus_id: 0,
+            id: Id::Standard(id),
+            data: buf,
+            dlc,
+        })
         .await;
 }
-
 
 /// state update to `VEHICLE_STATE_CHANNEL`, and sends a `CommandResponse` to
 /// `CMD_RESP_CHANNEL`. Both BLE and MQTT may send basic commands.
@@ -152,11 +167,10 @@ async fn send_can_request(id: StandardId, data: &[u8]) {
 pub async fn handle_basic_commands_task() {
     loop {
         let inbound = BASIC_CMD_CHANNEL.receiver().receive().await;
-        let (success, error_message) =
-            match process_basic_command(inbound.bytes.as_slice()).await {
-                Ok(()) => (true, String::new()),
-                Err(e) => (false, String::from(e)),
-            };
+        let (success, error_message) = match process_basic_command(inbound.bytes.as_slice()).await {
+            Ok(()) => (true, String::new()),
+            Err(e) => (false, String::from(e)),
+        };
         let response = core_interface::proto::CommandResponse {
             message_id: inbound.message_id,
             success,
@@ -171,8 +185,7 @@ pub async fn handle_basic_commands_task() {
 }
 
 pub async fn process_basic_command(bytes: &[u8]) -> Result<(), &'static str> {
-    let cmd =
-        proto::BasicCommand::decode(bytes).map_err(|_| "Failed to decode BasicCommand")?;
+    let cmd = proto::BasicCommand::decode(bytes).map_err(|_| "Failed to decode BasicCommand")?;
     match cmd.action {
         Some(proto::basic_command::Action::DoorLock(door_lock)) => {
             let payload = {

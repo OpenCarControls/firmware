@@ -1,7 +1,6 @@
 use core_interface::{
-    init, publish_single_debug_batch, CanDebugFilter, CanRawCapture,
-    BLE_TX_CHANNEL, MQTT_TX_CHANNEL,
-    proto,
+    BLE_TX_CHANNEL, CanDebugFilter, CanRawCapture, MQTT_TX_CHANNEL, init, proto,
+    publish_single_debug_batch,
 };
 use embedded_can::{ExtendedId, Id, StandardId};
 
@@ -38,11 +37,17 @@ fn ext_capture(bus_id: u8, raw_id: u32, data: &[u8]) -> CanRawCapture {
 }
 
 fn std_filter(raw_id: u16, mask: u32) -> CanDebugFilter {
-    CanDebugFilter { can_id: raw_id as u32, is_extended_id: false, mask }
+    CanDebugFilter {
+        can_id: raw_id as u32,
+        is_extended_id: false,
+        mask,
+    }
 }
 
 fn recv_debug_update() -> proto::CanDebugUpdate {
-    let msg = BLE_TX_CHANNEL.try_receive().expect("expected message on BLE_TX_CHANNEL");
+    let msg = BLE_TX_CHANNEL
+        .try_receive()
+        .expect("expected message on BLE_TX_CHANNEL");
     match msg.payload {
         Some(proto::device_to_app::Payload::CanDebugUpdate(u)) => u,
         other => panic!("expected CanDebugUpdate, got {:?}", other),
@@ -67,8 +72,14 @@ fn publish_batch_sends_to_ble_only() {
     init(PLATFORM_ID);
     let cap = std_capture(0, 0x100, &[0x01], TS);
     embassy_futures::block_on(publish_single_debug_batch(&[cap], &[], 0, PLATFORM_ID, TS));
-    assert!(BLE_TX_CHANNEL.try_receive().is_ok(), "expected BLE_TX message");
-    assert!(MQTT_TX_CHANNEL.try_receive().is_err(), "MQTT_TX should be empty");
+    assert!(
+        BLE_TX_CHANNEL.try_receive().is_ok(),
+        "expected BLE_TX message"
+    );
+    assert!(
+        MQTT_TX_CHANNEL.try_receive().is_err(),
+        "MQTT_TX should be empty"
+    );
 }
 
 #[test]
@@ -105,7 +116,13 @@ fn publish_batch_blocklist_excludes_matched_frame() {
     init(PLATFORM_ID);
     let cap = std_capture(0, 0x100, &[0xFF], TS);
     let filter = std_filter(0x100, 0x7FF); // exact match
-    embassy_futures::block_on(publish_single_debug_batch(&[cap], &[filter], 0, PLATFORM_ID, TS));
+    embassy_futures::block_on(publish_single_debug_batch(
+        &[cap],
+        &[filter],
+        0,
+        PLATFORM_ID,
+        TS,
+    ));
     // Frame matched the blocklist — nothing to send, dropped=0, so BLE_TX stays empty.
     assert!(BLE_TX_CHANNEL.try_receive().is_err());
 }
@@ -121,7 +138,13 @@ fn publish_batch_blocklist_mask_excludes_range() {
         std_capture(0, 0x10F, &[2], TS),
         std_capture(0, 0x200, &[3], TS), // should pass — different top bits
     ];
-    embassy_futures::block_on(publish_single_debug_batch(&frames, &[filter], 0, PLATFORM_ID, TS));
+    embassy_futures::block_on(publish_single_debug_batch(
+        &frames,
+        &[filter],
+        0,
+        PLATFORM_ID,
+        TS,
+    ));
     let update = recv_debug_update();
     assert_eq!(update.frames.len(), 1, "only 0x200 should pass");
     assert_eq!(update.frames[0].can_id, 0x200);
@@ -133,7 +156,13 @@ fn publish_batch_non_matching_filter_passes_frame() {
     init(PLATFORM_ID);
     let cap = std_capture(0, 0x100, &[0xAB], TS);
     let filter = std_filter(0x200, 0x7FF); // targets 0x200, not 0x100
-    embassy_futures::block_on(publish_single_debug_batch(&[cap], &[filter], 0, PLATFORM_ID, TS));
+    embassy_futures::block_on(publish_single_debug_batch(
+        &[cap],
+        &[filter],
+        0,
+        PLATFORM_ID,
+        TS,
+    ));
     let update = recv_debug_update();
     assert_eq!(update.frames.len(), 1);
     assert_eq!(update.frames[0].can_id, 0x100);
@@ -172,9 +201,19 @@ fn publish_batch_std_filter_does_not_block_extended_id_frame() {
     // with the same numeric ID — the id types are different.
     let cap = ext_capture(0, 0x100, &[0x01]);
     let filter = std_filter(0x100, 0x7FF); // is_extended_id: false
-    embassy_futures::block_on(publish_single_debug_batch(&[cap], &[filter], 0, PLATFORM_ID, TS));
+    embassy_futures::block_on(publish_single_debug_batch(
+        &[cap],
+        &[filter],
+        0,
+        PLATFORM_ID,
+        TS,
+    ));
     let update = recv_debug_update();
-    assert_eq!(update.frames.len(), 1, "extended-ID frame must not be blocked by a standard-ID filter");
+    assert_eq!(
+        update.frames.len(),
+        1,
+        "extended-ID frame must not be blocked by a standard-ID filter"
+    );
 }
 
 #[test]
@@ -183,10 +222,24 @@ fn publish_batch_extended_filter_does_not_block_standard_id_frame() {
     init(PLATFORM_ID);
     // Extended-ID filter must NOT block a standard-ID frame with the same numeric ID.
     let cap = std_capture(0, 0x100, &[0x01], TS);
-    let filter = CanDebugFilter { can_id: 0x100, is_extended_id: true, mask: 0x1FFFFFFF };
-    embassy_futures::block_on(publish_single_debug_batch(&[cap], &[filter], 0, PLATFORM_ID, TS));
+    let filter = CanDebugFilter {
+        can_id: 0x100,
+        is_extended_id: true,
+        mask: 0x1FFFFFFF,
+    };
+    embassy_futures::block_on(publish_single_debug_batch(
+        &[cap],
+        &[filter],
+        0,
+        PLATFORM_ID,
+        TS,
+    ));
     let update = recv_debug_update();
-    assert_eq!(update.frames.len(), 1, "standard-ID frame must not be blocked by an extended-ID filter");
+    assert_eq!(
+        update.frames.len(),
+        1,
+        "standard-ID frame must not be blocked by an extended-ID filter"
+    );
 }
 
 #[test]
@@ -195,7 +248,9 @@ fn publish_batch_platform_id_in_output() {
     init(PLATFORM_ID);
     let cap = std_capture(0, 0x100, &[0x01], TS);
     embassy_futures::block_on(publish_single_debug_batch(&[cap], &[], 0, PLATFORM_ID, TS));
-    let msg = BLE_TX_CHANNEL.try_receive().expect("expected DeviceToApp on BLE_TX");
+    let msg = BLE_TX_CHANNEL
+        .try_receive()
+        .expect("expected DeviceToApp on BLE_TX");
     assert_eq!(msg.platform_id, PLATFORM_ID);
 }
 
@@ -206,7 +261,11 @@ fn publish_batch_zero_dlc_frame_produces_empty_data() {
     let cap = std_capture(0, 0x100, &[], TS); // dlc = 0
     embassy_futures::block_on(publish_single_debug_batch(&[cap], &[], 0, PLATFORM_ID, TS));
     let update = recv_debug_update();
-    assert_eq!(update.frames[0].data.len(), 0, "zero-DLC frame must produce empty data field");
+    assert_eq!(
+        update.frames[0].data.len(),
+        0,
+        "zero-DLC frame must produce empty data field"
+    );
 }
 
 #[test]
@@ -216,7 +275,13 @@ fn publish_batch_all_filtered_with_drops_still_sends() {
     // Frame is blocked by filter AND there are dropped frames — batch must still be sent.
     let cap = std_capture(0, 0x100, &[0xFF], TS);
     let filter = std_filter(0x100, 0x7FF);
-    embassy_futures::block_on(publish_single_debug_batch(&[cap], &[filter], 5, PLATFORM_ID, TS));
+    embassy_futures::block_on(publish_single_debug_batch(
+        &[cap],
+        &[filter],
+        5,
+        PLATFORM_ID,
+        TS,
+    ));
     let update = recv_debug_update();
     assert_eq!(update.frames.len(), 0, "filtered frame should not appear");
     assert_eq!(update.dropped_frames, 5, "dropped count must be included");
@@ -232,6 +297,15 @@ fn publish_batch_second_blocklist_entry_excludes_frame() {
         std_filter(0x100, 0x7FF), // doesn't match 0x300
         std_filter(0x300, 0x7FF), // matches — should block
     ];
-    embassy_futures::block_on(publish_single_debug_batch(&[cap], &filters, 0, PLATFORM_ID, TS));
-    assert!(BLE_TX_CHANNEL.try_receive().is_err(), "frame matching second filter must be excluded");
+    embassy_futures::block_on(publish_single_debug_batch(
+        &[cap],
+        &filters,
+        0,
+        PLATFORM_ID,
+        TS,
+    ));
+    assert!(
+        BLE_TX_CHANNEL.try_receive().is_err(),
+        "frame matching second filter must be excluded"
+    );
 }

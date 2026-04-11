@@ -66,8 +66,17 @@ fn empty_filter_list_rejects_everything() {
 #[test]
 fn exact_extended_id_match_passes() {
     let id = ExtendedId::new(0x1234_5678).unwrap();
-    let frame = CanFrame { bus_id: 0, id: Id::Extended(id), data: [0u8; 8], dlc: 0 };
-    let filter = CanFilter { bus_id: 0, id: Id::Extended(id), mask: u32::MAX };
+    let frame = CanFrame {
+        bus_id: 0,
+        id: Id::Extended(id),
+        data: [0u8; 8],
+        dlc: 0,
+    };
+    let filter = CanFilter {
+        bus_id: 0,
+        id: Id::Extended(id),
+        mask: u32::MAX,
+    };
     assert!(passes_filter(&frame, &[filter]));
 }
 
@@ -75,8 +84,17 @@ fn exact_extended_id_match_passes() {
 fn wrong_extended_id_rejected() {
     let frame_id = ExtendedId::new(0x1234_5678).unwrap();
     let filter_id = ExtendedId::new(0x1234_5679).unwrap();
-    let frame = CanFrame { bus_id: 0, id: Id::Extended(frame_id), data: [0u8; 8], dlc: 0 };
-    let filter = CanFilter { bus_id: 0, id: Id::Extended(filter_id), mask: u32::MAX };
+    let frame = CanFrame {
+        bus_id: 0,
+        id: Id::Extended(frame_id),
+        data: [0u8; 8],
+        dlc: 0,
+    };
+    let filter = CanFilter {
+        bus_id: 0,
+        id: Id::Extended(filter_id),
+        mask: u32::MAX,
+    };
     assert!(!passes_filter(&frame, &[filter]));
 }
 

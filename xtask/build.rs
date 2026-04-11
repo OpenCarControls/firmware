@@ -25,8 +25,9 @@ fn main() {
                 if builder_file.exists() {
                     println!("cargo:rerun-if-changed={}", builder_file.display());
 
-                    let abs_path = format!("{manifest_dir}/../boards/{board_name}/xtask_builder.rs")
-                        .replace('\\', "/");
+                    let abs_path =
+                        format!("{manifest_dir}/../boards/{board_name}/xtask_builder.rs")
+                            .replace('\\', "/");
 
                     // Note: This path is evaluated relative to `xtask/src/main.rs` where the include! macro sits
                     mods.push_str(&format!(

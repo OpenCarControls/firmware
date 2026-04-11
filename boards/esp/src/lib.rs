@@ -2,7 +2,9 @@
 
 use core_interface::CanFilter;
 #[cfg(feature = "hardware")]
-use core_interface::{CanFrame, CanRawCapture, CAN_DEBUG_RX_CHANNEL, CAN_RX_CHANNEL, CAN_TX_CHANNEL};
+use core_interface::{
+    CAN_DEBUG_RX_CHANNEL, CAN_RX_CHANNEL, CAN_TX_CHANNEL, CanFrame, CanRawCapture,
+};
 #[cfg(feature = "hardware")]
 use embedded_can::{Id, StandardId};
 
@@ -13,8 +15,8 @@ use embedded_hal_bus::spi::ExclusiveDevice;
 #[cfg(feature = "hardware")]
 use esp_hal::{
     delay::Delay,
-    gpio::{Input, Output},
     gpio::interconnect::{PeripheralInput, PeripheralOutput},
+    gpio::{Input, Output},
     spi::master::Spi,
     twai::{self, Twai, TwaiMode},
 };
@@ -22,11 +24,11 @@ use esp_hal::{
 pub use mcp2515::{CanSpeed, McpSpeed};
 #[cfg(feature = "hardware")]
 use mcp2515::{
+    MCP2515,
     error::Error as McpError,
     filter::{RxFilter, RxMask},
     frame::CanFrame as McpFrame,
     regs::OpMode,
-    MCP2515,
 };
 
 // ── Type Aliases ─────────────────────────────────────────────────────────────
@@ -37,7 +39,8 @@ pub type TwaiDriver = Twai<'static, esp_hal::Blocking>;
 
 #[cfg(feature = "hardware")]
 /// Concrete MCP2515 driver type (blocking SPI, INT-pin driven).
-pub type Mcp2515Driver = MCP2515<ExclusiveDevice<Spi<'static, esp_hal::Blocking>, Output<'static>, Delay>>;
+pub type Mcp2515Driver =
+    MCP2515<ExclusiveDevice<Spi<'static, esp_hal::Blocking>, Output<'static>, Delay>>;
 
 #[cfg(feature = "hardware")]
 /// The INT input pin type used for MCP2515 interrupt-driven RX.
@@ -47,17 +50,26 @@ pub type CanIntPin = Input<'static>;
 
 #[cfg(feature = "hardware")]
 pub fn start(spawner: &embassy_executor::Spawner) {
-    spawner.spawn(core_interface::process_ble_commands_task()).unwrap();
-    spawner.spawn(core_interface::process_mqtt_commands_task()).unwrap();
-    spawner.spawn(core_interface::route_responses_task()).unwrap();
+    spawner
+        .spawn(core_interface::process_ble_commands_task())
+        .unwrap();
+    spawner
+        .spawn(core_interface::process_mqtt_commands_task())
+        .unwrap();
+    spawner
+        .spawn(core_interface::route_responses_task())
+        .unwrap();
     spawner.spawn(core_interface::publish_state_task()).unwrap();
-    spawner.spawn(core_interface::publish_can_debug_task()).unwrap();
+    spawner
+        .spawn(core_interface::publish_can_debug_task())
+        .unwrap();
 }
 
 // ── CAN ID helpers ────────────────────────────────────────────────────────────
 
 // ── TWAI (built-in CAN) ───────────────────────────────────────────────────────
-#[cfg(feature = "hardware")]/// Initialises the TWAI peripheral with an accept-all hardware filter; actual
+#[cfg(feature = "hardware")]
+/// Initialises the TWAI peripheral with an accept-all hardware filter; actual
 /// frame selection is done in software inside `run_twai_loop`.
 pub fn init_twai(
     peripheral: impl twai::Instance + 'static,
@@ -69,8 +81,10 @@ pub fn init_twai(
     let accept_all = twai::filter::SingleStandardFilter::new_from_code_mask(
         unsafe { twai::StandardId::new_unchecked(0) },
         unsafe { twai::StandardId::new_unchecked(0) },
-        false, false,
-        [0, 0], [0, 0],
+        false,
+        false,
+        [0, 0],
+        [0, 0],
     );
     let mut cfg = twai::TwaiConfiguration::new(
         peripheral,
@@ -129,7 +143,9 @@ pub async fn run_twai_loop(driver: TwaiDriver, bus_id: u8, filters: &'static [Ca
                         loop {
                             match tx.transmit(&f) {
                                 Ok(_) | Err(nb::Error::Other(_)) => break,
-                                Err(nb::Error::WouldBlock) => Timer::after(Duration::from_micros(100)).await,
+                                Err(nb::Error::WouldBlock) => {
+                                    Timer::after(Duration::from_micros(100)).await
+                                }
                             }
                         }
                     }
@@ -151,7 +167,12 @@ fn twai_to_core_frame(frame: twai::EspTwaiFrame, bus_id: u8) -> CanFrame {
     let raw = EmbeddedFrame::data(&frame);
     let mut data = [0u8; 8];
     data[..raw.len()].copy_from_slice(raw);
-    CanFrame { bus_id, id, data, dlc }
+    CanFrame {
+        bus_id,
+        id,
+        data,
+        dlc,
+    }
 }
 
 #[cfg(feature = "hardware")]
@@ -182,8 +203,12 @@ pub(crate) fn compute_mcp_masks(filters: &[CanFilter], bus_id: u8) -> (u32, u32)
 
 #[cfg(feature = "hardware")]
 const RX_FILTERS: [RxFilter; 6] = [
-    RxFilter::F0, RxFilter::F1, RxFilter::F2,
-    RxFilter::F3, RxFilter::F4, RxFilter::F5,
+    RxFilter::F0,
+    RxFilter::F1,
+    RxFilter::F2,
+    RxFilter::F3,
+    RxFilter::F4,
+    RxFilter::F5,
 ];
 
 #[cfg(feature = "hardware")]
@@ -206,11 +231,20 @@ pub fn init_mcp2515(
         .with_sck(sck_pin)
         .with_mosi(mosi_pin)
         .with_miso(miso_pin);
-    let spi_dev = ExclusiveDevice::new(spi_bus, cs_pin, Delay::new())
-        .expect("SPI device init failed");
+    let spi_dev =
+        ExclusiveDevice::new(spi_bus, cs_pin, Delay::new()).expect("SPI device init failed");
 
     let mut mcp = MCP2515::new(spi_dev);
-    mcp.init(&mut Delay::new(), mcp2515::Settings { mode: OpMode::Normal, can_speed, mcp_speed, clkout_en: false }).unwrap();
+    mcp.init(
+        &mut Delay::new(),
+        mcp2515::Settings {
+            mode: OpMode::Normal,
+            can_speed,
+            mcp_speed,
+            clkout_en: false,
+        },
+    )
+    .unwrap();
 
     // Collect up to 6 filter IDs for this bus on the stack.
     let mut ids: [Option<Id>; 6] = [None; 6];
@@ -252,8 +286,18 @@ pub async fn run_mcp2515_loop(
         let debug_now = core_interface::is_can_debug_active();
         if debug_now && !was_debug_active {
             // Accept all frames in hardware so the debug tap sees raw traffic.
-            driver.set_mask(RxMask::Mask0, Id::Standard(unsafe { StandardId::new_unchecked(0) })).ok();
-            driver.set_mask(RxMask::Mask1, Id::Standard(unsafe { StandardId::new_unchecked(0) })).ok();
+            driver
+                .set_mask(
+                    RxMask::Mask0,
+                    Id::Standard(unsafe { StandardId::new_unchecked(0) }),
+                )
+                .ok();
+            driver
+                .set_mask(
+                    RxMask::Mask1,
+                    Id::Standard(unsafe { StandardId::new_unchecked(0) }),
+                )
+                .ok();
         } else if !debug_now && was_debug_active {
             // Restore vehicle-specific hardware masks.
             let (mask0, mask1) = compute_mcp_masks(filters, bus_id);
@@ -314,7 +358,12 @@ fn mcp_to_core_frame(frame: McpFrame, bus_id: u8) -> CanFrame {
     let raw = EmbeddedFrame::data(&frame);
     let mut data = [0u8; 8];
     data[..raw.len()].copy_from_slice(raw);
-    CanFrame { bus_id, id, data, dlc }
+    CanFrame {
+        bus_id,
+        id,
+        data,
+        dlc,
+    }
 }
 
 #[cfg(feature = "hardware")]

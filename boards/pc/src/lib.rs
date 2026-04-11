@@ -1,15 +1,25 @@
-use core_interface::{CanFilter, CanFrame, CanRawCapture, CAN_DEBUG_RX_CHANNEL, CAN_RX_CHANNEL, CAN_TX_CHANNEL};
-use embedded_can::{Frame as EmbeddedFrame, Id};
+use core_interface::{
+    CAN_DEBUG_RX_CHANNEL, CAN_RX_CHANNEL, CAN_TX_CHANNEL, CanFilter, CanFrame, CanRawCapture,
+};
 use embassy_time::{Duration, Timer};
+use embedded_can::{Frame as EmbeddedFrame, Id};
 use socketcan::{CanSocket, Socket};
 use std::io::ErrorKind;
 
 pub fn start(spawner: &embassy_executor::Spawner) {
-    spawner.spawn(core_interface::process_ble_commands_task()).unwrap();
-    spawner.spawn(core_interface::process_mqtt_commands_task()).unwrap();
-    spawner.spawn(core_interface::route_responses_task()).unwrap();
+    spawner
+        .spawn(core_interface::process_ble_commands_task())
+        .unwrap();
+    spawner
+        .spawn(core_interface::process_mqtt_commands_task())
+        .unwrap();
+    spawner
+        .spawn(core_interface::route_responses_task())
+        .unwrap();
     spawner.spawn(core_interface::publish_state_task()).unwrap();
-    spawner.spawn(core_interface::publish_can_debug_task()).unwrap();
+    spawner
+        .spawn(core_interface::publish_can_debug_task())
+        .unwrap();
 }
 
 // ── Frame conversion helpers ──────────────────────────────────────────────────
@@ -25,7 +35,12 @@ pub(crate) fn socketcan_to_core_frame(f: &socketcan::CanDataFrame, bus_id: u8) -
     let mut data = [0u8; 8];
     let bytes = f.data();
     data[..bytes.len()].copy_from_slice(bytes);
-    CanFrame { bus_id, id, data, dlc }
+    CanFrame {
+        bus_id,
+        id,
+        data,
+        dlc,
+    }
 }
 
 /// Converts a `core_interface::CanFrame` into a `socketcan::CanFrame` for
@@ -53,15 +68,13 @@ pub(crate) fn core_to_socketcan_frame(frame: &CanFrame) -> Option<socketcan::Can
 ///   `bus_id` and writes them to the socket. Frames for other buses are returned
 ///   to the channel so the corresponding task can pick them up.
 #[embassy_executor::task(pool_size = 4)]
-pub async fn socket_can_task(
-    interface: &'static str,
-    bus_id: u8,
-    filters: &'static [CanFilter],
-) {
+pub async fn socket_can_task(interface: &'static str, bus_id: u8, filters: &'static [CanFilter]) {
     let socket = CanSocket::open(interface)
         .unwrap_or_else(|e| panic!("Failed to open SocketCAN interface '{}': {}", interface, e));
 
-    socket.set_nonblocking(true).expect("Failed to set SocketCAN socket to non-blocking");
+    socket
+        .set_nonblocking(true)
+        .expect("Failed to set SocketCAN socket to non-blocking");
 
     loop {
         Timer::after(Duration::from_millis(1)).await;
@@ -197,23 +210,32 @@ mod tests {
     fn core_to_sc_standard_id_roundtrip() {
         let core = core_std_frame(0, 0x123, &[1, 2, 3]);
         let sc = core_to_socketcan_frame(&core).unwrap();
-        let back = socketcan_to_core_frame(match &sc {
-            socketcan::CanFrame::Data(f) => f,
-            _ => panic!("expected data frame"),
-        }, 0);
+        let back = socketcan_to_core_frame(
+            match &sc {
+                socketcan::CanFrame::Data(f) => f,
+                _ => panic!("expected data frame"),
+            },
+            0,
+        );
         assert_eq!(back.id, core.id);
         assert_eq!(back.dlc, core.dlc);
-        assert_eq!(&back.data[..back.dlc as usize], &core.data[..core.dlc as usize]);
+        assert_eq!(
+            &back.data[..back.dlc as usize],
+            &core.data[..core.dlc as usize]
+        );
     }
 
     #[test]
     fn core_to_sc_extended_id_roundtrip() {
         let core = core_ext_frame(1, 0x1FFFFFFF, &[0xDE, 0xAD]);
         let sc = core_to_socketcan_frame(&core).unwrap();
-        let back = socketcan_to_core_frame(match &sc {
-            socketcan::CanFrame::Data(f) => f,
-            _ => panic!("expected data frame"),
-        }, 1);
+        let back = socketcan_to_core_frame(
+            match &sc {
+                socketcan::CanFrame::Data(f) => f,
+                _ => panic!("expected data frame"),
+            },
+            1,
+        );
         assert_eq!(back.id, core.id);
         assert_eq!(&back.data[..back.dlc as usize], &[0xDE, 0xAD]);
     }
@@ -224,4 +246,3 @@ mod tests {
         assert!(core_to_socketcan_frame(&core).is_some());
     }
 }
-

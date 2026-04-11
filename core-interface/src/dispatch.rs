@@ -25,38 +25,36 @@ pub async fn handle_ble_message(msg: proto::AppToDevice) {
         return;
     }
     match msg.payload {
-        Some(proto::app_to_device::Payload::SystemCommand(cmd)) => {
-            match cmd.action {
-                Some(proto::system_command::Action::RestartCommand(restart)) => {
-                    SYSTEM_COMMAND_CHANNEL
-                        .sender()
-                        .send(proto::SystemCommand {
-                            action: Some(proto::system_command::Action::RestartCommand(restart)),
-                        })
-                        .await;
-                }
-                Some(proto::system_command::Action::SetCanDebugEnabled(req)) => {
-                    if req.enabled {
-                        can_debug::enable_can_debug(&req.bus_ids).await;
-                    } else {
-                        can_debug::disable_can_debug();
-                    }
-                }
-                Some(proto::system_command::Action::UpdateCanDebugFilters(req)) => {
-                    let new: Vec<CanDebugFilter> = req
-                        .filters
-                        .into_iter()
-                        .map(|f| CanDebugFilter {
-                            can_id: f.can_id,
-                            is_extended_id: f.is_extended_id,
-                            mask: f.mask,
-                        })
-                        .collect();
-                    can_debug::update_can_debug_filters(new).await;
-                }
-                None => {}
+        Some(proto::app_to_device::Payload::SystemCommand(cmd)) => match cmd.action {
+            Some(proto::system_command::Action::RestartCommand(restart)) => {
+                SYSTEM_COMMAND_CHANNEL
+                    .sender()
+                    .send(proto::SystemCommand {
+                        action: Some(proto::system_command::Action::RestartCommand(restart)),
+                    })
+                    .await;
             }
-        }
+            Some(proto::system_command::Action::SetCanDebugEnabled(req)) => {
+                if req.enabled {
+                    can_debug::enable_can_debug(&req.bus_ids).await;
+                } else {
+                    can_debug::disable_can_debug();
+                }
+            }
+            Some(proto::system_command::Action::UpdateCanDebugFilters(req)) => {
+                let new: Vec<CanDebugFilter> = req
+                    .filters
+                    .into_iter()
+                    .map(|f| CanDebugFilter {
+                        can_id: f.can_id,
+                        is_extended_id: f.is_extended_id,
+                        mask: f.mask,
+                    })
+                    .collect();
+                can_debug::update_can_debug_filters(new).await;
+            }
+            None => {}
+        },
         Some(proto::app_to_device::Payload::BasicCommandBytes(bytes)) => {
             BASIC_CMD_CHANNEL
                 .sender()

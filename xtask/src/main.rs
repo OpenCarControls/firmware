@@ -51,7 +51,9 @@ fn main() {
     match command {
         "build" | "run" | "clippy" | "test" => {}
         _ => {
-            eprintln!("Usage: cargo xtask <build|run|clippy|test> [config_file.toml] [--board <board>] [--brand <brand>] [--platform <platform>] [--on-hardware]");
+            eprintln!(
+                "Usage: cargo xtask <build|run|clippy|test> [config_file.toml] [--board <board>] [--brand <brand>] [--platform <platform>] [--on-hardware]"
+            );
             exit(1);
         }
     }
@@ -66,11 +68,21 @@ fn main() {
     let mut remaining = args[2..].iter();
     while let Some(arg) = remaining.next() {
         match arg.as_str() {
-            "--board"       => { override_board    = remaining.next().cloned(); }
-            "--brand"       => { override_brand    = remaining.next().cloned(); }
-            "--platform"    => { override_platform = remaining.next().cloned(); }
-            "--on-hardware" => { on_hardware = true; }
-            other if !other.starts_with("--") => { config_path = other; }
+            "--board" => {
+                override_board = remaining.next().cloned();
+            }
+            "--brand" => {
+                override_brand = remaining.next().cloned();
+            }
+            "--platform" => {
+                override_platform = remaining.next().cloned();
+            }
+            "--on-hardware" => {
+                on_hardware = true;
+            }
+            other if !other.starts_with("--") => {
+                config_path = other;
+            }
             other => {
                 eprintln!("Unknown argument: {}", other);
                 exit(1);
@@ -83,11 +95,18 @@ fn main() {
     // Read and parse the config file, then apply any CLI overrides
     let config_str = fs::read_to_string(config_path)
         .unwrap_or_else(|_| panic!("Failed to read config file: {}", config_path));
-    let mut config: Config = toml::from_str(&config_str).expect("Failed to parse TOML configuration");
+    let mut config: Config =
+        toml::from_str(&config_str).expect("Failed to parse TOML configuration");
 
-    if let Some(board)    = override_board    { config.target.board    = board; }
-    if let Some(brand)    = override_brand    { config.target.brand    = brand; }
-    if let Some(platform) = override_platform { config.target.platform = platform; }
+    if let Some(board) = override_board {
+        config.target.board = board;
+    }
+    if let Some(brand) = override_brand {
+        config.target.brand = brand;
+    }
+    if let Some(platform) = override_platform {
+        config.target.platform = platform;
+    }
 
     // Host tests: no board-specific build needed
     if command == "test" && !on_hardware {
@@ -108,9 +127,9 @@ fn main() {
         _ => {
             builder.generate_app_build(&config);
             match command {
-                "run"    => builder.run(&config),
+                "run" => builder.run(&config),
                 "clippy" => builder.clippy(&config),
-                "build"  => builder.compile(&config),
+                "build" => builder.compile(&config),
                 _ => unreachable!(),
             }
         }
@@ -127,16 +146,25 @@ fn run_host_tests(config: &Config) {
         "cars/{}/platforms/{}/Cargo.toml",
         config.target.brand, config.target.platform
     );
-    let vehicle_cargo_str = fs::read_to_string(&vehicle_cargo_path)
-        .unwrap_or_else(|_| panic!("❌ Could not read vehicle Cargo.toml: {}", vehicle_cargo_path));
-    let vehicle_cargo: toml::Value = toml::from_str(&vehicle_cargo_str)
-        .expect("❌ Invalid vehicle Cargo.toml");
+    let vehicle_cargo_str = fs::read_to_string(&vehicle_cargo_path).unwrap_or_else(|_| {
+        panic!(
+            "❌ Could not read vehicle Cargo.toml: {}",
+            vehicle_cargo_path
+        )
+    });
+    let vehicle_cargo: toml::Value =
+        toml::from_str(&vehicle_cargo_str).expect("❌ Invalid vehicle Cargo.toml");
     let vehicle_crate = vehicle_cargo["package"]["name"]
         .as_str()
         .expect("❌ Missing [package.name] in vehicle Cargo.toml")
         .to_string();
 
-    let packages = ["core-interface", "board-pc", "board-esp", vehicle_crate.as_str()];
+    let packages = [
+        "core-interface",
+        "board-pc",
+        "board-esp",
+        vehicle_crate.as_str(),
+    ];
 
     for pkg in packages {
         println!("🧪 Testing {}...", pkg);
@@ -202,4 +230,3 @@ pub trait TargetBuilder {
 
 // Automatically discovered and linked board builders
 include!(concat!(env!("OUT_DIR"), "/board_registry.rs"));
-

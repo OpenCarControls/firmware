@@ -6,11 +6,9 @@ use embassy_sync::channel::Channel;
 // ── Static Channels ───────────────────────────────────────────────────────────
 
 /// Outbound state/response messages toward the BLE driver task.
-pub static BLE_TX_CHANNEL: Channel<CriticalSectionRawMutex, proto::DeviceToApp, 4> =
-    Channel::new();
+pub static BLE_TX_CHANNEL: Channel<CriticalSectionRawMutex, proto::DeviceToApp, 4> = Channel::new();
 /// Inbound commands arriving from the BLE driver task.
-pub static BLE_RX_CHANNEL: Channel<CriticalSectionRawMutex, proto::AppToDevice, 4> =
-    Channel::new();
+pub static BLE_RX_CHANNEL: Channel<CriticalSectionRawMutex, proto::AppToDevice, 4> = Channel::new();
 /// Outbound state/response messages toward the MQTT driver task.
 pub static MQTT_TX_CHANNEL: Channel<CriticalSectionRawMutex, proto::DeviceToApp, 4> =
     Channel::new();
@@ -21,8 +19,7 @@ pub static MQTT_RX_CHANNEL: Channel<CriticalSectionRawMutex, proto::AppToDevice,
 pub static SYSTEM_COMMAND_CHANNEL: Channel<CriticalSectionRawMutex, proto::SystemCommand, 1> =
     Channel::new();
 /// Basic vehicle commands routed to the vehicle task. Sent from BLE and MQTT.
-pub static BASIC_CMD_CHANNEL: Channel<CriticalSectionRawMutex, InboundCommand, 4> =
-    Channel::new();
+pub static BASIC_CMD_CHANNEL: Channel<CriticalSectionRawMutex, InboundCommand, 4> = Channel::new();
 /// Advanced vehicle commands routed to the vehicle task. BLE only.
 pub static ADVANCED_CMD_CHANNEL: Channel<CriticalSectionRawMutex, InboundCommand, 4> =
     Channel::new();

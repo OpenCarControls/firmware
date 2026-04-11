@@ -1,7 +1,6 @@
 use core_interface::{
-    init, publish_single_state, route_single_response, Transport, VehicleStatePayload,
-    BLE_TX_CHANNEL, MQTT_TX_CHANNEL,
-    proto,
+    BLE_TX_CHANNEL, MQTT_TX_CHANNEL, Transport, VehicleStatePayload, init, proto,
+    publish_single_state, route_single_response,
 };
 
 const PLATFORM_ID: u32 = 0xCAFE_BABE;
@@ -46,7 +45,9 @@ fn mqtt_response_goes_to_mqtt_tx_only() {
     init(PLATFORM_ID);
     let resp = make_response(2);
     embassy_futures::block_on(route_single_response(Transport::Mqtt, resp, TS));
-    let msg = MQTT_TX_CHANNEL.try_receive().expect("MQTT_TX has no message");
+    let msg = MQTT_TX_CHANNEL
+        .try_receive()
+        .expect("MQTT_TX has no message");
     assert_eq!(msg.timestamp_ms, TS);
     assert!(matches!(
         msg.payload,
@@ -76,10 +77,14 @@ fn ble_receives_full_state_basic_and_advanced() {
     };
     embassy_futures::block_on(publish_single_state(payload, TS));
 
-    let msg = BLE_TX_CHANNEL.try_receive().expect("BLE_TX has no state message");
+    let msg = BLE_TX_CHANNEL
+        .try_receive()
+        .expect("BLE_TX has no state message");
     match msg.payload {
         Some(proto::device_to_app::Payload::StateUpdate(update)) => {
-            let vs = update.vehicle_state.expect("no vehicle_state in BLE update");
+            let vs = update
+                .vehicle_state
+                .expect("no vehicle_state in BLE update");
             assert_eq!(vs.basic_state_bytes, vec![0x01, 0x02]);
             assert_eq!(vs.advanced_state_bytes, vec![0x03, 0x04]);
         }
@@ -100,12 +105,19 @@ fn mqtt_receives_basic_only_advanced_is_empty() {
     // drain BLE first
     let _ = BLE_TX_CHANNEL.try_receive();
 
-    let msg = MQTT_TX_CHANNEL.try_receive().expect("MQTT_TX has no state message");
+    let msg = MQTT_TX_CHANNEL
+        .try_receive()
+        .expect("MQTT_TX has no state message");
     match msg.payload {
         Some(proto::device_to_app::Payload::StateUpdate(update)) => {
-            let vs = update.vehicle_state.expect("no vehicle_state in MQTT update");
+            let vs = update
+                .vehicle_state
+                .expect("no vehicle_state in MQTT update");
             assert_eq!(vs.basic_state_bytes, vec![0xAA]);
-            assert!(vs.advanced_state_bytes.is_empty(), "MQTT must not include advanced bytes");
+            assert!(
+                vs.advanced_state_bytes.is_empty(),
+                "MQTT must not include advanced bytes"
+            );
         }
         other => panic!("unexpected MQTT payload: {:?}", other),
     }
@@ -115,7 +127,10 @@ fn mqtt_receives_basic_only_advanced_is_empty() {
 fn state_publish_carries_correct_timestamp() {
     drain_tx_channels();
     init(PLATFORM_ID);
-    let payload = VehicleStatePayload { basic: vec![], advanced: vec![] };
+    let payload = VehicleStatePayload {
+        basic: vec![],
+        advanced: vec![],
+    };
     embassy_futures::block_on(publish_single_state(payload, 9999));
     let ble_msg = BLE_TX_CHANNEL.try_receive().unwrap();
     let mqtt_msg = MQTT_TX_CHANNEL.try_receive().unwrap();

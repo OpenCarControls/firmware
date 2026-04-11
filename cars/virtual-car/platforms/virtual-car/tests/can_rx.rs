@@ -1,10 +1,10 @@
+use core_interface::VEHICLE_STATE_CHANNEL;
 use embedded_can::{Id, StandardId};
 use prost::Message;
 use virtual_car_controller::{
     handle_can_frame,
     proto::{AdvancedState, BasicState},
 };
-use core_interface::VEHICLE_STATE_CHANNEL;
 
 fn std_frame(raw_id: u16, data: &[u8]) -> core_interface::CanFrame {
     let mut buf = [0u8; 8];
@@ -33,7 +33,9 @@ fn speed_frame_updates_state_and_sends_to_channel() {
     // 120 kph big-endian i16 = [0x00, 0x78]
     let frame = std_frame(0x100, &[0x00, 0x78]);
     embassy_futures::block_on(handle_can_frame(frame));
-    let payload = VEHICLE_STATE_CHANNEL.try_receive().expect("no state update");
+    let payload = VEHICLE_STATE_CHANNEL
+        .try_receive()
+        .expect("no state update");
     assert_eq!(decode_advanced(&payload).speed, Some(120));
 }
 
@@ -49,7 +51,9 @@ fn speed_frame_negative_value_decoded_correctly() {
     // -10 kph big-endian i16 = [0xFF, 0xF6]
     let frame = std_frame(0x100, &[0xFF, 0xF6]);
     embassy_futures::block_on(handle_can_frame(frame));
-    let payload = VEHICLE_STATE_CHANNEL.try_receive().expect("no state update");
+    let payload = VEHICLE_STATE_CHANNEL
+        .try_receive()
+        .expect("no state update");
     assert_eq!(decode_advanced(&payload).speed, Some(-10));
 }
 
@@ -59,7 +63,9 @@ fn speed_frame_negative_value_decoded_correctly() {
 fn gear_frame_updates_state_and_sends_to_channel() {
     let frame = std_frame(0x200, &[1]); // GEAR_PARK = 1
     embassy_futures::block_on(handle_can_frame(frame));
-    let payload = VEHICLE_STATE_CHANNEL.try_receive().expect("no state update");
+    let payload = VEHICLE_STATE_CHANNEL
+        .try_receive()
+        .expect("no state update");
     assert_eq!(decode_advanced(&payload).gear, Some(1));
 }
 
@@ -76,7 +82,9 @@ fn gear_frame_too_short_does_not_update_state() {
 fn doors_locked_frame_sets_locked_true() {
     let frame = std_frame(0x300, &[0x01]);
     embassy_futures::block_on(handle_can_frame(frame));
-    let payload = VEHICLE_STATE_CHANNEL.try_receive().expect("no state update");
+    let payload = VEHICLE_STATE_CHANNEL
+        .try_receive()
+        .expect("no state update");
     assert_eq!(decode_basic(&payload).are_doors_locked, Some(true));
 }
 
@@ -84,7 +92,9 @@ fn doors_locked_frame_sets_locked_true() {
 fn doors_unlocked_frame_sets_locked_false() {
     let frame = std_frame(0x300, &[0x00]);
     embassy_futures::block_on(handle_can_frame(frame));
-    let payload = VEHICLE_STATE_CHANNEL.try_receive().expect("no state update");
+    let payload = VEHICLE_STATE_CHANNEL
+        .try_receive()
+        .expect("no state update");
     assert_eq!(decode_basic(&payload).are_doors_locked, Some(false));
 }
 

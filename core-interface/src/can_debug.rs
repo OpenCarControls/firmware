@@ -1,5 +1,5 @@
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
@@ -26,8 +26,7 @@ static CAN_DEBUG_DROPPED: AtomicU32 = AtomicU32::new(0);
 
 /// The active debug blocklist. Protected by a mutex because it is written from
 /// the `process_ble_commands_task` and read from `publish_can_debug_task`.
-static DEBUG_FILTERS: Mutex<CriticalSectionRawMutex, Vec<CanDebugFilter>> =
-    Mutex::new(Vec::new());
+static DEBUG_FILTERS: Mutex<CriticalSectionRawMutex, Vec<CanDebugFilter>> = Mutex::new(Vec::new());
 
 // ── Public API (called by board drivers) ──────────────────────────────────────
 
@@ -119,8 +118,7 @@ pub async fn publish_single_debug_batch(
             };
             // Include the frame unless it matches a blocklist entry.
             !debug_filters.iter().any(|f| {
-                f.is_extended_id == cap_extended
-                    && (cap_raw & f.mask) == (f.can_id & f.mask)
+                f.is_extended_id == cap_extended && (cap_raw & f.mask) == (f.can_id & f.mask)
             })
         })
         .map(|cap| {
@@ -192,11 +190,14 @@ pub async fn publish_can_debug_task() {
         // Clone current blocklist under lock, then release before the await.
         let filters: Vec<CanDebugFilter> = {
             let guard = DEBUG_FILTERS.lock().await;
-            guard.iter().map(|f| CanDebugFilter {
-                can_id: f.can_id,
-                is_extended_id: f.is_extended_id,
-                mask: f.mask,
-            }).collect()
+            guard
+                .iter()
+                .map(|f| CanDebugFilter {
+                    can_id: f.can_id,
+                    is_extended_id: f.is_extended_id,
+                    mask: f.mask,
+                })
+                .collect()
         };
 
         publish_single_debug_batch(

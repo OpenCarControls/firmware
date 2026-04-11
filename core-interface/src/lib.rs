@@ -34,9 +34,9 @@ pub use types::{
 
 // Channels
 pub use channels::{
-    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, BLE_RX_CHANNEL, BLE_TX_CHANNEL,
-    CAN_DEBUG_RX_CHANNEL, CAN_RX_CHANNEL, CAN_TX_CHANNEL, CMD_RESP_CHANNEL, MQTT_RX_CHANNEL,
-    MQTT_TX_CHANNEL, SYSTEM_COMMAND_CHANNEL, VEHICLE_STATE_CHANNEL,
+    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, BLE_RX_CHANNEL, BLE_TX_CHANNEL, CAN_DEBUG_RX_CHANNEL,
+    CAN_RX_CHANNEL, CAN_TX_CHANNEL, CMD_RESP_CHANNEL, MQTT_RX_CHANNEL, MQTT_TX_CHANNEL,
+    SYSTEM_COMMAND_CHANNEL, VEHICLE_STATE_CHANNEL,
 };
 
 // CAN filter & read-only
@@ -50,8 +50,7 @@ pub use can_debug::{
 
 // Dispatch tasks
 pub use dispatch::{
-    handle_ble_message, handle_mqtt_message, process_ble_commands_task,
-    process_mqtt_commands_task,
+    handle_ble_message, handle_mqtt_message, process_ble_commands_task, process_mqtt_commands_task,
 };
 
 // Routing tasks
