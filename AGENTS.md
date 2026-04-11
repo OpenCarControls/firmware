@@ -4,7 +4,7 @@
 This is the embedded Rust monorepo for the hardware controller (ESP32 / Raspberry Pi). It handles CAN bus reading/writing, BLE/WiFi/LTE connections, and OTA updates.
 
 ## 🏗️ Architecture: Cargo Workspace & xtask
-*   **`core-interface`:** The intermediary between transport layers (BLE/MQTT) and vehicle logic. Knows nothing about specific cars or boards. Uses Embassy throughout (`embassy_time`, `embassy_sync`, `embassy_executor`). Defines 9 static `Channel`s as the inter-crate contract, shared types (`Transport`, `InboundCommand`, `VehicleStatePayload`), and 4 pure-logic `#[embassy_executor::task]` functions (`process_ble_commands_task`, `process_mqtt_commands_task`, `route_responses_task`, `publish_state_task`).
+*   **`core-interface`:** The intermediary between transport layers (BLE/MQTT) and vehicle logic. Knows nothing about specific cars or boards. Uses Embassy throughout (`embassy_time`, `embassy_sync`, `embassy_executor`). Defines 11 static `Channel`s as the inter-crate contract, shared types (`Transport`, `InboundCommand`, `VehicleStatePayload`), and 4 pure-logic `#[embassy_executor::task]` functions (`process_ble_commands_task`, `process_mqtt_commands_task`, `route_responses_task`, `publish_state_task`). Also exposes `pub fn passes_filter()` and 4 inner async helpers (`handle_ble_message`, `handle_mqtt_message`, `route_single_response`, `publish_single_state`) extracted from the task loops so they can be unit-tested without running an executor. Uses `#![cfg_attr(not(test), no_std)]` so host tests compile without a `no_std` target.
 *   **Board crates (`board-esp`, `board-pc`):** Compiled as `rlib`. Each exports a single `pub fn start(spawner: &Spawner)` that spawns the 4 `core-interface` tasks. Board crates have no knowledge of vehicle logic or protos — they only drive hardware peripherals (radio, CAN, LTE) by reading/writing the edge channels (`BLE_RX_CHANNEL`, `BLE_TX_CHANNEL`, `MQTT_RX_CHANNEL`, `MQTT_TX_CHANNEL`).
 *   **Vehicle Crates (e.g., `virtual-car-controller`):** Compiled as `rlib`. Each exports 3 `#[embassy_executor::task]` functions: `handle_basic_commands_task`, `handle_advanced_commands_task`, and `state_update_task`. They read from `BASIC_CMD_CHANNEL` / `ADVANCED_CMD_CHANNEL`, write results to `CMD_RESP_CHANNEL`, and push state updates to `VEHICLE_STATE_CHANNEL`. They depend on `core-interface` for the channel statics and shared types, but never touch board code. Vehicle crates that use CAN also export a `can_rx_task` (reads `CAN_RX_CHANNEL`) and a `pub static CAN_FILTERS: &[CanFilter]` that xtask passes to the board's CAN init functions.
 *   **`cars/virtual-car` (`virtual-car-controller`):** A mock vehicle implementation used strictly for UI/UX testing without physical hardware. Contains real Embassy tasks and real proto encoding, just no CAN bus.
@@ -50,10 +50,12 @@ Embassy is used freely inside `core-interface`. Boards adapt to it — not the o
 *   **BLE:** No single cross-platform embassy BLE abstraction exists. `core-interface` defines its own traits (e.g. `trait BleGatt`). ESP implements them with `esp-wifi`'s BLE stack; PC implements them as mocks.
 
 **Board-specific requirements:**
-*   **ESP (`board-esp`):** Compiled as `rlib`. `esp-rtos` (Embassy executor + time driver), `esp-alloc` (global heap), `esp-backtrace`, and `RUSTFLAGS="-C link-arg=-Tlinkall.x"` all live in `.app_build`, not in `board-esp` itself, because they must be in the final binary crate. The xtask uses `+esp -Zbuild-std=core,alloc` for xtensa targets. Embassy crate versions must match what `esp-rtos` uses (currently `embassy-executor = "0.9.1"`). CAN driver loops run on **core 1** via `esp_rtos::start_second_core`; comms and vehicle tasks run on core 0.
-*   **PC (`board-pc`):** Compiled as `rlib`. `embassy-executor` with `arch-std` + `executor-thread` features, `embassy-time` with `std` feature, and `critical-section` with `std` feature all live in `.app_build`. No `tokio` — embassy's std driver covers timing and critical sections. CAN is implemented via SocketCAN (`socketcan` crate) using an `#[embassy_executor::task(pool_size = 4)]` per bus.
+*   **ESP (`board-esp`):** Compiled as `rlib`. `esp-rtos` (Embassy executor + time driver), `esp-alloc` (global heap), `esp-backtrace`, and `RUSTFLAGS="-C link-arg=-Tlinkall.x"` all live in `.app_build`, not in `board-esp` itself, because they must be in the final binary crate. The xtask uses `+esp -Zbuild-std=core,alloc` for xtensa targets. Embassy crate versions must match what `esp-rtos` uses (currently `embassy-executor = "0.9.1"`). CAN driver loops run on **core 1** via `esp_rtos::start_second_core`; comms and vehicle tasks run on core 0. All ESP HAL dependencies are behind an optional `hardware` Cargo feature; firmware builds (via xtask) enable it automatically. Without the feature, the crate compiles on the host for unit testing (only `embedded-can` and `core-interface` are unconditional). Pure logic that is host-testable (e.g. `compute_mcp_masks`) is kept outside `#[cfg(feature = "hardware")]` blocks.
+*   **PC (`board-pc`):** Compiled as `rlib`. `embassy-executor` with `arch-std` + `executor-thread` features, `embassy-time` with `std` feature, and `critical-section` with `std` feature all live in `.app_build`. No `tokio` — embassy's std driver covers timing and critical sections. CAN is implemented via SocketCAN (`socketcan` crate) using an `#[embassy_executor::task(pool_size = 4)]` per bus. Frame conversion between `socketcan` and `core-interface` types is extracted into `pub(crate) fn socketcan_to_core_frame` / `core_to_socketcan_frame` helpers for unit testing.
 
 **`main.template.rs`:** Each board folder contains a `main.template.rs` with placeholder tokens (`{PLATFORM_ID}`, `{VEHICLE_CRATE_IDENT}`, `{CAN_TX_PIN}`, `{MTLS_CERTS}`, etc.). xtask reads this file and substitutes the tokens to produce `.app_build/src/main.rs`. Edit the template to change the entry-point structure; edit the builder to change what gets substituted.
+
+**`tests.template.rs` (ESP only):** `boards/esp/tests.template.rs` is the counterpart for on-hardware testing. xtask generates `.app_test_build/src/main.rs` from it, injects `{PLATFORM_ID}` and the contents of `boards/esp/tests/hardware.rs` (`{ON_HARDWARE_TESTS}`), then compiles and flashes via `probe-rs`. The template uses `embedded-test` with the Embassy executor.
 
 ## 🚌 CAN Bus Architecture
 
@@ -87,7 +89,35 @@ Embassy is used freely inside `core-interface`. Boards adapt to it — not the o
 *   Reads `[[hardware.<board>.can_buses]]` entries from `config.toml`.
 *   For each entry emits peripheral/pin construction code + an `init_*` call into `{CAN_HARDWARE_INIT}`.
 *   Emits the corresponding `s.spawn(run_*_loop(...))` call into `{CORE1_TASK_SPAWNS}` (ESP) or `spawner.spawn(socket_can_task(...))` (PC).
-*   MCP2515 entries require `type`, `spi`, `sck`, `mosi`, `miso`, `cs`, `int`, `can_speed`, and `mcp_speed` fields. TWAI entries require `type`, `peripheral`, `rx`, and `tx` fields.
+*   MCP2515 entries require `interface = "mcp2515"`, `cs_pin`, `clk_pin`, `mosi_pin`, `miso_pin`, `int_pin`, `can_speed`, and `mcp_speed` fields. The SPI peripheral is auto-assigned by xtask (starting from SPI2). TWAI entries require `interface = "twai"`, `tx_pin`, and `rx_pin` fields. The TWAI peripheral is hardcoded as `TWAI0`.
+
+## 🧪 Testing
+
+**Command:** `cargo xtask test` — runs all host-side tests in sequence without hardware.
+
+**Host tests** (run with standard `cargo test`, no ESP toolchain needed):
+
+| Crate | Tests | Command |
+|---|---|---|
+| `core-interface` | 24 — `passes_filter`, BLE/MQTT dispatch (platform_id gating, routing), response routing, state publish split | `cargo test -p core-interface -- --test-threads=1` |
+| `virtual-car-controller` | 19 — `encode_state` proto encoding, CAN frame → state updates, `process_basic_command` | `cargo test -p virtual-car-controller -- --test-threads=1` |
+| `board-pc` | 8 — `socketcan_to_core_frame` and `core_to_socketcan_frame` round-trips | `cargo test -p board-pc -- --test-threads=1` |
+| `board-esp` | 6 — `compute_mcp_masks` (MCP2515 RX buffer mask computation) | `cargo test -p board-esp -- --test-threads=1` |
+
+`--test-threads=1` is required — Embassy channels are process-global statics; parallel threads corrupt each other's state.
+
+**On-hardware tests** (ESP32, requires `probe-rs`):
+```
+cargo xtask test --board esp --on-hardware
+```
+xtask generates `.app_test_build/` (parallel to `.app_build/`), compiles it with the Xtensa toolchain using `embedded-test` + `defmt-rtt`, and flashes/runs via `probe-rs test`. The template (`boards/esp/tests.template.rs`) includes channel round-trip and `passes_filter` smoke tests. Add custom on-device tests to `boards/esp/tests/hardware.rs` — xtask injects that file automatically.
+
+**`no_std` / test gating pattern:**
+*   `core-interface` and all vehicle crates use `#![cfg_attr(not(test), no_std)]`.
+*   `board-esp` uses `#![cfg_attr(not(test), no_std)]` — always `no_std` except during host tests. HAL deps are optional behind the `hardware` feature (enabled by xtask for firmware builds). Only allocation-free, HAL-free code is available without the feature.
+*   `board-pc` is always `std`.
+
+**CI:** The `test` job in `.github/workflows/ci.yml` uses git diff to detect which crate directories changed and runs only the affected packages. Changes to `boards/pc/` trigger `board-pc` tests; changes to `boards/esp/` trigger `board-esp` tests; changes to `core-interface/` trigger all four crates.
 
 ## 🏷️ Versioning & CI/CD
 *   **Independent Crates:** Managed via `release-plz` (not implemented yet, waiting for at least one car implementation to work). Changes to the core cascade safely to vehicle crates.
