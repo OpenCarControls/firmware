@@ -1,4 +1,4 @@
-use core_interface::{CanFilter, CanFrame, CAN_RX_CHANNEL, CAN_TX_CHANNEL};
+use core_interface::{CanFilter, CanFrame, CanRawCapture, CAN_DEBUG_RX_CHANNEL, CAN_RX_CHANNEL, CAN_TX_CHANNEL};
 use embedded_can::{Frame as EmbeddedFrame, Id};
 use embassy_time::{Duration, Timer};
 use socketcan::{CanSocket, Socket};
@@ -9,6 +9,7 @@ pub fn start(spawner: &embassy_executor::Spawner) {
     spawner.spawn(core_interface::process_mqtt_commands_task()).unwrap();
     spawner.spawn(core_interface::route_responses_task()).unwrap();
     spawner.spawn(core_interface::publish_state_task()).unwrap();
+    spawner.spawn(core_interface::publish_can_debug_task()).unwrap();
 }
 
 // ── Frame conversion helpers ──────────────────────────────────────────────────
@@ -70,6 +71,18 @@ pub async fn socket_can_task(
             match socket.read_frame() {
                 Ok(socketcan::CanFrame::Data(f)) => {
                     let core_frame = socketcan_to_core_frame(&f, bus_id);
+                    if core_interface::can_debug_wants_bus(bus_id) {
+                        let cap = CanRawCapture {
+                            timestamp_ms: embassy_time::Instant::now().as_millis(),
+                            bus_id,
+                            id: core_frame.id,
+                            data: core_frame.data,
+                            dlc: core_frame.dlc,
+                        };
+                        if CAN_DEBUG_RX_CHANNEL.sender().try_send(cap).is_err() {
+                            core_interface::increment_can_debug_dropped();
+                        }
+                    }
                     if core_interface::passes_filter(&core_frame, filters) {
                         CAN_RX_CHANNEL.sender().send(core_frame).await;
                     }

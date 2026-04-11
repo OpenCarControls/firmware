@@ -6,10 +6,11 @@ pub mod proto {
 }
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-use embassy_time::Instant;
+use embassy_sync::mutex::Mutex;
+use embassy_time::{Duration, Instant, with_timeout};
 
 // ── Platform ID ───────────────────────────────────────────────────────────────
 
@@ -46,6 +47,80 @@ pub fn is_can_read_only() -> bool {
 /// inconsistent data is detected at any point.
 pub fn set_can_read_only(enabled: bool) {
     CAN_READ_ONLY.store(enabled, Ordering::Relaxed);
+}
+
+// ── CAN Debug Streaming ───────────────────────────────────────────────────────
+
+/// When `true`, board CAN driver loops forward raw (unfiltered) incoming frames
+/// to `CAN_DEBUG_RX_CHANNEL` before applying the vehicle `passes_filter` check.
+/// Defaults to `false` at boot; toggled via the `SetCanDebugEnabled` BLE command.
+static CAN_DEBUG_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Bitmask of bus IDs being observed by the debug feature. Bit N = bus_id N.
+/// `0xFF` means all buses. Only meaningful when `CAN_DEBUG_ACTIVE` is `true`.
+static DEBUG_BUS_MASK: AtomicU8 = AtomicU8::new(0);
+
+/// Count of frames dropped since the last batch flush because `CAN_DEBUG_RX_CHANNEL`
+/// was full (BLE could not drain fast enough). Swapped to 0 on each flush.
+static CAN_DEBUG_DROPPED: AtomicU32 = AtomicU32::new(0);
+
+/// The active debug blocklist. Protected by a mutex because it is written from
+/// the `process_ble_commands_task` and read from `publish_can_debug_task`.
+static DEBUG_FILTERS: Mutex<CriticalSectionRawMutex, Vec<CanDebugFilter>> =
+    Mutex::new(Vec::new());
+
+/// Raw CAN frame captured by a board driver before vehicle-specific filtering,
+/// forwarded to `CAN_DEBUG_RX_CHANNEL` when CAN debug streaming is active.
+pub struct CanRawCapture {
+    /// Device uptime in milliseconds at the moment of frame reception — set by
+    /// the board driver so inter-frame timing within a batch is accurate.
+    pub timestamp_ms: u64,
+    /// 0-based bus index identifying which physical CAN bus this frame arrived on.
+    pub bus_id: u8,
+    /// The CAN frame identifier (standard or extended).
+    pub id: embedded_can::Id,
+    /// Raw frame payload bytes (always 8 bytes; only `dlc` bytes are valid).
+    pub data: [u8; 8],
+    /// Number of valid bytes in `data` (0–8).
+    pub dlc: u8,
+}
+
+/// A single CAN debug blocklist entry. A frame is excluded if:
+///   `(frame_raw_id & mask) == (can_id & mask)` AND `is_extended_id` matches the frame type.
+///
+/// Applies across all buses being observed — no per-bus scoping.
+pub struct CanDebugFilter {
+    /// The CAN identifier value to match against.
+    pub can_id: u32,
+    /// `true` to target extended (29-bit) IDs; `false` for standard (11-bit) IDs.
+    pub is_extended_id: bool,
+    /// Acceptance mask. See `passes_filter` docs for semantics.
+    pub mask: u32,
+}
+
+/// Raw CAN frames captured before vehicle filtering, consumed by `publish_can_debug_task`.
+pub static CAN_DEBUG_RX_CHANNEL: Channel<CriticalSectionRawMutex, CanRawCapture, 64> =
+    Channel::new();
+
+/// Returns `true` if CAN debug streaming is currently active.
+///
+/// Board CAN driver loops call this (lock-free) before deciding whether to
+/// forward a raw frame to `CAN_DEBUG_RX_CHANNEL`.
+pub fn is_can_debug_active() -> bool {
+    CAN_DEBUG_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Returns `true` if CAN debug streaming is active AND this `bus_id` is being observed.
+///
+/// Lock-free; safe to call from the CAN I/O loop on core 1.
+pub fn can_debug_wants_bus(bus_id: u8) -> bool {
+    is_can_debug_active() && (DEBUG_BUS_MASK.load(Ordering::Relaxed) & (1 << bus_id)) != 0
+}
+
+/// Increments the dropped-frame counter by one. Call this when a `try_send` to
+/// `CAN_DEBUG_RX_CHANNEL` fails because the channel is full.
+pub fn increment_can_debug_dropped() {
+    CAN_DEBUG_DROPPED.fetch_add(1, Ordering::Relaxed);
 }
 
 // ── Shared Types ──────────────────────────────────────────────────────────────
@@ -172,7 +247,10 @@ pub static CAN_TX_CHANNEL: Channel<CriticalSectionRawMutex, CanFrame, 16> = Chan
 
 /// Processes a single `AppToDevice` message arriving from the BLE driver.
 /// Validates `platform_id` and routes each payload variant to the correct channel:
-/// - `system_command` → `SYSTEM_COMMAND_CHANNEL`
+/// - `system_command`:
+///   - `restart_command` → `SYSTEM_COMMAND_CHANNEL` (board handles it)
+///   - `set_can_debug_enabled` → updates `CAN_DEBUG_ACTIVE` / `DEBUG_BUS_MASK` / `DEBUG_FILTERS` inline
+///   - `update_can_debug_filters` → replaces `DEBUG_FILTERS` inline (no-op if debug inactive)
 /// - `basic_command_bytes` → `BASIC_CMD_CHANNEL` (Transport::Ble)
 /// - `advanced_command_bytes` → `ADVANCED_CMD_CHANNEL` (Transport::Ble)
 /// Messages with a mismatched `platform_id` are silently dropped.
@@ -182,7 +260,53 @@ pub async fn handle_ble_message(msg: proto::AppToDevice) {
     }
     match msg.payload {
         Some(proto::app_to_device::Payload::SystemCommand(cmd)) => {
-            SYSTEM_COMMAND_CHANNEL.sender().send(cmd).await;
+            match cmd.action {
+                Some(proto::system_command::Action::RestartCommand(restart)) => {
+                    SYSTEM_COMMAND_CHANNEL
+                        .sender()
+                        .send(proto::SystemCommand {
+                            action: Some(proto::system_command::Action::RestartCommand(restart)),
+                        })
+                        .await;
+                }
+                Some(proto::system_command::Action::SetCanDebugEnabled(req)) => {
+                    if req.enabled {
+                        // Order: prepare state fully before setting the active flag so
+                        // board drivers on core 1 never see a partially-initialised state.
+                        {
+                            let mut filters = DEBUG_FILTERS.lock().await;
+                            filters.clear();
+                        }
+                        let mask = if req.bus_ids.is_empty() {
+                            0xFF
+                        } else {
+                            req.bus_ids.iter().fold(0u8, |acc, &id| acc | (1 << (id as u8)))
+                        };
+                        DEBUG_BUS_MASK.store(mask, Ordering::Relaxed);
+                        CAN_DEBUG_DROPPED.store(0, Ordering::Relaxed);
+                        CAN_DEBUG_ACTIVE.store(true, Ordering::Relaxed);
+                    } else {
+                        // Disable first so the board stops tapping immediately.
+                        CAN_DEBUG_ACTIVE.store(false, Ordering::Relaxed);
+                    }
+                }
+                Some(proto::system_command::Action::UpdateCanDebugFilters(req)) => {
+                    if is_can_debug_active() {
+                        let new: Vec<CanDebugFilter> = req
+                            .filters
+                            .into_iter()
+                            .map(|f| CanDebugFilter {
+                                can_id: f.can_id,
+                                is_extended_id: f.is_extended_id,
+                                mask: f.mask,
+                            })
+                            .collect();
+                        let mut filters = DEBUG_FILTERS.lock().await;
+                        *filters = new;
+                    }
+                }
+                None => {}
+            }
         }
         Some(proto::app_to_device::Payload::BasicCommandBytes(bytes)) => {
             BASIC_CMD_CHANNEL
@@ -335,4 +459,138 @@ pub async fn publish_state_task() {
         let payload = receiver.receive().await;
         publish_single_state(payload, Instant::now().as_millis()).await;
     }
+}
+
+// ── CAN Debug Task ────────────────────────────────────────────────────────────
+
+/// Builds and sends a single `CanDebugUpdate` batch to `BLE_TX_CHANNEL`.
+///
+/// Each capture in `captures` is converted to a `CanDebugFrame`. Captures that
+/// match any entry in `debug_filters` (blocklist) are silently excluded — this
+/// does NOT increment the dropped counter. The batch is skipped entirely if
+/// there are no frames after filtering AND `dropped` is 0 (avoids empty
+/// BLE notifications).
+///
+/// Extracted from the task loop so it can be unit-tested without an executor.
+pub async fn publish_single_debug_batch(
+    captures: &[CanRawCapture],
+    debug_filters: &[CanDebugFilter],
+    dropped: u32,
+    pid: u32,
+    timestamp_ms: u64,
+) {
+    let frames: Vec<proto::CanDebugFrame> = captures
+        .iter()
+        .filter(|cap| {
+            let (cap_raw, cap_extended) = match cap.id {
+                embedded_can::Id::Standard(sid) => (sid.as_raw() as u32, false),
+                embedded_can::Id::Extended(eid) => (eid.as_raw(), true),
+            };
+            // Include the frame unless it matches a blocklist entry.
+            !debug_filters.iter().any(|f| {
+                f.is_extended_id == cap_extended
+                    && (cap_raw & f.mask) == (f.can_id & f.mask)
+            })
+        })
+        .map(|cap| {
+            let (can_id, is_extended_id) = match cap.id {
+                embedded_can::Id::Standard(sid) => (sid.as_raw() as u32, false),
+                embedded_can::Id::Extended(eid) => (eid.as_raw(), true),
+            };
+            proto::CanDebugFrame {
+                timestamp_ms: cap.timestamp_ms,
+                bus_id: cap.bus_id as u32,
+                can_id,
+                is_extended_id,
+                data: cap.data[..cap.dlc as usize].to_vec(),
+            }
+        })
+        .collect();
+
+    if frames.is_empty() && dropped == 0 {
+        return;
+    }
+
+    BLE_TX_CHANNEL
+        .sender()
+        .send(proto::DeviceToApp {
+            timestamp_ms,
+            platform_id: pid,
+            payload: Some(proto::device_to_app::Payload::CanDebugUpdate(
+                proto::CanDebugUpdate {
+                    frames,
+                    dropped_frames: dropped,
+                },
+            )),
+        })
+        .await;
+}
+
+/// Collects raw CAN frames from `CAN_DEBUG_RX_CHANNEL`, applies the active
+/// blocklist, and flushes batches to `BLE_TX_CHANNEL`.
+///
+/// Flush triggers: 20 frames accumulated OR 50 ms elapsed, whichever comes
+/// first. When debug is inactive the task still drains any lingering frames
+/// from the channel so it never fills from a now-stale enable.
+#[embassy_executor::task]
+pub async fn publish_can_debug_task() {
+    let receiver = CAN_DEBUG_RX_CHANNEL.receiver();
+    loop {
+        if !is_can_debug_active() {
+            // Drain and discard — keeps the channel clear when debug is off.
+            while receiver.try_receive().is_ok() {}
+            embassy_time::Timer::after(Duration::from_millis(50)).await;
+            continue;
+        }
+
+        // Accumulate up to 20 frames or 50 ms, whichever comes first.
+        let mut batch: Vec<CanRawCapture> = Vec::new();
+        loop {
+            if batch.len() >= 20 {
+                break;
+            }
+            match with_timeout(Duration::from_millis(50), receiver.receive()).await {
+                Ok(cap) => batch.push(cap),
+                Err(_timeout) => break,
+            }
+        }
+
+        // Atomically take the dropped count for this batch.
+        let dropped = CAN_DEBUG_DROPPED.swap(0, Ordering::Relaxed);
+
+        // Clone current blocklist under lock, then release before the await.
+        let filters: Vec<CanDebugFilter> = {
+            let guard = DEBUG_FILTERS.lock().await;
+            guard.iter().map(|f| CanDebugFilter {
+                can_id: f.can_id,
+                is_extended_id: f.is_extended_id,
+                mask: f.mask,
+            }).collect()
+        };
+
+        publish_single_debug_batch(
+            &batch,
+            &filters,
+            dropped,
+            PLATFORM_ID.load(Ordering::Relaxed),
+            Instant::now().as_millis(),
+        )
+        .await;
+    }
+}
+
+// ── Test-only accessors ───────────────────────────────────────────────────────
+
+/// Returns the number of entries in the current debug blocklist.
+/// Intended for use in tests to verify that `UpdateCanDebugFilters` dispatch
+/// correctly stored the new list without exposing the mutex publicly.
+pub async fn debug_filter_count() -> usize {
+    DEBUG_FILTERS.lock().await.len()
+}
+
+/// Returns the current value of the dropped-frame counter without resetting it.
+/// Intended for use in tests to verify that `SetCanDebugEnabled` resets the
+/// counter on enable.
+pub fn debug_dropped_count() -> u32 {
+    CAN_DEBUG_DROPPED.load(Ordering::Relaxed)
 }

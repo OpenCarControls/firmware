@@ -2,7 +2,7 @@
 
 use core_interface::CanFilter;
 #[cfg(feature = "hardware")]
-use core_interface::{CanFrame, CAN_RX_CHANNEL, CAN_TX_CHANNEL};
+use core_interface::{CanFrame, CanRawCapture, CAN_DEBUG_RX_CHANNEL, CAN_RX_CHANNEL, CAN_TX_CHANNEL};
 #[cfg(feature = "hardware")]
 use embedded_can::{Id, StandardId};
 
@@ -51,6 +51,7 @@ pub fn start(spawner: &embassy_executor::Spawner) {
     spawner.spawn(core_interface::process_mqtt_commands_task()).unwrap();
     spawner.spawn(core_interface::route_responses_task()).unwrap();
     spawner.spawn(core_interface::publish_state_task()).unwrap();
+    spawner.spawn(core_interface::publish_can_debug_task()).unwrap();
 }
 
 // ── CAN ID helpers ────────────────────────────────────────────────────────────
@@ -97,6 +98,18 @@ pub async fn run_twai_loop(driver: TwaiDriver, bus_id: u8, filters: &'static [Ca
             match rx.receive() {
                 Ok(frame) => {
                     let core_frame = twai_to_core_frame(frame, bus_id);
+                    if core_interface::can_debug_wants_bus(bus_id) {
+                        let cap = CanRawCapture {
+                            timestamp_ms: embassy_time::Instant::now().as_millis(),
+                            bus_id,
+                            id: core_frame.id,
+                            data: core_frame.data,
+                            dlc: core_frame.dlc,
+                        };
+                        if CAN_DEBUG_RX_CHANNEL.sender().try_send(cap).is_err() {
+                            core_interface::increment_can_debug_dropped();
+                        }
+                    }
                     if core_interface::passes_filter(&core_frame, filters) {
                         CAN_RX_CHANNEL.sender().send(core_frame).await;
                     }
@@ -233,13 +246,44 @@ pub async fn run_mcp2515_loop(
     bus_id: u8,
     filters: &'static [CanFilter],
 ) {
+    let mut was_debug_active = false;
     loop {
+        // ── MCP2515 hardware mask switching on debug enable/disable ───────
+        let debug_now = core_interface::is_can_debug_active();
+        if debug_now && !was_debug_active {
+            // Accept all frames in hardware so the debug tap sees raw traffic.
+            driver.set_mask(RxMask::Mask0, Id::Standard(unsafe { StandardId::new_unchecked(0) })).ok();
+            driver.set_mask(RxMask::Mask1, Id::Standard(unsafe { StandardId::new_unchecked(0) })).ok();
+        } else if !debug_now && was_debug_active {
+            // Restore vehicle-specific hardware masks.
+            let (mask0, mask1) = compute_mcp_masks(filters, bus_id);
+            if let Some(sid) = StandardId::new((mask0 & 0x7FF) as u16) {
+                driver.set_mask(RxMask::Mask0, Id::Standard(sid)).ok();
+            }
+            if let Some(sid) = StandardId::new((mask1 & 0x7FF) as u16) {
+                driver.set_mask(RxMask::Mask1, Id::Standard(sid)).ok();
+            }
+        }
+        was_debug_active = debug_now;
+
         int_pin.wait_for_falling_edge().await;
 
         loop {
             match driver.read_message() {
                 Ok(frame) => {
                     let core_frame = mcp_to_core_frame(frame, bus_id);
+                    if core_interface::can_debug_wants_bus(bus_id) {
+                        let cap = CanRawCapture {
+                            timestamp_ms: embassy_time::Instant::now().as_millis(),
+                            bus_id,
+                            id: core_frame.id,
+                            data: core_frame.data,
+                            dlc: core_frame.dlc,
+                        };
+                        if CAN_DEBUG_RX_CHANNEL.sender().try_send(cap).is_err() {
+                            core_interface::increment_can_debug_dropped();
+                        }
+                    }
                     if core_interface::passes_filter(&core_frame, filters) {
                         CAN_RX_CHANNEL.sender().send(core_frame).await;
                     }
