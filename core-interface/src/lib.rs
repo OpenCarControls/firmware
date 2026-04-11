@@ -6,7 +6,7 @@ pub mod proto {
 }
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::Instant;
@@ -19,6 +19,33 @@ static PLATFORM_ID: AtomicU32 = AtomicU32::new(0);
 /// platform_id from the vehicle's `meta.toml` (injected by xtask).
 pub fn init(platform_id: u32) {
     PLATFORM_ID.store(platform_id, Ordering::Relaxed);
+}
+
+// ── CAN Read-Only Mode ────────────────────────────────────────────────────────
+
+/// When `true`, the board CAN driver loops silently drop all outbound TX frames
+/// instead of transmitting them on the bus. Defaults to `true` at boot so no
+/// CAN frame can be sent until the vehicle crate explicitly unlocks the bus
+/// after validating the connected car.
+static CAN_READ_ONLY: AtomicBool = AtomicBool::new(true);
+
+/// Returns `true` if the CAN buses are currently in read-only mode.
+///
+/// Vehicle tasks should check this before deciding whether to attempt a
+/// CAN write; if `true`, pushes to `CAN_TX_CHANNEL` will be accepted by
+/// the channel but silently dropped by the board driver loop.
+pub fn is_can_read_only() -> bool {
+    CAN_READ_ONLY.load(Ordering::Relaxed)
+}
+
+/// Enables or disables CAN read-only mode.
+///
+/// Call `set_can_read_only(false)` from a vehicle task once inbound CAN frames
+/// have been validated to confirm the connected car matches this firmware.
+/// Call `set_can_read_only(true)` to re-engage the lock if an error or
+/// inconsistent data is detected at any point.
+pub fn set_can_read_only(enabled: bool) {
+    CAN_READ_ONLY.store(enabled, Ordering::Relaxed);
 }
 
 // ── Shared Types ──────────────────────────────────────────────────────────────

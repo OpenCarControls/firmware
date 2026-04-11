@@ -88,6 +88,10 @@ pub async fn socket_can_task(
                 let _ = CAN_TX_CHANNEL.sender().try_send(outbound);
                 break; // avoid spinning on someone else's frames
             }
+            // Drop silently when in read-only mode; do not transmit on the bus.
+            if core_interface::is_can_read_only() {
+                continue;
+            }
             let sc_frame = core_to_socketcan_frame(&outbound);
             if let Some(frame) = sc_frame {
                 let _ = socket.write_frame(&frame);

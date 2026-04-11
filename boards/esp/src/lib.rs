@@ -109,12 +109,15 @@ pub async fn run_twai_loop(driver: TwaiDriver, bus_id: u8, filters: &'static [Ca
         // Drain outbound TX channel for this bus
         while let Ok(outbound) = CAN_TX_CHANNEL.receiver().try_receive() {
             if outbound.bus_id == bus_id {
-                if let Some(f) = core_to_twai_frame(&outbound) {
-                    // nb::block! would stall the executor; spin until TX buffer free
-                    loop {
-                        match tx.transmit(&f) {
-                            Ok(_) | Err(nb::Error::Other(_)) => break,
-                            Err(nb::Error::WouldBlock) => Timer::after(Duration::from_micros(100)).await,
+                // Drop silently when in read-only mode; do not transmit on the bus.
+                if !core_interface::is_can_read_only() {
+                    if let Some(f) = core_to_twai_frame(&outbound) {
+                        // nb::block! would stall the executor; spin until TX buffer free
+                        loop {
+                            match tx.transmit(&f) {
+                                Ok(_) | Err(nb::Error::Other(_)) => break,
+                                Err(nb::Error::WouldBlock) => Timer::after(Duration::from_micros(100)).await,
+                            }
                         }
                     }
                 }
@@ -247,8 +250,11 @@ pub async fn run_mcp2515_loop(
 
         while let Ok(outbound) = CAN_TX_CHANNEL.receiver().try_receive() {
             if outbound.bus_id == bus_id {
-                if let Some(f) = core_to_mcp_frame(&outbound) {
-                    let _ = driver.send_message(f);
+                // Drop silently when in read-only mode; do not transmit on the bus.
+                if !core_interface::is_can_read_only() {
+                    if let Some(f) = core_to_mcp_frame(&outbound) {
+                        let _ = driver.send_message(f);
+                    }
                 }
             } else {
                 let _ = CAN_TX_CHANNEL.sender().try_send(outbound);

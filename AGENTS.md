@@ -4,7 +4,7 @@
 This is the embedded Rust monorepo for the hardware controller (ESP32 / Raspberry Pi). It handles CAN bus reading/writing, BLE/WiFi/LTE connections, and OTA updates.
 
 ## 🏗️ Architecture: Cargo Workspace & xtask
-*   **`core-interface`:** The intermediary between transport layers (BLE/MQTT) and vehicle logic. Knows nothing about specific cars or boards. Uses Embassy throughout (`embassy_time`, `embassy_sync`, `embassy_executor`). Defines 11 static `Channel`s as the inter-crate contract, shared types (`Transport`, `InboundCommand`, `VehicleStatePayload`), and 4 pure-logic `#[embassy_executor::task]` functions (`process_ble_commands_task`, `process_mqtt_commands_task`, `route_responses_task`, `publish_state_task`). Also exposes `pub fn passes_filter()` and 4 inner async helpers (`handle_ble_message`, `handle_mqtt_message`, `route_single_response`, `publish_single_state`) extracted from the task loops so they can be unit-tested without running an executor. Uses `#![cfg_attr(not(test), no_std)]` so host tests compile without a `no_std` target.
+*   **`core-interface`:** The intermediary between transport layers (BLE/MQTT) and vehicle logic. Knows nothing about specific cars or boards. Uses Embassy throughout (`embassy_time`, `embassy_sync`, `embassy_executor`). Defines 11 static `Channel`s as the inter-crate contract, shared types (`Transport`, `InboundCommand`, `VehicleStatePayload`), and 4 pure-logic `#[embassy_executor::task]` functions (`process_ble_commands_task`, `process_mqtt_commands_task`, `route_responses_task`, `publish_state_task`). Also exposes `pub fn passes_filter()`, `pub fn is_can_read_only()`, `pub fn set_can_read_only(bool)`, and 4 inner async helpers (`handle_ble_message`, `handle_mqtt_message`, `route_single_response`, `publish_single_state`) extracted from the task loops so they can be unit-tested without running an executor. Uses `#![cfg_attr(not(test), no_std)]` so host tests compile without a `no_std` target.
 *   **Board crates (`board-esp`, `board-pc`):** Compiled as `rlib`. Each exports a single `pub fn start(spawner: &Spawner)` that spawns the 4 `core-interface` tasks. Board crates have no knowledge of vehicle logic or protos — they only drive hardware peripherals (radio, CAN, LTE) by reading/writing the edge channels (`BLE_RX_CHANNEL`, `BLE_TX_CHANNEL`, `MQTT_RX_CHANNEL`, `MQTT_TX_CHANNEL`).
 *   **Vehicle Crates (e.g., `virtual-car-controller`):** Compiled as `rlib`. Each exports 3 `#[embassy_executor::task]` functions: `handle_basic_commands_task`, `handle_advanced_commands_task`, and `state_update_task`. They read from `BASIC_CMD_CHANNEL` / `ADVANCED_CMD_CHANNEL`, write results to `CMD_RESP_CHANNEL`, and push state updates to `VEHICLE_STATE_CHANNEL`. They depend on `core-interface` for the channel statics and shared types, but never touch board code. Vehicle crates that use CAN also export a `can_rx_task` (reads `CAN_RX_CHANNEL`) and a `pub static CAN_FILTERS: &[CanFilter]` that xtask passes to the board's CAN init functions.
 *   **`cars/virtual-car` (`virtual-car-controller`):** A mock vehicle implementation used strictly for UI/UX testing without physical hardware. Contains real Embassy tasks and real proto encoding, just no CAN bus.
@@ -99,7 +99,7 @@ Embassy is used freely inside `core-interface`. Boards adapt to it — not the o
 
 | Crate | Tests | Command |
 |---|---|---|
-| `core-interface` | 24 — `passes_filter`, BLE/MQTT dispatch (platform_id gating, routing), response routing, state publish split | `cargo test -p core-interface -- --test-threads=1` |
+| `core-interface` | 28 — `passes_filter`, BLE/MQTT dispatch (platform_id gating, routing), response routing, state publish split, CAN read-only flag | `cargo test -p core-interface -- --test-threads=1` |
 | `virtual-car-controller` | 19 — `encode_state` proto encoding, CAN frame → state updates, `process_basic_command` | `cargo test -p virtual-car-controller -- --test-threads=1` |
 | `board-pc` | 8 — `socketcan_to_core_frame` and `core_to_socketcan_frame` round-trips | `cargo test -p board-pc -- --test-threads=1` |
 | `board-esp` | 6 — `compute_mcp_masks` (MCP2515 RX buffer mask computation) | `cargo test -p board-esp -- --test-threads=1` |
@@ -118,6 +118,27 @@ xtask generates `.app_test_build/` (parallel to `.app_build/`), compiles it with
 *   `board-pc` is always `std`.
 
 **CI:** The `test` job in `.github/workflows/ci.yml` uses git diff to detect which crate directories changed and runs only the affected packages. Changes to `boards/pc/` trigger `board-pc` tests; changes to `boards/esp/` trigger `board-esp` tests; changes to `core-interface/` trigger all four crates.
+
+## 🔒 CAN Read-Only Mode
+
+**Purpose:** Prevent accidental CAN TX until the vehicle crate has positively identified the connected car.
+
+**Flag location:** `core-interface` — `static CAN_READ_ONLY: AtomicBool = AtomicBool::new(true)`. Defaults to `true` (locked) at boot so no frame can reach the bus before validation.
+
+**Public API (in `core-interface`):**
+*   `pub fn is_can_read_only() -> bool` — vehicle tasks call this to check whether TX is currently blocked.
+*   `pub fn set_can_read_only(enabled: bool)` — vehicle tasks call this to unlock (`false`) after validating inbound CAN frames confirm the correct car, or re-lock (`true`) if an error or inconsistent data is detected at any time.
+
+**Enforcement:** The drop happens at the board TX drain loops — not at `CAN_TX_CHANNEL` enqueue. Vehicle code is free to push frames to `CAN_TX_CHANNEL` at any time; the board loop checks `is_can_read_only()` for each frame addressed to its `bus_id` and silently discards it if the flag is set. Three sites enforce this:
+*   `board-pc` — `socket_can_task` TX arm (before `socket.write_frame()`)
+*   `board-esp` — `run_twai_loop` TX arm (before the `tx.transmit()` spin-loop)
+*   `board-esp` — `run_mcp2515_loop` TX arm (before `driver.send_message()`)
+
+**Intended vehicle workflow:**
+1. Boot: `CAN_READ_ONLY = true`. Vehicle receives CAN frames via `can_rx_task`.
+2. Vehicle validates frame IDs, data ranges, or handshake frames against its expected car profile.
+3. On success: `set_can_read_only(false)` — CAN TX is now live.
+4. On any subsequent error or unexpected data: `set_can_read_only(true)` re-engages the lock.
 
 ## 🏷️ Versioning & CI/CD
 *   **Independent Crates:** Managed via `release-plz` (not implemented yet, waiting for at least one car implementation to work). Changes to the core cascade safely to vehicle crates.
