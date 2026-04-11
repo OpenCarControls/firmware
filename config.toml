@@ -50,12 +50,17 @@ interface = "vcan0"
 #    NETWORK CONFIGURATION
 # ===========================
 
+[network.wifi]
+ssid = "YourSSID"
+password = "YourPassword"
+
 [network.mqtt]
-broker_url = "mqtts://192.168.0.100:8883"
+# Use mqtt:// for basic auth (plain TCP). Use mqtts:// for mTLS.
+broker_url = "mqtt://192.168.0.100:1883"
 client_id = "dev-car"
 
 # Specify the type of authentication to the broker.
-# - `basic` is for username/password combo
+# - `basic` is for username/password combo (no certs needed)
 # - `mtls` is for using mTLS with certificates
 auth_mode = "basic"
 
@@ -63,7 +68,7 @@ auth_mode = "basic"
 username = "user"
 password = "password"
 
-# mTLS authentication configuration
+# mTLS authentication configuration (only used when auth_mode = "mtls")
 ca_cert_file = "certs/ca.pem"
 client_cert_file = "certs/client_cert.pem"
 client_key_file = "certs/client_key.pem"

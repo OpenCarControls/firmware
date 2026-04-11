@@ -1,4 +1,4 @@
-use crate::{Config, TargetBuilder};
+use crate::{Config, TargetBuilder, parse_broker_url};
 use serde::Deserialize;
 use std::fs;
 use std::process::{Command, exit};
@@ -127,13 +127,50 @@ impl TargetBuilder for Builder {
             String::new()
         };
 
+        // Generate network constants and MQTT driver spawn
+        let (broker_host, broker_port) = parse_broker_url(&config.network.mqtt.broker_url);
+        let client_id = &config.network.mqtt.client_id;
+        let mqtt_username = config.network.mqtt.username.as_deref().unwrap_or("");
+        let mqtt_password = config.network.mqtt.password.as_deref().unwrap_or("");
+
+        let network_constants = format!(
+            "const MQTT_BROKER_HOST: &str = \"{host}\";\n\
+             const MQTT_BROKER_PORT: u16 = {port};\n\
+             const MQTT_CLIENT_ID: &str = \"{cid}\";\n\
+             const MQTT_CMD_TOPIC: &str = \"opencar/{cid}/cmd\";\n\
+             const MQTT_DATA_TOPIC: &str = \"opencar/{cid}/data\";\n\
+             const MQTT_USERNAME: &str = \"{user}\";\n\
+             const MQTT_PASSWORD: &str = \"{pass}\";",
+            host = broker_host,
+            port = broker_port,
+            cid = client_id,
+            user = mqtt_username,
+            pass = mqtt_password,
+        );
+
+        let mqtt_driver_spawn = format!(
+            "    spawner\n\
+             .spawn(board_pc::mqtt_driver_task(\n\
+             MQTT_BROKER_HOST,\n\
+             MQTT_BROKER_PORT,\n\
+             MQTT_CLIENT_ID,\n\
+             MQTT_CMD_TOPIC,\n\
+             MQTT_DATA_TOPIC,\n\
+             MQTT_USERNAME,\n\
+             MQTT_PASSWORD,\n\
+             ))\n\
+             .unwrap();\n"
+        );
+
         let template = fs::read_to_string("boards/pc/main.template.rs")
             .expect("\u{274c} Could not read boards/pc/main.template.rs");
         let main_rs = template
             .replace("{PLATFORM_ID}", &format!("0x{:08X}", platform_id))
             .replace("{VEHICLE_CRATE_IDENT}", &vehicle_crate_ident)
             .replace("{CAN_SPAWNS}", &can_spawns)
-            .replace("{MTLS_CERTS}", &mtls_certs);
+            .replace("{MTLS_CERTS}", &mtls_certs)
+            .replace("{NETWORK_CONSTANTS}", &network_constants)
+            .replace("{MQTT_DRIVER_SPAWN}", &mqtt_driver_spawn);
 
         fs::create_dir_all(".app_build/src").expect("Failed to create .app_build/src");
         fs::write(".app_build/Cargo.toml", cargo_toml).expect("Failed to write .app_build/Cargo.toml");

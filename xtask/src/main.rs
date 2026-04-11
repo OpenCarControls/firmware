@@ -24,6 +24,14 @@ pub struct TargetConfig {
 #[derive(Deserialize)]
 pub struct NetworkConfig {
     pub mqtt: MqttConfig,
+    #[serde(default)]
+    pub wifi: WifiConfig,
+}
+
+#[derive(Deserialize, Default)]
+pub struct WifiConfig {
+    pub ssid: Option<String>,
+    pub password: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -38,6 +46,33 @@ pub struct MqttConfig {
     // Used for basic auth
     pub username: Option<String>,
     pub password: Option<String>,
+}
+
+/// Strips the scheme from a broker URL and returns `(host, port)` as strings.
+/// Falls back to port 1883 for `mqtt://` and 8883 for `mqtts://`.
+pub fn parse_broker_url(url: &str) -> (String, u16) {
+    let (scheme, rest) = if let Some(r) = url.strip_prefix("mqtts://") {
+        ("mqtts", r)
+    } else if let Some(r) = url.strip_prefix("mqtt://") {
+        ("mqtt", r)
+    } else {
+        eprintln!("❌ broker_url must start with mqtt:// or mqtts://, got: {}", url);
+        std::process::exit(1);
+    };
+    let default_port: u16 = if scheme == "mqtts" { 8883 } else { 1883 };
+    // strip any path component
+    let host_port = rest.split('/').next().unwrap_or(rest);
+    if let Some(colon) = host_port.rfind(':') {
+        let host = &host_port[..colon];
+        let port_str = &host_port[colon + 1..];
+        let port = port_str.parse::<u16>().unwrap_or_else(|_| {
+            eprintln!("❌ Invalid port in broker_url: {}", port_str);
+            std::process::exit(1);
+        });
+        (host.to_string(), port)
+    } else {
+        (host_port.to_string(), default_port)
+    }
 }
 
 // ==========================================

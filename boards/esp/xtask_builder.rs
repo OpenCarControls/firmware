@@ -1,4 +1,4 @@
-use crate::{Config, TargetBuilder};
+use crate::{Config, TargetBuilder, parse_broker_url};
 use serde::Deserialize;
 use std::fs;
 use std::process::{Command, exit};
@@ -56,7 +56,7 @@ impl Builder {
             .arg("--target").arg(target_arch)
             .arg("--release");
 
-        let features = format!("esp-hal/{mcu},esp-rtos/{mcu},esp-backtrace/{mcu},esp-println/{mcu}");
+        let features = format!("esp-hal/{mcu},esp-rtos/{mcu},esp-backtrace/{mcu},esp-println/{mcu},esp-radio/{mcu}");
         cmd.arg("--features").arg(features);
 
         cmd.env("RUSTFLAGS", "-C link-arg=-Tlinkall.x");
@@ -217,13 +217,15 @@ impl TargetBuilder for Builder {
             vehicle_crate_name, brand, vehicle_platform
         ));
         cargo_toml.push_str("esp-hal = { version = \"1.0.0\", features = [\"unstable\"] }\n");
-        cargo_toml.push_str("esp-rtos = { version = \"0.2.0\", features = [\"embassy\"] }\n");
+        cargo_toml.push_str("esp-rtos = { version = \"0.2.0\", features = [\"embassy\", \"esp-radio\", \"esp-alloc\"] }\n");
         cargo_toml.push_str("esp-backtrace = { version = \"0.18.1\", features = [\"panic-handler\", \"println\"] }\n");
         cargo_toml.push_str("esp-println = { version = \"0.16.1\", features = [\"log-04\"] }\n");
-        cargo_toml.push_str("esp-alloc = \"0.7.0\"\n");
+        cargo_toml.push_str("esp-alloc = \"0.9.0\"\n");
         cargo_toml.push_str("embassy-executor = \"0.9.1\"\n");
         cargo_toml.push_str("embassy-time = \"0.5.1\"\n");
         cargo_toml.push_str("static_cell = \"2\"\n");
+        // Direct dep so we can forward the MCU chip feature via --features esp-radio/<mcu>
+        cargo_toml.push_str("esp-radio = { version = \"0.17.0\", features = [\"wifi\", \"smoltcp\", \"unstable\"] }\n");
 
         if config.network.mqtt.auth_mode == "mtls" {
             // certs are embedded via include_bytes! in main.rs, no extra deps needed
@@ -243,6 +245,60 @@ impl TargetBuilder for Builder {
             String::new()
         };
 
+        // Generate network constants and WiFi/MQTT driver spawn
+        let (broker_host, broker_port) = parse_broker_url(&config.network.mqtt.broker_url);
+        let client_id = &config.network.mqtt.client_id;
+        let mqtt_username = config.network.mqtt.username.as_deref().unwrap_or("");
+        let mqtt_password = config.network.mqtt.password.as_deref().unwrap_or("");
+        let wifi_ssid = config.network.wifi.ssid.as_deref().unwrap_or_else(|| {
+            eprintln!("\u{274c} [network.wifi].ssid is required for the ESP board");
+            exit(1);
+        });
+        let wifi_password = config.network.wifi.password.as_deref().unwrap_or("");
+
+        let network_constants = format!(
+            "const WIFI_SSID: &str = \"{ssid}\";\n\
+             const WIFI_PASSWORD: &str = \"{wifi_pw}\";\n\
+             const MQTT_BROKER_HOST: &str = \"{host}\";\n\
+             const MQTT_BROKER_PORT: u16 = {port};\n\
+             const MQTT_CLIENT_ID: &str = \"{cid}\";\n\
+             const MQTT_CMD_TOPIC: &str = \"opencar/{cid}/cmd\";\n\
+             const MQTT_DATA_TOPIC: &str = \"opencar/{cid}/data\";\n\
+             const MQTT_USERNAME: &str = \"{user}\";\n\
+             const MQTT_PASSWORD: &str = \"{pass}\";",
+            ssid = wifi_ssid,
+            wifi_pw = wifi_password,
+            host = broker_host,
+            port = broker_port,
+            cid = client_id,
+            user = mqtt_username,
+            pass = mqtt_password,
+        );
+
+        let network_hardware_init = format!(
+            "    let wifi_stack = board_esp::init_wifi(\n\
+             &spawner,\n\
+             peripherals.WIFI,\n\
+             WIFI_SSID,\n\
+             WIFI_PASSWORD,\n\
+             );\n"
+        );
+
+        let mqtt_driver_spawn = format!(
+            "    spawner\n\
+             .spawn(board_esp::mqtt_driver_task(\n\
+             wifi_stack,\n\
+             MQTT_BROKER_HOST,\n\
+             MQTT_BROKER_PORT,\n\
+             MQTT_CLIENT_ID,\n\
+             MQTT_CMD_TOPIC,\n\
+             MQTT_DATA_TOPIC,\n\
+             MQTT_USERNAME,\n\
+             MQTT_PASSWORD,\n\
+             ))\n\
+             .unwrap();\n"
+        );
+
         let template = fs::read_to_string("boards/esp/main.template.rs")
             .expect("\u{274c} Could not read boards/esp/main.template.rs");
         let main_rs = template
@@ -251,7 +307,10 @@ impl TargetBuilder for Builder {
             .replace("{CAN_HARDWARE_INIT}", &can_hardware_init)
             .replace("{CORE1_CAN_TASK_DEFS}", &can_task_defs)
             .replace("{CORE1_TASK_SPAWNS}", &can_task_spawns)
-            .replace("{MTLS_CERTS}", &mtls_certs);
+            .replace("{MTLS_CERTS}", &mtls_certs)
+            .replace("{NETWORK_CONSTANTS}", &network_constants)
+            .replace("{NETWORK_HARDWARE_INIT}", &network_hardware_init)
+            .replace("{MQTT_DRIVER_SPAWN}", &mqtt_driver_spawn);
 
         fs::create_dir_all(".app_build/src").expect("Failed to create .app_build/src");
         fs::write(".app_build/Cargo.toml", cargo_toml).expect("Failed to write .app_build/Cargo.toml");
@@ -298,8 +357,8 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str("core-interface = { path = \"../core-interface\" }\n");
         cargo_toml.push_str("board-esp = { path = \"../boards/esp\", features = [\"hardware\"] }\n");
         cargo_toml.push_str("esp-hal = { version = \"1.0.0\", features = [\"unstable\"] }\n");
-        cargo_toml.push_str("esp-rtos = { version = \"0.2.0\", features = [\"embassy\"] }\n");
-        cargo_toml.push_str("esp-alloc = \"0.7.0\"\n");
+        cargo_toml.push_str("esp-rtos = { version = \"0.2.0\", features = [\"embassy\", \"esp-radio\", \"esp-alloc\"] }\n");
+        cargo_toml.push_str("esp-alloc = \"0.9.0\"\n");
         cargo_toml.push_str("esp-println = { version = \"0.16.1\", features = [\"log-04\"] }\n");
         cargo_toml.push_str("embassy-executor = \"0.9.1\"\n");
         cargo_toml.push_str("embassy-time = \"0.5.1\"\n");
