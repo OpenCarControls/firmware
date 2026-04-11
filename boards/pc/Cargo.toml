@@ -5,5 +5,8 @@ edition = "2024"
 
 [dependencies]
 core-interface = { path = "../../core-interface" }
+embedded-can = "0.4.1"
 embassy-executor = { version = "0.9.1", default-features = false }
+embassy-time = { version = "0.5.1", default-features = false }
 critical-section = { version = "1", features = ["std"] }
+socketcan = { version = "3", default-features = false }

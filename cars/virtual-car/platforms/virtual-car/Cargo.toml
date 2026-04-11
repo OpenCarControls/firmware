@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 core-interface = { workspace = true }
+embedded-can = "0.4.1"
 prost = { workspace = true }
 bytes = { workspace = true }
 embassy-executor = { version = "0.9.1", default-features = false }

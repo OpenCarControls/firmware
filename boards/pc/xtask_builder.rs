@@ -4,24 +4,31 @@ use std::fs;
 use std::process::{Command, exit};
 
 #[derive(Deserialize)]
-struct RpiConfig {
-    can_interface: String,
+struct PcCanBus {
+    interface: String,
+}
+
+#[derive(Deserialize)]
+struct PcHardwareConfig {
+    #[serde(default)]
+    can_buses: Vec<PcCanBus>,
 }
 
 #[derive(Deserialize)]
 struct PlatformMeta {
     platform_id: String,
+    can_bus_count: usize,
 }
 
 pub struct Builder;
 
 impl Builder {
-    fn get_pc_config(config: &Config) -> RpiConfig {
+    fn get_pc_hw(config: &Config) -> PcHardwareConfig {
         config.hardware.get("pc")
-            .expect("❌ Missing [hardware.pc] section in config")
+            .expect("\u{274c} Missing [hardware.pc] section in config")
             .clone()
             .try_into()
-            .expect("❌ Invalid [hardware.pc] config format")
+            .expect("\u{274c} Invalid [hardware.pc] config format")
     }
 
     fn execute_cargo_command(&self, cargo_cmd: &str) {
@@ -44,12 +51,12 @@ impl TargetBuilder for Builder {
     }
 
     fn generate_app_build(&self, config: &Config) {
-        let pc_hw = Self::get_pc_config(config);
+        let pc_hw = Self::get_pc_hw(config);
         let brand = &config.target.brand;
         let vehicle_platform = &config.target.platform;
         let platform_underscore = vehicle_platform.replace('-', "_");
 
-        // Read platform_id from contracts meta.toml
+        // Read platform meta (platform_id + can_bus_count)
         let meta_path = format!("contracts/opencar/cars/{}/v1/meta.toml", platform_underscore);
         let meta_str = fs::read_to_string(&meta_path)
             .unwrap_or_else(|_| panic!("\u{274c} Could not read platform meta: {}", meta_path));
@@ -58,6 +65,15 @@ impl TargetBuilder for Builder {
         let hex = meta.platform_id.trim_start_matches("0x").trim_start_matches("0X");
         let platform_id: u32 = u32::from_str_radix(hex, 16)
             .expect("\u{274c} Invalid platform_id hex in meta.toml");
+
+        // Validate CAN bus count
+        if pc_hw.can_buses.len() < meta.can_bus_count {
+            eprintln!(
+                "\u{274c} Vehicle '{}' requires {} CAN bus(es) but [hardware.pc] only defines {} [[hardware.pc.can_buses]] entries.",
+                vehicle_platform, meta.can_bus_count, pc_hw.can_buses.len()
+            );
+            exit(1);
+        }
 
         // Read vehicle crate name from its Cargo.toml
         let vehicle_cargo_path = format!("cars/{}/platforms/{}/Cargo.toml", brand, vehicle_platform);
@@ -69,6 +85,15 @@ impl TargetBuilder for Builder {
             .expect("\u{274c} Missing [package.name] in vehicle Cargo.toml")
             .to_string();
         let vehicle_crate_ident = vehicle_crate_name.replace('-', "_");
+
+        // Generate one socket_can_task spawn per bus.
+        // Only the first `can_bus_count` buses are used by the vehicle; extras are ignored.
+        let can_spawns: String = pc_hw.can_buses.iter().take(meta.can_bus_count).enumerate()
+            .map(|(bus_id, bus)| format!(
+                "    spawner.spawn(board_pc::socket_can_task(\"{}\", {}, {}::CAN_FILTERS)).unwrap();\n",
+                bus.interface, bus_id, vehicle_crate_ident
+            ))
+            .collect();
 
         // Build .app_build/Cargo.toml
         let mut cargo_toml = String::new();
@@ -85,12 +110,8 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str("critical-section = { version = \"1\", features = [\"std\"] }\n");
 
         if config.network.mqtt.auth_mode == "mtls" {
-            let ca = config.network.mqtt.ca_cert_file.as_ref().unwrap();
-            let cert = config.network.mqtt.client_cert_file.as_ref().unwrap();
-            let key = config.network.mqtt.client_key_file.as_ref().unwrap();
-            cargo_toml.push_str(&format!("# mTLS cert paths used via include_bytes! in main.rs\n"));
             // certs are embedded via include_bytes! in main.rs, no extra deps needed
-            let _ = (ca, cert, key);
+            let _ = (&config.network.mqtt.ca_cert_file, &config.network.mqtt.client_cert_file, &config.network.mqtt.client_key_file);
         }
 
         // Build .app_build/src/main.rs from template
@@ -110,8 +131,8 @@ impl TargetBuilder for Builder {
             .expect("\u{274c} Could not read boards/pc/main.template.rs");
         let main_rs = template
             .replace("{PLATFORM_ID}", &format!("0x{:08X}", platform_id))
-            .replace("{CAN_INTERFACE}", &pc_hw.can_interface)
             .replace("{VEHICLE_CRATE_IDENT}", &vehicle_crate_ident)
+            .replace("{CAN_SPAWNS}", &can_spawns)
             .replace("{MTLS_CERTS}", &mtls_certs);
 
         fs::create_dir_all(".app_build/src").expect("Failed to create .app_build/src");

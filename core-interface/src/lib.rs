@@ -41,6 +41,33 @@ pub struct InboundCommand {
     pub bytes: Vec<u8>,
 }
 
+/// A CAN frame received from or to be sent on a CAN bus.
+pub struct CanFrame {
+    /// Index into the `[[can_buses]]` config array (0-based). Identifies which
+    /// physical bus this frame belongs to.
+    pub bus_id: u8,
+    /// The CAN identifier (standard 11-bit or extended 29-bit).
+    pub id: embedded_can::Id,
+    /// Frame payload bytes.
+    pub data: [u8; 8],
+    /// Data length code — number of valid bytes in `data` (0–8).
+    pub dlc: u8,
+}
+
+/// A CAN hardware acceptance filter. The frame passes if:
+///   `(frame_id_raw & mask) == (filter_id_raw & mask)`
+/// where `mask` bit = 1 means that bit must match.
+/// Use `mask = 0x7FF` for exact standard-ID match, `mask = u32::MAX` for exact
+/// extended-ID match, `mask = 0` to accept every frame on this bus.
+pub struct CanFilter {
+    /// Which bus this filter applies to (matches `CanFrame::bus_id`).
+    pub bus_id: u8,
+    /// The CAN identifier pattern to match against.
+    pub id: embedded_can::Id,
+    /// Acceptance mask — bits set to 1 must match between frame ID and filter ID.
+    pub mask: u32,
+}
+
 /// Encoded vehicle state produced by the vehicle crate and consumed by
 /// `publish_state_task` to build outbound `DeviceToApp` messages.
 pub struct VehicleStatePayload {
@@ -82,6 +109,12 @@ pub static CMD_RESP_CHANNEL: Channel<
 /// Vehicle state updates produced by the vehicle task, consumed by `publish_state_task`.
 pub static VEHICLE_STATE_CHANNEL: Channel<CriticalSectionRawMutex, VehicleStatePayload, 4> =
     Channel::new();
+/// CAN frames received by a board CAN driver task and forwarded to the vehicle task.
+/// Each frame carries a `bus_id` identifying which physical bus it arrived on.
+pub static CAN_RX_CHANNEL: Channel<CriticalSectionRawMutex, CanFrame, 16> = Channel::new();
+/// CAN frames produced by the vehicle task and forwarded to the board CAN driver
+/// task for transmission. Each frame carries the `bus_id` of the target bus.
+pub static CAN_TX_CHANNEL: Channel<CriticalSectionRawMutex, CanFrame, 16> = Channel::new();
 
 // ── Command Dispatcher Tasks ──────────────────────────────────────────────────
 
