@@ -15,3 +15,7 @@ bytes ={ workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true }
+
+[dev-dependencies]
+critical-section = { version = "1", features = ["std"] }
+embassy-futures = "0.1"

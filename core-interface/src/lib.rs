@@ -1,4 +1,4 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 extern crate alloc;
 
 pub mod proto {
@@ -77,6 +77,31 @@ pub struct VehicleStatePayload {
     pub advanced: Vec<u8>,
 }
 
+// ── CAN Filter ────────────────────────────────────────────────────────────────
+
+/// Returns the raw numeric value of a CAN identifier.
+fn id_raw(id: embedded_can::Id) -> u32 {
+    match id {
+        embedded_can::Id::Standard(sid) => sid.as_raw() as u32,
+        embedded_can::Id::Extended(eid) => eid.as_raw(),
+    }
+}
+
+/// Software acceptance filter. Returns `true` if `frame` matches at least one
+/// entry in `filters` on the same `bus_id`:
+///   `(frame_id_raw & mask) == (filter_id_raw & mask)`
+///
+/// This is the software second-pass used by both board drivers. MCP2515 also
+/// applies a hardware first-pass programmed from the same `filters` list;
+/// TWAI uses accept-all hardware and relies solely on this function.
+pub fn passes_filter(frame: &CanFrame, filters: &[CanFilter]) -> bool {
+    let frame_raw = id_raw(frame.id);
+    filters
+        .iter()
+        .filter(|f| f.bus_id == frame.bus_id)
+        .any(|f| (frame_raw & f.mask) == (id_raw(f.id) & f.mask))
+}
+
 // ── Static Channels ───────────────────────────────────────────────────────────
 
 /// Outbound state/response messages toward the BLE driver task.
@@ -118,74 +143,100 @@ pub static CAN_TX_CHANNEL: Channel<CriticalSectionRawMutex, CanFrame, 16> = Chan
 
 // ── Command Dispatcher Tasks ──────────────────────────────────────────────────
 
-/// Receives `AppToDevice` messages from the BLE driver, validates `platform_id`,
-/// and routes each payload:
+/// Processes a single `AppToDevice` message arriving from the BLE driver.
+/// Validates `platform_id` and routes each payload variant to the correct channel:
 /// - `system_command` → `SYSTEM_COMMAND_CHANNEL`
 /// - `basic_command_bytes` → `BASIC_CMD_CHANNEL` (Transport::Ble)
 /// - `advanced_command_bytes` → `ADVANCED_CMD_CHANNEL` (Transport::Ble)
-#[embassy_executor::task]
-pub async fn process_ble_commands_task() {
-    let receiver = BLE_RX_CHANNEL.receiver();
-    loop {
-        let msg = receiver.receive().await;
-        if msg.platform_id != PLATFORM_ID.load(Ordering::Relaxed) {
-            continue;
-        }
-        match msg.payload {
-            Some(proto::app_to_device::Payload::SystemCommand(cmd)) => {
-                SYSTEM_COMMAND_CHANNEL.sender().send(cmd).await;
-            }
-            Some(proto::app_to_device::Payload::BasicCommandBytes(bytes)) => {
-                BASIC_CMD_CHANNEL
-                    .sender()
-                    .send(InboundCommand {
-                        message_id: msg.message_id,
-                        transport: Transport::Ble,
-                        bytes,
-                    })
-                    .await;
-            }
-            Some(proto::app_to_device::Payload::AdvancedCommandBytes(bytes)) => {
-                ADVANCED_CMD_CHANNEL
-                    .sender()
-                    .send(InboundCommand {
-                        message_id: msg.message_id,
-                        transport: Transport::Ble,
-                        bytes,
-                    })
-                    .await;
-            }
-            None => {}
-        }
+/// Messages with a mismatched `platform_id` are silently dropped.
+pub async fn handle_ble_message(msg: proto::AppToDevice) {
+    if msg.platform_id != PLATFORM_ID.load(Ordering::Relaxed) {
+        return;
     }
-}
-
-/// Receives `AppToDevice` messages from the MQTT driver, validates `platform_id`,
-/// and routes `basic_command_bytes` → `BASIC_CMD_CHANNEL` (Transport::Mqtt).
-/// `SystemCommand` and `advanced_command_bytes` are silently dropped — both
-/// are restricted to BLE only.
-#[embassy_executor::task]
-pub async fn process_mqtt_commands_task() {
-    let receiver = MQTT_RX_CHANNEL.receiver();
-    loop {
-        let msg = receiver.receive().await;
-        if msg.platform_id != PLATFORM_ID.load(Ordering::Relaxed) {
-            continue;
+    match msg.payload {
+        Some(proto::app_to_device::Payload::SystemCommand(cmd)) => {
+            SYSTEM_COMMAND_CHANNEL.sender().send(cmd).await;
         }
-        if let Some(proto::app_to_device::Payload::BasicCommandBytes(bytes)) = msg.payload {
+        Some(proto::app_to_device::Payload::BasicCommandBytes(bytes)) => {
             BASIC_CMD_CHANNEL
                 .sender()
                 .send(InboundCommand {
                     message_id: msg.message_id,
-                    transport: Transport::Mqtt,
+                    transport: Transport::Ble,
                     bytes,
                 })
                 .await;
         }
+        Some(proto::app_to_device::Payload::AdvancedCommandBytes(bytes)) => {
+            ADVANCED_CMD_CHANNEL
+                .sender()
+                .send(InboundCommand {
+                    message_id: msg.message_id,
+                    transport: Transport::Ble,
+                    bytes,
+                })
+                .await;
+        }
+        None => {}
+    }
+}
+
+#[embassy_executor::task]
+pub async fn process_ble_commands_task() {
+    let receiver = BLE_RX_CHANNEL.receiver();
+    loop {
+        handle_ble_message(receiver.receive().await).await;
+    }
+}
+
+/// Processes a single `AppToDevice` message arriving from the MQTT driver.
+/// Validates `platform_id` and routes `basic_command_bytes` →
+/// `BASIC_CMD_CHANNEL` (Transport::Mqtt).
+/// `SystemCommand` and `advanced_command_bytes` are silently dropped — both
+/// are restricted to BLE only.
+pub async fn handle_mqtt_message(msg: proto::AppToDevice) {
+    if msg.platform_id != PLATFORM_ID.load(Ordering::Relaxed) {
+        return;
+    }
+    if let Some(proto::app_to_device::Payload::BasicCommandBytes(bytes)) = msg.payload {
+        BASIC_CMD_CHANNEL
+            .sender()
+            .send(InboundCommand {
+                message_id: msg.message_id,
+                transport: Transport::Mqtt,
+                bytes,
+            })
+            .await;
+    }
+}
+
+#[embassy_executor::task]
+pub async fn process_mqtt_commands_task() {
+    let receiver = MQTT_RX_CHANNEL.receiver();
+    loop {
+        handle_mqtt_message(receiver.receive().await).await;
     }
 }
 
 // ── Response & State Router Tasks ─────────────────────────────────────────────
+
+/// Routes a single command response to BLE or MQTT based on the transport tag.
+/// `timestamp_ms` is passed explicitly so callers (and tests) control the clock.
+pub async fn route_single_response(
+    transport: Transport,
+    response: proto::CommandResponse,
+    timestamp_ms: u64,
+) {
+    let msg = proto::DeviceToApp {
+        timestamp_ms,
+        platform_id: PLATFORM_ID.load(Ordering::Relaxed),
+        payload: Some(proto::device_to_app::Payload::CommandResponse(response)),
+    };
+    match transport {
+        Transport::Ble => BLE_TX_CHANNEL.sender().send(msg).await,
+        Transport::Mqtt => MQTT_TX_CHANNEL.sender().send(msg).await,
+    }
+}
 
 /// Reads command responses from `CMD_RESP_CHANNEL` and routes each as a
 /// `DeviceToApp(command_response)` to BLE or MQTT based on the transport tag.
@@ -196,16 +247,52 @@ pub async fn route_responses_task() {
     let receiver = CMD_RESP_CHANNEL.receiver();
     loop {
         let (transport, response) = receiver.receive().await;
-        let msg = proto::DeviceToApp {
-            timestamp_ms: Instant::now().as_millis(),
-            platform_id: PLATFORM_ID.load(Ordering::Relaxed),
-            payload: Some(proto::device_to_app::Payload::CommandResponse(response)),
-        };
-        match transport {
-            Transport::Ble => BLE_TX_CHANNEL.sender().send(msg).await,
-            Transport::Mqtt => MQTT_TX_CHANNEL.sender().send(msg).await,
-        }
+        route_single_response(transport, response, Instant::now().as_millis()).await;
     }
+}
+
+/// Publishes a single vehicle state update.
+/// - BLE receives the full state (basic + advanced).
+/// - MQTT receives basic only (`advanced_state_bytes` is always empty).
+/// `timestamp_ms` is passed explicitly so callers (and tests) control the clock.
+pub async fn publish_single_state(payload: VehicleStatePayload, timestamp_ms: u64) {
+    let pid = PLATFORM_ID.load(Ordering::Relaxed);
+
+    // BLE: full state (basic + advanced)
+    BLE_TX_CHANNEL
+        .sender()
+        .send(proto::DeviceToApp {
+            timestamp_ms,
+            platform_id: pid,
+            payload: Some(proto::device_to_app::Payload::StateUpdate(
+                proto::StateUpdate {
+                    system_state: None,
+                    vehicle_state: Some(proto::VehicleState {
+                        basic_state_bytes: payload.basic.clone(),
+                        advanced_state_bytes: payload.advanced,
+                    }),
+                },
+            )),
+        })
+        .await;
+
+    // MQTT: basic only (advanced is BLE-exclusive)
+    MQTT_TX_CHANNEL
+        .sender()
+        .send(proto::DeviceToApp {
+            timestamp_ms,
+            platform_id: pid,
+            payload: Some(proto::device_to_app::Payload::StateUpdate(
+                proto::StateUpdate {
+                    system_state: None,
+                    vehicle_state: Some(proto::VehicleState {
+                        basic_state_bytes: payload.basic,
+                        advanced_state_bytes: alloc::vec![],
+                    }),
+                },
+            )),
+        })
+        .await;
 }
 
 /// Reads `VehicleStatePayload` from `VEHICLE_STATE_CHANNEL` and publishes two
@@ -219,43 +306,6 @@ pub async fn publish_state_task() {
     let receiver = VEHICLE_STATE_CHANNEL.receiver();
     loop {
         let payload = receiver.receive().await;
-        let now = Instant::now().as_millis();
-        let pid = PLATFORM_ID.load(Ordering::Relaxed);
-
-        // BLE: full state (basic + advanced)
-        BLE_TX_CHANNEL
-            .sender()
-            .send(proto::DeviceToApp {
-                timestamp_ms: now,
-                platform_id: pid,
-                payload: Some(proto::device_to_app::Payload::StateUpdate(
-                    proto::StateUpdate {
-                        system_state: None,
-                        vehicle_state: Some(proto::VehicleState {
-                            basic_state_bytes: payload.basic.clone(),
-                            advanced_state_bytes: payload.advanced,
-                        }),
-                    },
-                )),
-            })
-            .await;
-
-        // MQTT: basic only (advanced is BLE-exclusive)
-        MQTT_TX_CHANNEL
-            .sender()
-            .send(proto::DeviceToApp {
-                timestamp_ms: now,
-                platform_id: pid,
-                payload: Some(proto::device_to_app::Payload::StateUpdate(
-                    proto::StateUpdate {
-                        system_state: None,
-                        vehicle_state: Some(proto::VehicleState {
-                            basic_state_bytes: payload.basic,
-                            advanced_state_bytes: alloc::vec![],
-                        }),
-                    },
-                )),
-            })
-            .await;
+        publish_single_state(payload, Instant::now().as_millis()).await;
     }
 }

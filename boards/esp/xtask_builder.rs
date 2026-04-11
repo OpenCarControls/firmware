@@ -211,7 +211,7 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str("[package]\nname = \"app-build\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n");
         cargo_toml.push_str("[dependencies]\n");
         cargo_toml.push_str("core-interface = { path = \"../core-interface\" }\n");
-        cargo_toml.push_str("board-esp = { path = \"../boards/esp\" }\n");
+        cargo_toml.push_str("board-esp = { path = \"../boards/esp\", features = [\"hardware\"] }\n");
         cargo_toml.push_str(&format!(
             "{} = {{ path = \"../cars/{}/platforms/{}\" }}\n",
             vehicle_crate_name, brand, vehicle_platform
@@ -271,6 +271,114 @@ impl TargetBuilder for Builder {
     fn clippy(&self, config: &Config) {
         println!("🔍 Running clippy on the firmware build pipeline...");
         self.execute_cargo_command(config, "clippy");
+    }
+
+    fn generate_app_test_build(&self, config: &Config) {
+        let esp_hw = Self::get_esp_config(config);
+        let mcu = &esp_hw.mcu;
+
+        // Read platform meta for PLATFORM_ID
+        let platform_underscore = config.target.platform.replace('-', "_");
+        let meta_path = format!("contracts/opencar/cars/{}/v1/meta.toml", platform_underscore);
+        let meta_str = fs::read_to_string(&meta_path)
+            .unwrap_or_else(|_| panic!("\u{274c} Could not read platform meta: {}", meta_path));
+        let meta: PlatformMeta = toml::from_str(&meta_str)
+            .expect("\u{274c} Invalid platform meta.toml format");
+        let hex = meta.platform_id.trim_start_matches("0x").trim_start_matches("0X");
+        let platform_id: u32 = u32::from_str_radix(hex, 16)
+            .expect("\u{274c} Invalid platform_id hex in meta.toml");
+
+        // Read any user-defined on-hardware tests from boards/esp/tests/hardware.rs
+        let extra_tests = fs::read_to_string("boards/esp/tests/hardware.rs").unwrap_or_default();
+
+        // Build .app_test_build/Cargo.toml
+        let mut cargo_toml = String::new();
+        cargo_toml.push_str("[package]\nname = \"app-test-build\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n");
+        cargo_toml.push_str("[dependencies]\n");
+        cargo_toml.push_str("core-interface = { path = \"../core-interface\" }\n");
+        cargo_toml.push_str("board-esp = { path = \"../boards/esp\", features = [\"hardware\"] }\n");
+        cargo_toml.push_str("esp-hal = { version = \"1.0.0\", features = [\"unstable\"] }\n");
+        cargo_toml.push_str("esp-rtos = { version = \"0.2.0\", features = [\"embassy\"] }\n");
+        cargo_toml.push_str("esp-alloc = \"0.7.0\"\n");
+        cargo_toml.push_str("esp-println = { version = \"0.16.1\", features = [\"log-04\"] }\n");
+        cargo_toml.push_str("embassy-executor = \"0.9.1\"\n");
+        cargo_toml.push_str("embassy-time = \"0.5.1\"\n");
+        cargo_toml.push_str("static_cell = \"2\"\n");
+        // embedded-test with defmt RTT for reporting results over probe-rs
+        cargo_toml.push_str("embedded-test = { version = \"0.5\", features = [\"embassy\"] }\n");
+        cargo_toml.push_str("defmt = \"0.3\"\n");
+        cargo_toml.push_str("defmt-rtt = \"0.4\"\n");
+        cargo_toml.push_str("panic-probe = { version = \"0.3\", features = [\"print-defmt\"] }\n");
+
+        // Chip-specific feature string for esp-hal/esp-rtos
+        let features = format!("esp-hal/{mcu},esp-rtos/{mcu},esp-println/{mcu}");
+        cargo_toml.push_str(&format!("\n[features]\ndefault = [\"{}\"]", features));
+
+        // Generate main.rs from template
+        let template = fs::read_to_string("boards/esp/tests.template.rs")
+            .expect("\u{274c} Could not read boards/esp/tests.template.rs");
+        let main_rs = template
+            .replace("{PLATFORM_ID}", &format!("0x{:08X}", platform_id))
+            .replace("{ON_HARDWARE_TESTS}", &extra_tests);
+
+        fs::create_dir_all(".app_test_build/src").expect("Failed to create .app_test_build/src");
+        fs::write(".app_test_build/Cargo.toml", cargo_toml)
+            .expect("Failed to write .app_test_build/Cargo.toml");
+        fs::write(".app_test_build/src/main.rs", main_rs)
+            .expect("Failed to write .app_test_build/src/main.rs");
+        println!("✅ .app_test_build/ generated for {} ({})", mcu, config.target.platform);
+    }
+
+    fn test_hardware(&self, config: &Config) {
+        let esp_hw = Self::get_esp_config(config);
+        let mcu = &esp_hw.mcu;
+
+        let target_arch = match mcu.as_str() {
+            "esp32"   => "xtensa-esp32-none-elf",
+            "esp32s2" => "xtensa-esp32s2-none-elf",
+            "esp32s3" => "xtensa-esp32s3-none-elf",
+            "esp32c3" => "riscv32imc-unknown-none-elf",
+            "esp32c6" => "riscv32imac-unknown-none-elf",
+            _ => unreachable!(),
+        };
+
+        println!("⚙️  Compiling on-hardware tests for {} ({})...", mcu, target_arch);
+
+        let mut build_cmd = Command::new("cargo");
+        if target_arch.starts_with("xtensa") {
+            build_cmd.arg("+esp").arg("-Zbuild-std=core,alloc");
+        }
+        build_cmd
+            .arg("test")
+            .arg("--no-run")
+            .arg("--manifest-path").arg(".app_test_build/Cargo.toml")
+            .arg("--target").arg(target_arch);
+        build_cmd.env("RUSTFLAGS", "-C link-arg=-Tlinkall.x");
+
+        let status = build_cmd.status().expect("Failed to compile test binary");
+        if !status.success() { exit(status.code().unwrap_or(1)); }
+
+        // Locate the compiled test binary under .app_test_build/target/
+        let test_bin_dir = format!(".app_test_build/target/{}/debug/deps", target_arch);
+        let test_binary = fs::read_dir(&test_bin_dir)
+            .unwrap_or_else(|_| panic!("\u{274c} Could not read {}", test_bin_dir))
+            .filter_map(|e| e.ok())
+            .find(|e| {
+                let name = e.file_name();
+                let s = name.to_string_lossy();
+                s.starts_with("app_test_build") && !s.contains('.')
+            })
+            .unwrap_or_else(|| panic!("\u{274c} Could not find test binary in {}", test_bin_dir))
+            .path();
+
+        println!("🔌 Flashing and running tests via probe-rs: {}", test_binary.display());
+        let run_status = Command::new("probe-rs")
+            .arg("test")
+            .arg(&test_binary)
+            .arg("--chip").arg(mcu)
+            .status()
+            .expect("probe-rs not found — install it with: cargo install probe-rs-tools");
+        if !run_status.success() { exit(run_status.code().unwrap_or(1)); }
     }
 }
 

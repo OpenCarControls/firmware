@@ -14,3 +14,7 @@ embassy-time = { version = "0.5.1", default-features = false }
 
 [build-dependencies]
 prost-build = { workspace = true }
+
+[dev-dependencies]
+critical-section = { version = "1", features = ["std"] }
+embassy-futures = "0.1"

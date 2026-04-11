@@ -39,7 +39,44 @@ The firmware is structured as a Cargo workspace with a few key components:
 └── ...
 ```
 
-## 🤖 CI/CD and Versioning
+## � Running Tests
+
+All host tests run without any hardware. `--test-threads=1` is required because the channel statics are process-global — parallel threads corrupt each other’s state.
+
+### All host tests at once (via xtask)
+
+```bash
+cargo xtask test
+```
+
+This runs `core-interface`, `board-pc`, `board-esp`, and the configured vehicle crate in order.
+
+### Individual crates
+
+```bash
+cargo test -p core-interface -- --test-threads=1          # channel dispatch, filter, routing
+cargo test -p virtual-car-controller -- --test-threads=1  # CAN frame handling, command processing
+cargo test -p board-pc -- --test-threads=1                # SocketCAN frame conversion helpers
+cargo test -p board-esp -- --test-threads=1               # MCP2515 mask computation (no HAL needed)
+```
+
+> **Why not `--workspace`?** That would also compile `board-esp` with its ESP HAL deps, which require the Xtensa toolchain. Use explicit `-p` flags or `cargo xtask test` instead.
+
+### On-hardware tests (ESP32, requires `probe-rs`)
+
+For tests that need real hardware — CAN loopback, channel round-trips, etc.:
+
+```bash
+cargo xtask test --board esp --on-hardware
+```
+
+This generates `.app_test_build/` (mirroring `.app_build/`), compiles the [embedded-test](https://github.com/embassy-rs/embedded-test) harness with the ESP toolchain, and flashes/runs it via `probe-rs`. Test results are reported over RTT.
+
+Add your own on-device tests to `boards/esp/tests/hardware.rs` — xtask injects that file into the generated test binary automatically.
+
+> **Note:** `probe-rs` must be installed: `cargo install probe-rs-tools`
+
+## �🤖 CI/CD and Versioning
 
 *   **Versioning**: Crate versioning is managed with `release-plz`. *This is not implemented yet, it will be implemented later once we have a working car implementation.*
 *   **Continuous Integration**: GitHub Actions are used to build the firmware for different vehicle targets. The workflow dynamically parses the git tag to determine the correct configuration and build parameters.

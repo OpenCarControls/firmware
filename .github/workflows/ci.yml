@@ -14,7 +14,7 @@ jobs:
     name: Format & Lint Host
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v6
       
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -26,7 +26,95 @@ jobs:
 
       - name: Lint xtask
         run: cargo clippy --package xtask
-        
+
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0   # full history needed for git diff
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Determine crates to test
+        id: crates
+        run: |
+          # On push to main, diff against the previous commit.
+          # On a pull_request, diff against the merge base.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE=${{ github.event.pull_request.base.sha }}
+          else
+            BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-parse --root)
+          fi
+
+          CHANGED=$(git diff --name-only "$BASE" HEAD)
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          # If core-interface changed, every testable crate must run.
+          if echo "$CHANGED" | grep -q '^core-interface/'; then
+            echo "Core changed — running all tests"
+            # Collect every crate under cars/ that has a Cargo.toml
+            PKGS=$(find cars -name "Cargo.toml" -exec \
+              cargo metadata --no-deps --manifest-path {} --format-version 1 2>/dev/null \; \
+              | python3 -c "
+          import json, sys
+          for line in sys.stdin:
+              line = line.strip()
+              if not line:
+                  continue
+              try:
+                  d = json.loads(line)
+                  for p in d.get('packages', []):
+                      print(p['name'])
+              except Exception:
+                  pass
+          ")
+            # Include core-interface itself and both board host-test crates
+            PKGS="core-interface board-pc board-esp $PKGS"
+          else
+            # Only the vehicle platforms whose source tree changed.
+            PKGS=""
+            for manifest in $(find cars -name "Cargo.toml"); do
+              dir=$(dirname "$manifest")
+              if echo "$CHANGED" | grep -q "^$dir/"; then
+                name=$(cargo metadata --no-deps --manifest-path "$manifest" \
+                  --format-version 1 2>/dev/null \
+                  | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['packages'][0]['name'])" \
+                  2>/dev/null)
+                [ -n "$name" ] && PKGS="$PKGS $name"
+              fi
+            done
+            # Also include core-interface if it was directly modified
+            echo "$CHANGED" | grep -q '^core-interface/' && PKGS="core-interface $PKGS"
+            # Include board crates if their source changed
+            echo "$CHANGED" | grep -q '^boards/pc/'  && PKGS="board-pc $PKGS"
+            echo "$CHANGED" | grep -q '^boards/esp/' && PKGS="board-esp $PKGS"
+          fi
+
+          # Deduplicate and trim
+          PKGS=$(echo "$PKGS" | tr ' ' '\n' | sort -u | tr '\n' ' ' | xargs)
+          echo "Packages to test: $PKGS"
+          echo "packages=$PKGS" >> "$GITHUB_OUTPUT"
+
+      - name: Run tests
+        if: steps.crates.outputs.packages != ''
+        run: |
+          for pkg in ${{ steps.crates.outputs.packages }}; do
+            echo "::group::cargo test -p $pkg"
+            cargo test -p "$pkg" -- --test-threads=1
+            echo "::endgroup::"
+          done
+
+      - name: No testable changes
+        if: steps.crates.outputs.packages == ''
+        run: echo "No testable crates affected by this change — skipping."
+
 
   build-and-lint:
     name: Build & Lint (${{ matrix.board }})
@@ -35,12 +123,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        board: [esp, rpi]
+        board: [esp, pc]
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v6
       
       - name: Install Rust toolchain (Standard)
-        if: matrix.board == 'rpi'
+        if: matrix.board == 'pc'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -53,7 +141,7 @@ jobs:
           buildtargets: esp32
           ldproxy: true
         
-      - uses: Swatinem/rust-cache@v2.9.1
+      - uses: Swatinem/rust-cache@v2
       
       - name: Override board config
         run: sed -i 's/^board\s*=\s*".*"/board = "${{ matrix.board }}"/' config.toml
@@ -63,3 +151,4 @@ jobs:
         
       - name: Build Firmware via xtask
         run: cargo xtask build
+

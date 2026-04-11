@@ -1,8 +1,16 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
-use core_interface::{CanFilter, CanFrame, CAN_RX_CHANNEL, CAN_TX_CHANNEL};
-use embedded_can::{Frame as EmbeddedFrame, Id, StandardId};
+use core_interface::CanFilter;
+#[cfg(feature = "hardware")]
+use core_interface::{CanFrame, CAN_RX_CHANNEL, CAN_TX_CHANNEL};
+#[cfg(feature = "hardware")]
+use embedded_can::{Id, StandardId};
+
+#[cfg(feature = "hardware")]
+use embedded_can::Frame as EmbeddedFrame;
+#[cfg(feature = "hardware")]
 use embedded_hal_bus::spi::ExclusiveDevice;
+#[cfg(feature = "hardware")]
 use esp_hal::{
     delay::Delay,
     gpio::{Input, Output},
@@ -10,7 +18,9 @@ use esp_hal::{
     spi::master::Spi,
     twai::{self, Twai, TwaiMode},
 };
+#[cfg(feature = "hardware")]
 pub use mcp2515::{CanSpeed, McpSpeed};
+#[cfg(feature = "hardware")]
 use mcp2515::{
     error::Error as McpError,
     filter::{RxFilter, RxMask},
@@ -21,17 +31,21 @@ use mcp2515::{
 
 // ── Type Aliases ─────────────────────────────────────────────────────────────
 
+#[cfg(feature = "hardware")]
 /// Concrete TWAI driver type (Blocking mode → implements Send, safe for core 1).
 pub type TwaiDriver = Twai<'static, esp_hal::Blocking>;
 
+#[cfg(feature = "hardware")]
 /// Concrete MCP2515 driver type (blocking SPI, INT-pin driven).
 pub type Mcp2515Driver = MCP2515<ExclusiveDevice<Spi<'static, esp_hal::Blocking>, Output<'static>, Delay>>;
 
+#[cfg(feature = "hardware")]
 /// The INT input pin type used for MCP2515 interrupt-driven RX.
 pub type CanIntPin = Input<'static>;
 
 // ── Board Entry Point ─────────────────────────────────────────────────────────
 
+#[cfg(feature = "hardware")]
 pub fn start(spawner: &embassy_executor::Spawner) {
     spawner.spawn(core_interface::process_ble_commands_task()).unwrap();
     spawner.spawn(core_interface::process_mqtt_commands_task()).unwrap();
@@ -41,31 +55,8 @@ pub fn start(spawner: &embassy_executor::Spawner) {
 
 // ── CAN ID helpers ────────────────────────────────────────────────────────────
 
-fn filter_id_raw(f: &CanFilter) -> u32 {
-    match f.id {
-        Id::Standard(sid) => sid.as_raw() as u32,
-        Id::Extended(eid) => eid.as_raw(),
-    }
-}
-
-fn id_raw(id: Id) -> u32 {
-    match id {
-        Id::Standard(sid) => sid.as_raw() as u32,
-        Id::Extended(eid) => eid.as_raw(),
-    }
-}
-
-fn passes_software_filter(frame: &CanFrame, filters: &[CanFilter]) -> bool {
-    let frame_raw = id_raw(frame.id);
-    filters
-        .iter()
-        .filter(|f| f.bus_id == frame.bus_id)
-        .any(|f| (frame_raw & f.mask) == (filter_id_raw(f) & f.mask))
-}
-
 // ── TWAI (built-in CAN) ───────────────────────────────────────────────────────
-
-/// Initialises the TWAI peripheral with an accept-all hardware filter; actual
+#[cfg(feature = "hardware")]/// Initialises the TWAI peripheral with an accept-all hardware filter; actual
 /// frame selection is done in software inside `run_twai_loop`.
 pub fn init_twai(
     peripheral: impl twai::Instance + 'static,
@@ -91,6 +82,7 @@ pub fn init_twai(
     cfg.start()
 }
 
+#[cfg(feature = "hardware")]
 /// Bidirectional TWAI loop — runs forever on core 1.
 ///
 /// Uses non-blocking nb polling on RX (1 ms yield when no frame is available)
@@ -105,7 +97,7 @@ pub async fn run_twai_loop(driver: TwaiDriver, bus_id: u8, filters: &'static [Ca
             match rx.receive() {
                 Ok(frame) => {
                     let core_frame = twai_to_core_frame(frame, bus_id);
-                    if passes_software_filter(&core_frame, filters) {
+                    if core_interface::passes_filter(&core_frame, filters) {
                         CAN_RX_CHANNEL.sender().send(core_frame).await;
                     }
                 }
@@ -136,6 +128,7 @@ pub async fn run_twai_loop(driver: TwaiDriver, bus_id: u8, filters: &'static [Ca
     }
 }
 
+#[cfg(feature = "hardware")]
 fn twai_to_core_frame(frame: twai::EspTwaiFrame, bus_id: u8) -> CanFrame {
     let id = EmbeddedFrame::id(&frame);
     let dlc = EmbeddedFrame::dlc(&frame) as u8;
@@ -145,6 +138,7 @@ fn twai_to_core_frame(frame: twai::EspTwaiFrame, bus_id: u8) -> CanFrame {
     CanFrame { bus_id, id, data, dlc }
 }
 
+#[cfg(feature = "hardware")]
 fn core_to_twai_frame(frame: &CanFrame) -> Option<twai::EspTwaiFrame> {
     let data = &frame.data[..frame.dlc as usize];
     // esp_hal::twai::Id implements From<embedded_can::Id>
@@ -153,11 +147,30 @@ fn core_to_twai_frame(frame: &CanFrame) -> Option<twai::EspTwaiFrame> {
 
 // ── MCP2515 (SPI CAN) ─────────────────────────────────────────────────────────
 
+/// Computes the two combined RX buffer masks required by the MCP2515 from a
+/// `CanFilter` slice for a specific `bus_id`.
+///
+/// - `mask0` covers RXB0 filters (slots 0–1, up to 2 filters).
+/// - `mask1` covers RXB1 filters (slots 2–5, up to 4 more filters).
+///
+/// Each mask is OR-folded from the individual filter masks so that a hardware
+/// RXB mask bit is 1 (must match) only when every filter in that buffer agrees
+/// the bit must match.
+#[cfg_attr(not(feature = "hardware"), allow(dead_code))]
+pub(crate) fn compute_mcp_masks(filters: &[CanFilter], bus_id: u8) -> (u32, u32) {
+    let mut it = filters.iter().filter(|f| f.bus_id == bus_id);
+    let mask0 = it.by_ref().take(2).fold(0u32, |acc, f| acc | f.mask);
+    let mask1 = it.take(4).fold(0u32, |acc, f| acc | f.mask);
+    (mask0, mask1)
+}
+
+#[cfg(feature = "hardware")]
 const RX_FILTERS: [RxFilter; 6] = [
     RxFilter::F0, RxFilter::F1, RxFilter::F2,
     RxFilter::F3, RxFilter::F4, RxFilter::F5,
 ];
 
+#[cfg(feature = "hardware")]
 /// Initialises an MCP2515 via blocking SPI. Programs hardware RX filters/masks.
 /// Returns `(driver, int_pin)`. Pass both to `run_mcp2515_loop`.
 pub fn init_mcp2515(
@@ -192,11 +205,7 @@ pub fn init_mcp2515(
     }
 
     // Combined mask for RXB0 (slots 0..2) and RXB1 (slots 2..6).
-    // Mask bit=1 means the bit must match. Start with all-don't-care (0).
-    let mask0 = filters.iter().filter(|f| f.bus_id == bus_id).take(2)
-        .fold(0u32, |acc, f| acc | f.mask);
-    let mask1 = filters.iter().filter(|f| f.bus_id == bus_id).skip(2).take(4)
-        .fold(0u32, |acc, f| acc | f.mask);
+    let (mask0, mask1) = compute_mcp_masks(filters, bus_id);
 
     if let Some(sid) = StandardId::new((mask0 & 0x7FF) as u16) {
         mcp.set_mask(RxMask::Mask0, Id::Standard(sid)).ok();
@@ -213,6 +222,7 @@ pub fn init_mcp2515(
     (mcp, int_pin)
 }
 
+#[cfg(feature = "hardware")]
 /// Bidirectional MCP2515 loop — runs forever on core 1.
 pub async fn run_mcp2515_loop(
     mut driver: Mcp2515Driver,
@@ -227,7 +237,7 @@ pub async fn run_mcp2515_loop(
             match driver.read_message() {
                 Ok(frame) => {
                     let core_frame = mcp_to_core_frame(frame, bus_id);
-                    if passes_software_filter(&core_frame, filters) {
+                    if core_interface::passes_filter(&core_frame, filters) {
                         CAN_RX_CHANNEL.sender().send(core_frame).await;
                     }
                 }
@@ -247,6 +257,7 @@ pub async fn run_mcp2515_loop(
     }
 }
 
+#[cfg(feature = "hardware")]
 fn mcp_to_core_frame(frame: McpFrame, bus_id: u8) -> CanFrame {
     let id = EmbeddedFrame::id(&frame);
     let dlc = EmbeddedFrame::dlc(&frame) as u8;
@@ -256,6 +267,86 @@ fn mcp_to_core_frame(frame: McpFrame, bus_id: u8) -> CanFrame {
     CanFrame { bus_id, id, data, dlc }
 }
 
+#[cfg(feature = "hardware")]
 fn core_to_mcp_frame(frame: &CanFrame) -> Option<McpFrame> {
     McpFrame::new(frame.id, &frame.data[..frame.dlc as usize])
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use embedded_can::{Id, StandardId};
+
+    fn filter(bus_id: u8, raw_id: u16, mask: u32) -> CanFilter {
+        CanFilter {
+            bus_id,
+            id: Id::Standard(StandardId::new(raw_id).unwrap()),
+            mask,
+        }
+    }
+
+    // ── compute_mcp_masks ─────────────────────────────────────────────────────
+
+    #[test]
+    fn empty_filters_produces_zero_masks() {
+        let (m0, m1) = compute_mcp_masks(&[], 0);
+        assert_eq!(m0, 0);
+        assert_eq!(m1, 0);
+    }
+
+    #[test]
+    fn single_filter_sets_mask0_only() {
+        let filters = [filter(0, 0x100, 0x7FF)];
+        let (m0, m1) = compute_mcp_masks(&filters, 0);
+        assert_eq!(m0, 0x7FF);
+        assert_eq!(m1, 0);
+    }
+
+    #[test]
+    fn two_filters_ored_into_mask0() {
+        // 0x700 | 0x0FF = 0x7FF
+        let filters = [filter(0, 0x100, 0x700), filter(0, 0x200, 0x0FF)];
+        let (m0, m1) = compute_mcp_masks(&filters, 0);
+        assert_eq!(m0, 0x7FF);
+        assert_eq!(m1, 0);
+    }
+
+    #[test]
+    fn third_filter_goes_into_mask1() {
+        let filters = [
+            filter(0, 0x100, 0x7FF),
+            filter(0, 0x200, 0x7FF),
+            filter(0, 0x300, 0x70F),
+        ];
+        let (m0, m1) = compute_mcp_masks(&filters, 0);
+        assert_eq!(m0, 0x7FF); // OR of first two
+        assert_eq!(m1, 0x70F); // third filter alone
+    }
+
+    #[test]
+    fn filters_for_other_bus_excluded() {
+        let filters = [
+            filter(0, 0x100, 0x7FF),
+            filter(1, 0x200, 0x7FF), // bus 1 — must be ignored
+        ];
+        let (m0, m1) = compute_mcp_masks(&filters, 0);
+        assert_eq!(m0, 0x7FF); // only bus 0 filter
+        assert_eq!(m1, 0);
+        let (m0, m1) = compute_mcp_masks(&filters, 1);
+        assert_eq!(m0, 0x7FF); // only bus 1 filter
+        assert_eq!(m1, 0);
+    }
+
+    #[test]
+    fn six_filters_fill_both_mask_buffers() {
+        // mask0 covers slots 0..1, mask1 covers slots 2..5
+        let filters: Vec<CanFilter> = (0u16..6)
+            .map(|i| filter(0, 0x100 + i * 0x10, if i < 2 { 0x700 } else { 0x0F0 }))
+            .collect();
+        let (m0, m1) = compute_mcp_masks(&filters, 0);
+        assert_eq!(m0, 0x700); // OR of first two (identical masks)
+        assert_eq!(m1, 0x0F0); // OR of slots 2..5 (identical masks)
+    }
 }
