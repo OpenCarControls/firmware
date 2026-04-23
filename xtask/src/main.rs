@@ -337,6 +337,15 @@ fn main() {
         }
     }
 
+    // Auto-create config.toml from the example template on first use
+    if config_path == "config.toml" && !std::path::Path::new("config.toml").exists() {
+        if std::path::Path::new("config.toml.example").exists() {
+            fs::copy("config.toml.example", "config.toml")
+                .expect("❌ Failed to copy config.toml.example → config.toml");
+            println!("📋 Created config.toml from config.toml.example — edit it to match your setup.");
+        }
+    }
+
     println!("🚀 Starting custom {} using: {}", command, config_path);
 
     // Read and parse the config file, then apply any CLI overrides

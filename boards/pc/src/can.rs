@@ -49,14 +49,35 @@ pub(crate) fn core_to_socketcan_frame(frame: &CanFrame) -> Option<socketcan::Can
 /// - TX: After each RX poll, drains `CAN_TX_CHANNEL` for frames addressed to
 ///   `bus_id` and writes them to the socket. Frames for other buses are returned
 ///   to the channel so the corresponding task can pick them up.
+///
+/// If the interface cannot be opened (e.g. it does not exist), the task logs a
+/// warning and retries every 5 seconds so the rest of the system keeps running.
 #[embassy_executor::task(pool_size = 4)]
 pub async fn socket_can_task(interface: &'static str, bus_id: u8, filters: &'static [CanFilter]) {
-    let socket = CanSocket::open(interface)
-        .unwrap_or_else(|e| panic!("Failed to open SocketCAN interface '{}': {}", interface, e));
+    let socket = loop {
+        match CanSocket::open(interface) {
+            Ok(s) => break s,
+            Err(e) => {
+                log::warn!(
+                    "CAN bus {}: failed to open '{}': {} — retrying in 5s",
+                    bus_id,
+                    interface,
+                    e
+                );
+                Timer::after(Duration::from_secs(5)).await;
+            }
+        }
+    };
 
-    socket
-        .set_nonblocking(true)
-        .expect("Failed to set SocketCAN socket to non-blocking");
+    if let Err(e) = socket.set_nonblocking(true) {
+        log::error!(
+            "CAN bus {}: failed to set '{}' non-blocking: {}",
+            bus_id,
+            interface,
+            e
+        );
+        return;
+    }
 
     loop {
         Timer::after(Duration::from_millis(1)).await;

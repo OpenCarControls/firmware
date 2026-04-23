@@ -24,5 +24,8 @@ target
 certs/*
 !certs/.gitkeep
 
+# User-specific build configuration (use config.toml.example as a template)
+config.toml
+
 # xtask temporary files
 .app_build

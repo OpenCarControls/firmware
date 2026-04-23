@@ -143,6 +143,9 @@ jobs:
         
       - uses: Swatinem/rust-cache@v2
       
+      - name: Create config.toml from example
+        run: cp config.toml.example config.toml
+
       - name: Override board config
         run: sed -i 's/^board\s*=\s*".*"/board = "${{ matrix.board }}"/' config.toml
         
