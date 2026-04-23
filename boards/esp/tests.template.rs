@@ -42,6 +42,7 @@ mod tests {
         let cmd = InboundCommand {
             message_id: 1,
             transport: Transport::Ble,
+            source_device_id: alloc::vec![],
             bytes: alloc::vec![0xDE, 0xAD],
         };
         BASIC_CMD_CHANNEL.sender().send(cmd).await;

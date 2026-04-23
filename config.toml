@@ -6,8 +6,7 @@
 # Select which board family you want to use. See the available boards in `boards/`
 board = "esp"
 
-# Select which brand and platform you want to use.
-brand = "virtual-car"
+# Select which platform (vehicle crate) you want to use. See the available platforms in `cars/`
 platform = "virtual-car"
 
 # ===================================
@@ -19,6 +18,15 @@ platform = "virtual-car"
 mcu = "esp32s3"
 modem_tx_pin = 17
 modem_rx_pin = 16
+
+[hardware.esp.ble]
+# Built-in BOOT button on most ESP devkits.
+device_name = "OpenCar"
+pairing_button_pin = 0
+pairing_button_hold_s = 3
+pairing_window_s = 120
+max_bonded_phones = 8
+controller_lease_ttl_s = 15
 
 # CAN bus definitions — order determines bus_id (0-based).
 # Bus 0: built-in TWAI peripheral.
@@ -41,6 +49,14 @@ rx_pin = 4
 # Configuration for PC board
 [hardware.pc]
 
+[hardware.pc.ble]
+# PC-only test hooks.
+device_name = "OpenCar"
+http_port = 4242
+pairing_window_s = 120
+max_bonded_phones = 8
+paired_phones_file = "/tmp/opencar-paired-phones.txt"
+
 # CAN bus definitions — order determines bus_id (0-based).
 # Each entry maps to a SocketCAN network interface (real or virtual).
 [[hardware.pc.can_buses]]
@@ -51,6 +67,7 @@ interface = "vcan0"
 # ===========================
 
 [network.wifi]
+enabled = true
 ssid = "YourSSID"
 password = "YourPassword"
 

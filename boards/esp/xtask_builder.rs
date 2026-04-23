@@ -1,7 +1,60 @@
-use crate::{Config, TargetBuilder, parse_broker_url};
+use crate::{
+    Config, TargetBuilder, escape_rust_string, load_transport_contract, parse_broker_url,
+    render_topic_from_template, validate_ble_transport_contract,
+    validate_esp_ble_uuid_constants_against_contract,
+};
 use serde::Deserialize;
 use std::fs;
 use std::process::{Command, exit};
+
+#[derive(Deserialize)]
+struct EspBleConfig {
+    #[serde(default)]
+    device_name: Option<String>,
+    #[serde(default = "default_pairing_button_pin")]
+    pairing_button_pin: u8,
+    #[serde(default = "default_pairing_button_hold_s")]
+    pairing_button_hold_s: u32,
+    #[serde(default = "default_pairing_window_s")]
+    pairing_window_s: u32,
+    #[serde(default = "default_max_bonded_phones")]
+    max_bonded_phones: u8,
+    #[serde(default = "default_controller_lease_ttl_s")]
+    controller_lease_ttl_s: u32,
+}
+
+impl Default for EspBleConfig {
+    fn default() -> Self {
+        Self {
+            device_name: None,
+            pairing_button_pin: default_pairing_button_pin(),
+            pairing_button_hold_s: default_pairing_button_hold_s(),
+            pairing_window_s: default_pairing_window_s(),
+            max_bonded_phones: default_max_bonded_phones(),
+            controller_lease_ttl_s: default_controller_lease_ttl_s(),
+        }
+    }
+}
+
+fn default_pairing_button_pin() -> u8 {
+    0
+}
+
+fn default_pairing_button_hold_s() -> u32 {
+    3
+}
+
+fn default_pairing_window_s() -> u32 {
+    120
+}
+
+fn default_max_bonded_phones() -> u8 {
+    8
+}
+
+fn default_controller_lease_ttl_s() -> u32 {
+    15
+}
 
 #[derive(Deserialize)]
 struct EspConfig {
@@ -10,6 +63,8 @@ struct EspConfig {
     modem_tx_pin: u8,
     #[allow(dead_code)]
     modem_rx_pin: u8,
+    #[serde(default)]
+    ble: EspBleConfig,
     #[serde(default)]
     can_buses: Vec<toml::Value>,
 }
@@ -56,7 +111,7 @@ impl Builder {
             .arg("--target").arg(target_arch)
             .arg("--release");
 
-        let features = format!("esp-hal/{mcu},esp-rtos/{mcu},esp-backtrace/{mcu},esp-println/{mcu},esp-radio/{mcu}");
+        let features = format!("esp-hal/{mcu},esp-rtos/{mcu},esp-backtrace/{mcu},esp-println/{mcu},esp-radio/{mcu},esp-storage/{mcu}");
         cmd.arg("--features").arg(features);
 
         cmd.env("RUSTFLAGS", "-C link-arg=-Tlinkall.x");
@@ -80,11 +135,31 @@ impl TargetBuilder for Builder {
             eprintln!("❌ Error: Unsupported ESP MCU '{}'. Supported MCUs are: {:?}", esp.mcu, supported_mcus);
             exit(1);
         }
+        if esp.ble.pairing_button_pin > 48 {
+            eprintln!(
+                "❌ Error: [hardware.esp.ble].pairing_button_pin={} is out of range.",
+                esp.ble.pairing_button_pin
+            );
+            exit(1);
+        }
+        if esp.ble.pairing_button_hold_s == 0
+            || esp.ble.pairing_window_s == 0
+            || esp.ble.max_bonded_phones == 0
+            || esp.ble.controller_lease_ttl_s == 0
+        {
+            eprintln!(
+                "❌ Error: BLE lifecycle values must be > 0 (pairing_button_hold_s, pairing_window_s, max_bonded_phones, controller_lease_ttl_s)."
+            );
+            exit(1);
+        }
     }
 
     fn generate_app_build(&self, config: &Config) {
+        let transport = load_transport_contract();
+        validate_ble_transport_contract(&transport);
+        validate_esp_ble_uuid_constants_against_contract(&transport);
+
         let esp_hw = Self::get_esp_config(config);
-        let brand = &config.target.brand;
         let vehicle_platform = &config.target.platform;
         let platform_underscore = vehicle_platform.replace('-', "_");
 
@@ -108,7 +183,7 @@ impl TargetBuilder for Builder {
         }
 
         // Read vehicle crate name from its Cargo.toml
-        let vehicle_cargo_path = format!("cars/{}/platforms/{}/Cargo.toml", brand, vehicle_platform);
+        let vehicle_cargo_path = format!("cars/{}/Cargo.toml", vehicle_platform);
         let vehicle_cargo_str = fs::read_to_string(&vehicle_cargo_path)
             .unwrap_or_else(|_| panic!("\u{274c} Could not read vehicle Cargo.toml: {}", vehicle_cargo_path));
         let vehicle_cargo: toml::Value = toml::from_str(&vehicle_cargo_str)
@@ -213,19 +288,22 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str("core-interface = { path = \"../core-interface\" }\n");
         cargo_toml.push_str("board-esp = { path = \"../boards/esp\", features = [\"hardware\"] }\n");
         cargo_toml.push_str(&format!(
-            "{} = {{ path = \"../cars/{}/platforms/{}\" }}\n",
-            vehicle_crate_name, brand, vehicle_platform
+            "{} = {{ path = \"../cars/{}\" }}\n",
+            vehicle_crate_name, vehicle_platform
         ));
-        cargo_toml.push_str("esp-hal = { version = \"1.0.0\", features = [\"unstable\"] }\n");
-        cargo_toml.push_str("esp-rtos = { version = \"0.2.0\", features = [\"embassy\", \"esp-radio\", \"esp-alloc\"] }\n");
-        cargo_toml.push_str("esp-backtrace = { version = \"0.18.1\", features = [\"panic-handler\", \"println\"] }\n");
-        cargo_toml.push_str("esp-println = { version = \"0.16.1\", features = [\"log-04\"] }\n");
-        cargo_toml.push_str("esp-alloc = \"0.9.0\"\n");
-        cargo_toml.push_str("embassy-executor = \"0.9.1\"\n");
-        cargo_toml.push_str("embassy-time = \"0.5.1\"\n");
-        cargo_toml.push_str("static_cell = \"2\"\n");
+        let v = |name: &str| crate::ws_dep_version(&config.workspace_deps, name);
+        cargo_toml.push_str(&format!("esp-hal = {{ version = \"{}\", features = [\"unstable\"] }}\n", v("esp-hal")));
+        cargo_toml.push_str(&format!("esp-rtos = {{ version = \"{}\", features = [\"embassy\", \"esp-radio\", \"esp-alloc\"] }}\n", v("esp-rtos")));
+        cargo_toml.push_str(&format!("esp-backtrace = {{ version = \"{}\", features = [\"panic-handler\", \"println\"] }}\n", v("esp-backtrace")));
+        cargo_toml.push_str(&format!("esp-println = {{ version = \"{}\", features = [\"log-04\"] }}\n", v("esp-println")));
+        cargo_toml.push_str(&format!("esp-alloc = \"{}\"\n", v("esp-alloc")));
+        cargo_toml.push_str(&format!("embassy-executor = \"{}\"\n", v("embassy-executor")));
+        cargo_toml.push_str(&format!("embassy-time = \"{}\"\n", v("embassy-time")));
+        cargo_toml.push_str(&format!("static_cell = \"{}\"\n", v("static_cell")));
         // Direct dep so we can forward the MCU chip feature via --features esp-radio/<mcu>
-        cargo_toml.push_str("esp-radio = { version = \"0.17.0\", features = [\"wifi\", \"smoltcp\", \"unstable\"] }\n");
+        cargo_toml.push_str(&format!("esp-radio = {{ version = \"{}\", features = [\"wifi\", \"ble\", \"smoltcp\", \"unstable\"] }}\n", v("esp-radio")));
+        // Direct dep so we can forward the MCU chip feature via --features esp-storage/<mcu>
+        cargo_toml.push_str(&format!("esp-storage = {{ version = \"{}\", features = [\"critical-section\"] }}\n", v("esp-storage")));
 
         if config.network.mqtt.auth_mode == "mtls" {
             // certs are embedded via include_bytes! in main.rs, no extra deps needed
@@ -248,56 +326,117 @@ impl TargetBuilder for Builder {
         // Generate network constants and WiFi/MQTT driver spawn
         let (broker_host, broker_port) = parse_broker_url(&config.network.mqtt.broker_url);
         let client_id = &config.network.mqtt.client_id;
-        let mqtt_username = config.network.mqtt.username.as_deref().unwrap_or("");
-        let mqtt_password = config.network.mqtt.password.as_deref().unwrap_or("");
-        let wifi_ssid = config.network.wifi.ssid.as_deref().unwrap_or_else(|| {
-            eprintln!("\u{274c} [network.wifi].ssid is required for the ESP board");
-            exit(1);
-        });
-        let wifi_password = config.network.wifi.password.as_deref().unwrap_or("");
+        let mqtt_username = escape_rust_string(config.network.mqtt.username.as_deref().unwrap_or(""));
+        let mqtt_password = escape_rust_string(config.network.mqtt.password.as_deref().unwrap_or(""));
+        let mqtt_cmd_topic = escape_rust_string(&render_topic_from_template(
+            &transport.mqtt.command_topic_template,
+            client_id,
+            "mqtt.command_topic_template",
+        ));
+        let mqtt_data_topic = escape_rust_string(&render_topic_from_template(
+            &transport.mqtt.data_topic_template,
+            client_id,
+            "mqtt.data_topic_template",
+        ));
 
-        let network_constants = format!(
-            "const WIFI_SSID: &str = \"{ssid}\";\n\
-             const WIFI_PASSWORD: &str = \"{wifi_pw}\";\n\
-             const MQTT_BROKER_HOST: &str = \"{host}\";\n\
-             const MQTT_BROKER_PORT: u16 = {port};\n\
-             const MQTT_CLIENT_ID: &str = \"{cid}\";\n\
-             const MQTT_CMD_TOPIC: &str = \"opencar/{cid}/cmd\";\n\
-             const MQTT_DATA_TOPIC: &str = \"opencar/{cid}/data\";\n\
-             const MQTT_USERNAME: &str = \"{user}\";\n\
-             const MQTT_PASSWORD: &str = \"{pass}\";",
-            ssid = wifi_ssid,
-            wifi_pw = wifi_password,
-            host = broker_host,
-            port = broker_port,
-            cid = client_id,
-            user = mqtt_username,
-            pass = mqtt_password,
+        let ble_device_name = esp_hw
+            .ble
+            .device_name
+            .as_deref()
+            .unwrap_or(transport.ble.service.name.as_str());
+        let ble_device_name = escape_rust_string(ble_device_name);
+
+        let wifi_enabled = config.network.wifi.enabled;
+        let wifi_ssid = if wifi_enabled {
+            config.network.wifi.ssid.as_deref().unwrap_or_else(|| {
+                eprintln!("\u{274c} [network.wifi].ssid is required for the ESP board when [network.wifi].enabled=true");
+                exit(1);
+            })
+        } else {
+            ""
+        };
+        let wifi_ssid = escape_rust_string(wifi_ssid);
+        let wifi_password = escape_rust_string(config.network.wifi.password.as_deref().unwrap_or(""));
+        let broker_host = escape_rust_string(&broker_host);
+        let client_id = escape_rust_string(client_id);
+
+        let ble_constants = format!(
+            "const BLE_DEVICE_NAME_BASE: &str = \"{ble_name}\";\n\
+             const BLE_PAIRING_BUTTON_PIN: u8 = {pair_btn};\n\
+             const BLE_PAIRING_BUTTON_HOLD_S: u32 = {pair_hold};\n\
+             const BLE_PAIRING_WINDOW_S: u32 = {pair_window};\n\
+             const BLE_MAX_BONDED_PHONES: u8 = {max_bonds};\n\
+             const BLE_CONTROLLER_LEASE_TTL_S: u32 = {lease_ttl};",
+            ble_name = ble_device_name,
+            pair_btn = esp_hw.ble.pairing_button_pin,
+            pair_hold = esp_hw.ble.pairing_button_hold_s,
+            pair_window = esp_hw.ble.pairing_window_s,
+            max_bonds = esp_hw.ble.max_bonded_phones,
+            lease_ttl = esp_hw.ble.controller_lease_ttl_s,
         );
 
-        let network_hardware_init = format!(
-            "    let wifi_stack = board_esp::init_wifi(\n\
+        let network_constants = if wifi_enabled {
+            format!(
+                "const WIFI_SSID: &str = \"{ssid}\";\n\
+                 const WIFI_PASSWORD: &str = \"{wifi_pw}\";\n\
+                 const MQTT_BROKER_HOST: &str = \"{host}\";\n\
+                 const MQTT_BROKER_PORT: u16 = {port};\n\
+                 const MQTT_CLIENT_ID: &str = \"{cid}\";\n\
+                 const MQTT_CMD_TOPIC: &str = \"{cmd_topic}\";\n\
+                 const MQTT_DATA_TOPIC: &str = \"{data_topic}\";\n\
+                 const MQTT_USERNAME: &str = \"{user}\";\n\
+                 const MQTT_PASSWORD: &str = \"{pass}\";\n\
+                 {ble}",
+                ssid = wifi_ssid,
+                wifi_pw = wifi_password,
+                host = broker_host,
+                port = broker_port,
+                cid = client_id,
+                cmd_topic = mqtt_cmd_topic,
+                data_topic = mqtt_data_topic,
+                user = mqtt_username,
+                pass = mqtt_password,
+                ble = ble_constants,
+            )
+        } else {
+            ble_constants
+        };
+
+        let network_hardware_init = if wifi_enabled {
+            "    let ble_radio_controller = board_esp::init_radio();\n\
+             let wifi_stack = board_esp::init_wifi(\n\
+             ble_radio_controller,\n\
              &spawner,\n\
              peripherals.WIFI,\n\
              WIFI_SSID,\n\
              WIFI_PASSWORD,\n\
              );\n"
-        );
+                .to_string()
+        } else {
+            "    let ble_radio_controller = board_esp::init_radio();\n".to_string()
+        };
 
-        let mqtt_driver_spawn = format!(
-            "    spawner\n\
-             .spawn(board_esp::mqtt_driver_task(\n\
-             wifi_stack,\n\
-             MQTT_BROKER_HOST,\n\
-             MQTT_BROKER_PORT,\n\
-             MQTT_CLIENT_ID,\n\
-             MQTT_CMD_TOPIC,\n\
-             MQTT_DATA_TOPIC,\n\
-             MQTT_USERNAME,\n\
-             MQTT_PASSWORD,\n\
-             ))\n\
+        let ble_driver_spawn = "    spawner\n\
+               .spawn(board_esp::ble_transport_task(ble_radio_controller, peripherals.BT, peripherals.FLASH, BLE_DEVICE_NAME_BASE))\n\
              .unwrap();\n"
-        );
+            .to_string();
+
+        let mqtt_driver_spawn = if wifi_enabled {
+            "    spawner\n\
+                .spawn(board_esp::mqtt_driver_task(\n\
+                wifi_stack,\n\
+                MQTT_BROKER_HOST,\n\
+                MQTT_BROKER_PORT,\n\
+                MQTT_CLIENT_ID,\n\
+                MQTT_CMD_TOPIC,\n\
+                MQTT_DATA_TOPIC,\n\
+                MQTT_USERNAME,\n\
+                MQTT_PASSWORD,\n\
+                ))\n\
+                .unwrap();\n".to_string()
+        } else {
+            "    // WiFi disabled: MQTT driver not spawned.\n".to_string()
+        };
 
         let template = fs::read_to_string("boards/esp/main.template.rs")
             .expect("\u{274c} Could not read boards/esp/main.template.rs");
@@ -310,6 +449,7 @@ impl TargetBuilder for Builder {
             .replace("{MTLS_CERTS}", &mtls_certs)
             .replace("{NETWORK_CONSTANTS}", &network_constants)
             .replace("{NETWORK_HARDWARE_INIT}", &network_hardware_init)
+            .replace("{BLE_DRIVER_SPAWN}", &ble_driver_spawn)
             .replace("{MQTT_DRIVER_SPAWN}", &mqtt_driver_spawn);
 
         fs::create_dir_all(".app_build/src").expect("Failed to create .app_build/src");
@@ -356,18 +496,18 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str("[dependencies]\n");
         cargo_toml.push_str("core-interface = { path = \"../core-interface\" }\n");
         cargo_toml.push_str("board-esp = { path = \"../boards/esp\", features = [\"hardware\"] }\n");
-        cargo_toml.push_str("esp-hal = { version = \"1.0.0\", features = [\"unstable\"] }\n");
-        cargo_toml.push_str("esp-rtos = { version = \"0.2.0\", features = [\"embassy\", \"esp-radio\", \"esp-alloc\"] }\n");
-        cargo_toml.push_str("esp-alloc = \"0.9.0\"\n");
-        cargo_toml.push_str("esp-println = { version = \"0.16.1\", features = [\"log-04\"] }\n");
-        cargo_toml.push_str("embassy-executor = \"0.9.1\"\n");
-        cargo_toml.push_str("embassy-time = \"0.5.1\"\n");
-        cargo_toml.push_str("static_cell = \"2\"\n");
-        // embedded-test with defmt RTT for reporting results over probe-rs
-        cargo_toml.push_str("embedded-test = { version = \"0.5\", features = [\"embassy\"] }\n");
-        cargo_toml.push_str("defmt = \"0.3\"\n");
-        cargo_toml.push_str("defmt-rtt = \"0.4\"\n");
-        cargo_toml.push_str("panic-probe = { version = \"0.3\", features = [\"print-defmt\"] }\n");
+        let v = |name: &str| crate::ws_dep_version(&config.workspace_deps, name);
+        cargo_toml.push_str(&format!("esp-hal = {{ version = \"{}\", features = [\"unstable\"] }}\n", v("esp-hal")));
+        cargo_toml.push_str(&format!("esp-rtos = {{ version = \"{}\", features = [\"embassy\", \"esp-radio\", \"esp-alloc\"] }}\n", v("esp-rtos")));
+        cargo_toml.push_str(&format!("esp-alloc = \"{}\"\n", v("esp-alloc")));
+        cargo_toml.push_str(&format!("esp-println = {{ version = \"{}\", features = [\"log-04\"] }}\n", v("esp-println")));
+        cargo_toml.push_str(&format!("embassy-executor = \"{}\"\n", v("embassy-executor")));
+        cargo_toml.push_str(&format!("embassy-time = \"{}\"\n", v("embassy-time")));
+        cargo_toml.push_str(&format!("static_cell = \"{}\"\n", v("static_cell")));
+        cargo_toml.push_str(&format!("embedded-test = {{ version = \"{}\", features = [\"embassy\"] }}\n", v("embedded-test")));
+        cargo_toml.push_str(&format!("defmt = \"{}\"\n", v("defmt")));
+        cargo_toml.push_str(&format!("defmt-rtt = \"{}\"\n", v("defmt-rtt")));
+        cargo_toml.push_str(&format!("panic-probe = {{ version = \"{}\", features = [\"print-defmt\"] }}\n", v("panic-probe")));
 
         // Chip-specific feature string for esp-hal/esp-rtos
         let features = format!("esp-hal/{mcu},esp-rtos/{mcu},esp-println/{mcu}");

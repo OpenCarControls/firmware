@@ -176,6 +176,7 @@ pub async fn handle_basic_commands_task() {
             success,
             error_message,
             response_data: None,
+            status_code: if success { 1 } else { 2 },
         };
         CMD_RESP_CHANNEL
             .sender()
@@ -217,6 +218,7 @@ pub async fn handle_advanced_commands_task() {
             success,
             error_message,
             response_data: None,
+            status_code: if success { 1 } else { 2 },
         };
         CMD_RESP_CHANNEL
             .sender()

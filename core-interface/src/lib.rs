@@ -9,6 +9,8 @@ mod can;
 mod can_debug;
 mod channels;
 mod dispatch;
+mod lifecycle;
+mod pairing;
 mod routing;
 mod types;
 
@@ -48,9 +50,19 @@ pub use can_debug::{
     is_can_debug_active, publish_can_debug_task, publish_single_debug_batch,
 };
 
+// Pairing registry
+pub use pairing::{
+    add_paired_phone, ble_max_bonded_phones, clear_paired_phones, is_phone_paired,
+    list_paired_phones, paired_phone_count, remove_paired_phone, set_ble_max_bonded_phones,
+};
+
+// Pairing lifecycle state
+pub use lifecycle::{close_pairing_window, is_pairing_window_open, open_pairing_window_for};
+
 // Dispatch tasks
 pub use dispatch::{
     handle_ble_message, handle_mqtt_message, process_ble_commands_task, process_mqtt_commands_task,
+    reset_ble_controller_lease_for_tests, set_ble_controller_lease_ttl_s,
 };
 
 // Routing tasks

@@ -19,6 +19,7 @@ fn make_response(message_id: u64) -> proto::CommandResponse {
         success: true,
         error_message: String::new(),
         response_data: None,
+        status_code: 1,
     }
 }
 

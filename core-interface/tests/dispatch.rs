@@ -1,11 +1,14 @@
 use core_interface::{
-    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, SYSTEM_COMMAND_CHANNEL, Transport,
+    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, BLE_TX_CHANNEL, SYSTEM_COMMAND_CHANNEL, Transport,
     can_debug_wants_bus, debug_dropped_count, debug_filter_count, handle_ble_message,
     handle_mqtt_message, increment_can_debug_dropped, init, is_can_debug_active,
     proto::{
-        self, CanDebugFilter as ProtoCanDebugFilter, RestartCommand, SetCanDebugEnabled,
-        SystemCommand, UpdateCanDebugFilters, app_to_device::Payload, system_command::Action,
+        self, CanDebugFilter as ProtoCanDebugFilter, ClearPairedPhonesCommand,
+        ListPairedPhonesCommand, RemovePairedPhoneCommand, RestartCommand, SetCanDebugEnabled,
+        SystemCommand, UpdateCanDebugFilters, UpsertPairedPhoneCommand, app_to_device::Payload,
+        system_command::Action,
     },
+    reset_ble_controller_lease_for_tests,
 };
 
 const PLATFORM_ID: u32 = 0xDEAD_BEEF;
@@ -16,6 +19,20 @@ fn ble_msg(platform_id: u32, payload: Option<Payload>) -> proto::AppToDevice {
     proto::AppToDevice {
         platform_id,
         message_id: MSG_ID,
+        source_device_id: vec![],
+        payload,
+    }
+}
+
+fn ble_msg_with_source(
+    platform_id: u32,
+    source_device_id: Vec<u8>,
+    payload: Option<Payload>,
+) -> proto::AppToDevice {
+    proto::AppToDevice {
+        platform_id,
+        message_id: MSG_ID,
+        source_device_id,
         payload,
     }
 }
@@ -70,14 +87,21 @@ fn ble_system_command_goes_to_system_channel() {
 #[test]
 fn ble_basic_command_bytes_goes_to_basic_channel_with_ble_transport() {
     init(PLATFORM_ID);
+    embassy_futures::block_on(reset_ble_controller_lease_for_tests());
     let bytes = vec![0xAA, 0xBB];
-    let msg = ble_msg(PLATFORM_ID, Some(Payload::BasicCommandBytes(bytes.clone())));
+    let source = vec![1, 2, 3, 4];
+    let msg = ble_msg_with_source(
+        PLATFORM_ID,
+        source.clone(),
+        Some(Payload::BasicCommandBytes(bytes.clone())),
+    );
     embassy_futures::block_on(handle_ble_message(msg));
     let cmd = BASIC_CMD_CHANNEL
         .try_receive()
         .expect("BasicCommand not forwarded");
     assert_eq!(cmd.message_id, MSG_ID);
     assert_eq!(cmd.bytes, bytes);
+    assert_eq!(cmd.source_device_id, source);
     assert!(matches!(cmd.transport, Transport::Ble));
     assert!(ADVANCED_CMD_CHANNEL.try_receive().is_err());
 }
@@ -85,9 +109,12 @@ fn ble_basic_command_bytes_goes_to_basic_channel_with_ble_transport() {
 #[test]
 fn ble_advanced_command_bytes_goes_to_advanced_channel() {
     init(PLATFORM_ID);
+    embassy_futures::block_on(reset_ble_controller_lease_for_tests());
     let bytes = vec![0xCC, 0xDD];
-    let msg = ble_msg(
+    let source = vec![1, 2, 3, 4];
+    let msg = ble_msg_with_source(
         PLATFORM_ID,
+        source.clone(),
         Some(Payload::AdvancedCommandBytes(bytes.clone())),
     );
     embassy_futures::block_on(handle_ble_message(msg));
@@ -96,6 +123,7 @@ fn ble_advanced_command_bytes_goes_to_advanced_channel() {
         .expect("AdvancedCommand not forwarded");
     assert_eq!(cmd.message_id, MSG_ID);
     assert_eq!(cmd.bytes, bytes);
+    assert_eq!(cmd.source_device_id, source);
     assert!(matches!(cmd.transport, Transport::Ble));
     assert!(BASIC_CMD_CHANNEL.try_receive().is_err());
 }
@@ -108,6 +136,69 @@ fn ble_none_payload_drops_silently() {
     assert!(BASIC_CMD_CHANNEL.try_receive().is_err());
     assert!(ADVANCED_CMD_CHANNEL.try_receive().is_err());
     assert!(SYSTEM_COMMAND_CHANNEL.try_receive().is_err());
+}
+
+#[test]
+fn ble_basic_command_rejected_when_controller_lease_owned_by_another_phone() {
+    init(PLATFORM_ID);
+    embassy_futures::block_on(reset_ble_controller_lease_for_tests());
+
+    let first = ble_msg_with_source(
+        PLATFORM_ID,
+        vec![0xAA],
+        Some(Payload::BasicCommandBytes(vec![0x01])),
+    );
+    embassy_futures::block_on(handle_ble_message(first));
+    let _ = BASIC_CMD_CHANNEL
+        .try_receive()
+        .expect("first controller command should be accepted");
+
+    let second = ble_msg_with_source(
+        PLATFORM_ID,
+        vec![0xBB],
+        Some(Payload::BasicCommandBytes(vec![0x02])),
+    );
+    embassy_futures::block_on(handle_ble_message(second));
+
+    assert!(BASIC_CMD_CHANNEL.try_receive().is_err());
+    let outbound = BLE_TX_CHANNEL
+        .try_receive()
+        .expect("expected non-controller rejection response on BLE_TX");
+    let resp = match outbound.payload {
+        Some(proto::device_to_app::Payload::CommandResponse(r)) => r,
+        other => panic!("unexpected payload: {:?}", other),
+    };
+    assert!(!resp.success);
+    assert_eq!(
+        resp.status_code,
+        proto::CommandStatusCode::RejectedNotController as i32
+    );
+}
+
+#[test]
+fn ble_basic_command_with_empty_source_device_id_is_rejected() {
+    init(PLATFORM_ID);
+    embassy_futures::block_on(reset_ble_controller_lease_for_tests());
+
+    let msg = ble_msg(
+        PLATFORM_ID,
+        Some(Payload::BasicCommandBytes(vec![0x10, 0x20])),
+    );
+    embassy_futures::block_on(handle_ble_message(msg));
+
+    assert!(BASIC_CMD_CHANNEL.try_receive().is_err());
+    let outbound = BLE_TX_CHANNEL
+        .try_receive()
+        .expect("expected non-controller rejection response on BLE_TX");
+    let resp = match outbound.payload {
+        Some(proto::device_to_app::Payload::CommandResponse(r)) => r,
+        other => panic!("unexpected payload: {:?}", other),
+    };
+    assert!(!resp.success);
+    assert_eq!(
+        resp.status_code,
+        proto::CommandStatusCode::RejectedNotController as i32
+    );
 }
 
 // ── MQTT routing (restrictions) ───────────────────────────────────────────────
@@ -245,6 +336,83 @@ fn ble_restart_command_still_forwarded_to_system_channel_when_debug_available() 
         .try_receive()
         .expect("RestartCommand not in SYSTEM_COMMAND_CHANNEL");
     assert!(matches!(received.action, Some(Action::RestartCommand(_))));
+}
+
+#[test]
+fn ble_list_paired_phones_forwarded_to_system_channel() {
+    init(PLATFORM_ID);
+    let msg = ble_msg(
+        PLATFORM_ID,
+        Some(Payload::SystemCommand(SystemCommand {
+            action: Some(Action::ListPairedPhones(ListPairedPhonesCommand {})),
+        })),
+    );
+    embassy_futures::block_on(handle_ble_message(msg));
+    let received = SYSTEM_COMMAND_CHANNEL
+        .try_receive()
+        .expect("ListPairedPhones not in SYSTEM_COMMAND_CHANNEL");
+    assert!(matches!(received.action, Some(Action::ListPairedPhones(_))));
+}
+
+#[test]
+fn ble_remove_paired_phone_forwarded_to_system_channel() {
+    init(PLATFORM_ID);
+    let msg = ble_msg(
+        PLATFORM_ID,
+        Some(Payload::SystemCommand(SystemCommand {
+            action: Some(Action::RemovePairedPhone(RemovePairedPhoneCommand {
+                device_id: vec![1, 2, 3, 4],
+            })),
+        })),
+    );
+    embassy_futures::block_on(handle_ble_message(msg));
+    let received = SYSTEM_COMMAND_CHANNEL
+        .try_receive()
+        .expect("RemovePairedPhone not in SYSTEM_COMMAND_CHANNEL");
+    assert!(matches!(
+        received.action,
+        Some(Action::RemovePairedPhone(_))
+    ));
+}
+
+#[test]
+fn ble_clear_paired_phones_forwarded_to_system_channel() {
+    init(PLATFORM_ID);
+    let msg = ble_msg(
+        PLATFORM_ID,
+        Some(Payload::SystemCommand(SystemCommand {
+            action: Some(Action::ClearPairedPhones(ClearPairedPhonesCommand {})),
+        })),
+    );
+    embassy_futures::block_on(handle_ble_message(msg));
+    let received = SYSTEM_COMMAND_CHANNEL
+        .try_receive()
+        .expect("ClearPairedPhones not in SYSTEM_COMMAND_CHANNEL");
+    assert!(matches!(
+        received.action,
+        Some(Action::ClearPairedPhones(_))
+    ));
+}
+
+#[test]
+fn ble_upsert_paired_phone_forwarded_to_system_channel() {
+    init(PLATFORM_ID);
+    let msg = ble_msg(
+        PLATFORM_ID,
+        Some(Payload::SystemCommand(SystemCommand {
+            action: Some(Action::UpsertPairedPhone(UpsertPairedPhoneCommand {
+                device_id: vec![9, 8, 7, 6],
+            })),
+        })),
+    );
+    embassy_futures::block_on(handle_ble_message(msg));
+    let received = SYSTEM_COMMAND_CHANNEL
+        .try_receive()
+        .expect("UpsertPairedPhone not in SYSTEM_COMMAND_CHANNEL");
+    assert!(matches!(
+        received.action,
+        Some(Action::UpsertPairedPhone(_))
+    ));
 }
 
 #[test]

@@ -16,6 +16,8 @@ pub struct InboundCommand {
     pub message_id: u64,
     /// Which transport delivered this command.
     pub transport: Transport,
+    /// Optional transport-level device identifier (BLE source device).
+    pub source_device_id: Vec<u8>,
     /// Raw encoded bytes of the vehicle-specific command proto message.
     pub bytes: Vec<u8>,
 }

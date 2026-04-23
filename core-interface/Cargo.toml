@@ -4,18 +4,19 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-embedded-can = "0.4.1"
-embedded-hal = "1.0.0"
+embedded-can = { workspace = true }
+embedded-hal = { workspace = true }
 embedded-hal-async = "1.0.0"
-embassy-executor = { version = "0.9.1", default-features = false }
-embassy-time = { version = "0.5.1", default-features = false }
-embassy-sync = "0.7"
+embassy-executor = { workspace = true }
+embassy-time = { workspace = true }
+embassy-sync = { workspace = true }
 prost = { workspace = true }
-bytes ={ workspace = true }
+bytes = { workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true }
 
 [dev-dependencies]
-critical-section = { version = "1", features = ["std"] }
-embassy-futures = "0.1"
+critical-section = { workspace = true }
+embassy-futures = { workspace = true }
+embassy-time = { workspace = true, features = ["std"] }

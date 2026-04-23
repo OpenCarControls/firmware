@@ -1,10 +1,12 @@
-use core_interface::{
-    CAN_DEBUG_RX_CHANNEL, CAN_RX_CHANNEL, CAN_TX_CHANNEL, CanFilter, CanFrame, CanRawCapture,
-};
-use embassy_time::{Duration, Timer};
-use embedded_can::{Frame as EmbeddedFrame, Id};
-use socketcan::{CanSocket, Socket};
-use std::io::ErrorKind;
+mod ble;
+mod can;
+mod network;
+
+use core_interface::SYSTEM_COMMAND_CHANNEL;
+
+pub use ble::{ble_http_task, set_ble_paired_store_path};
+pub use can::socket_can_task;
+pub use network::mqtt_driver_task;
 
 pub fn start(spawner: &embassy_executor::Spawner) {
     spawner
@@ -20,433 +22,89 @@ pub fn start(spawner: &embassy_executor::Spawner) {
     spawner
         .spawn(core_interface::publish_can_debug_task())
         .unwrap();
+    spawner.spawn(system_command_task()).unwrap();
 }
 
-// ── Frame conversion helpers ──────────────────────────────────────────────────
-
-/// Converts a received `socketcan::CanDataFrame` into a `core_interface::CanFrame`,
-/// tagging it with the given `bus_id`.
-pub(crate) fn socketcan_to_core_frame(f: &socketcan::CanDataFrame, bus_id: u8) -> CanFrame {
-    let id = match f.id() {
-        Id::Standard(sid) => Id::Standard(sid),
-        Id::Extended(eid) => Id::Extended(eid),
-    };
-    let dlc = f.dlc() as u8;
-    let mut data = [0u8; 8];
-    let bytes = f.data();
-    data[..bytes.len()].copy_from_slice(bytes);
-    CanFrame {
-        bus_id,
-        id,
-        data,
-        dlc,
-    }
-}
-
-/// Converts a `core_interface::CanFrame` into a `socketcan::CanFrame` for
-/// transmission. Returns `None` if the frame data is malformed.
-pub(crate) fn core_to_socketcan_frame(frame: &CanFrame) -> Option<socketcan::CanFrame> {
-    let data = &frame.data[..frame.dlc as usize];
-    match frame.id {
-        Id::Standard(sid) => {
-            let sc_sid = socketcan::StandardId::new(sid.as_raw()).unwrap();
-            socketcan::CanDataFrame::new(sc_sid, data).map(socketcan::CanFrame::Data)
-        }
-        Id::Extended(eid) => {
-            let sc_eid = socketcan::ExtendedId::new(eid.as_raw()).unwrap();
-            socketcan::CanDataFrame::new(sc_eid, data).map(socketcan::CanFrame::Data)
-        }
-    }
-}
-
-/// Opens a SocketCAN socket on `interface` and runs a bidirectional CAN loop
-/// for bus number `bus_id`. Up to 4 concurrent instances are supported (`pool_size`).
-///
-/// - RX: Polls the non-blocking socket every 1 ms via Embassy timer. Software-filters
-///   received frames against `filters` and forwards matches to `CAN_RX_CHANNEL`.
-/// - TX: After each RX poll, drains `CAN_TX_CHANNEL` for frames addressed to
-///   `bus_id` and writes them to the socket. Frames for other buses are returned
-///   to the channel so the corresponding task can pick them up.
-#[embassy_executor::task(pool_size = 4)]
-pub async fn socket_can_task(interface: &'static str, bus_id: u8, filters: &'static [CanFilter]) {
-    let socket = CanSocket::open(interface)
-        .unwrap_or_else(|e| panic!("Failed to open SocketCAN interface '{}': {}", interface, e));
-
-    socket
-        .set_nonblocking(true)
-        .expect("Failed to set SocketCAN socket to non-blocking");
-
-    loop {
-        Timer::after(Duration::from_millis(1)).await;
-
-        // RX: drain all available frames from the kernel rx buffer
-        loop {
-            match socket.read_frame() {
-                Ok(socketcan::CanFrame::Data(f)) => {
-                    let core_frame = socketcan_to_core_frame(&f, bus_id);
-                    if core_interface::can_debug_wants_bus(bus_id) {
-                        let cap = CanRawCapture {
-                            timestamp_ms: embassy_time::Instant::now().as_millis(),
-                            bus_id,
-                            id: core_frame.id,
-                            data: core_frame.data,
-                            dlc: core_frame.dlc,
-                        };
-                        if CAN_DEBUG_RX_CHANNEL.sender().try_send(cap).is_err() {
-                            core_interface::increment_can_debug_dropped();
-                        }
-                    }
-                    if core_interface::passes_filter(&core_frame, filters) {
-                        CAN_RX_CHANNEL.sender().send(core_frame).await;
-                    }
-                }
-                // Remote frames and error frames are ignored
-                Ok(_) => {}
-                Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
-                Err(_) => break,
-            }
-        }
-
-        // TX: drain outbound frames for this bus, return others to the channel
-        while let Ok(outbound) = CAN_TX_CHANNEL.receiver().try_receive() {
-            if outbound.bus_id != bus_id {
-                // Not ours — return to the back of the channel for the correct bus task
-                let _ = CAN_TX_CHANNEL.sender().try_send(outbound);
-                break; // avoid spinning on someone else's frames
-            }
-            // Drop silently when in read-only mode; do not transmit on the bus.
-            if core_interface::is_can_read_only() {
-                continue;
-            }
-            let sc_frame = core_to_socketcan_frame(&outbound);
-            if let Some(frame) = sc_frame {
-                let _ = socket.write_frame(&frame);
-            }
-        }
-    }
-}
-
-// ── MQTT Driver (PC/Linux) ────────────────────────────────────────────────────
-
-use core_interface::{MQTT_RX_CHANNEL, MQTT_TX_CHANNEL, proto};
-use prost::Message as _;
-use rust_mqtt::{
-    Bytes,
-    buffer::AllocBuffer,
-    client::Client,
-    client::event::Event,
-    client::options::{
-        ConnectOptions, PublicationOptions, SubscriptionOptions, TopicReference,
-    },
-    types::{MqttBinary, MqttString, TopicFilter, TopicName},
-};
-
-/// Adapts a non-blocking `std::net::TcpStream` to `embedded_io_async`'s
-/// `Read` and `Write` traits by polling every 1 ms via Embassy timer when the
-/// socket would block.  This mirrors the pattern used by `socket_can_task`.
-struct NonBlockingTcpStream(std::net::TcpStream);
-
-impl embedded_io_async::ErrorType for NonBlockingTcpStream {
-    type Error = embedded_io_async::ErrorKind;
-}
-
-impl embedded_io_async::Read for NonBlockingTcpStream {
-    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        use std::io::Read;
-        loop {
-            match self.0.read(buf) {
-                Ok(n) => return Ok(n),
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    embassy_time::Timer::after(embassy_time::Duration::from_millis(1)).await;
-                }
-                Err(_) => return Err(embedded_io_async::ErrorKind::Other),
-            }
-        }
-    }
-}
-
-impl embedded_io_async::Write for NonBlockingTcpStream {
-    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-        use std::io::Write;
-        loop {
-            match self.0.write(buf) {
-                Ok(n) => return Ok(n),
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    embassy_time::Timer::after(embassy_time::Duration::from_millis(1)).await;
-                }
-                Err(_) => return Err(embedded_io_async::ErrorKind::Other),
-            }
-        }
-    }
-
-    async fn flush(&mut self) -> Result<(), Self::Error> {
-        use std::io::Write;
-        self.0.flush().map_err(|_| embedded_io_async::ErrorKind::Other)
-    }
-}
-
-/// Shared MQTT session logic. Authenticates (if credentials provided),
-/// subscribes, then drives inbound/outbound message exchange until an error
-/// occurs, at which point it returns `Err(())` so the caller reconnects.
-async fn run_mqtt_session(
-    transport: NonBlockingTcpStream,
-    client_id: &'static str,
-    cmd_topic: &'static str,
-    data_topic: &'static str,
-    username: &'static str,
-    password: &'static str,
-) -> Result<(), ()> {
-    use embassy_time::{Duration, Instant};
-
-    let mut buffer = AllocBuffer;
-    let mut client = Client::<_, _, 1, 1, 1, 0>::new(&mut buffer);
-
-    let mut connect_opts = ConnectOptions::new().clean_start();
-    if !username.is_empty() {
-        connect_opts = connect_opts
-            .user_name(MqttString::from_str_unchecked(username))
-            .password(MqttBinary::from_slice_unchecked(password.as_bytes()));
-    }
-
-    client
-        .connect(
-            transport,
-            &connect_opts,
-            Some(MqttString::from_str_unchecked(client_id)),
-        )
-        .await
-        .map_err(|e| {
-            log::warn!("MQTT: connect failed: {:?}", e);
-        })?;
-
-    log::info!("MQTT: connected, subscribing to '{}'", cmd_topic);
-
-    let filter = TopicFilter::new_unchecked(MqttString::from_str_unchecked(cmd_topic));
-    client
-        .subscribe(filter, SubscriptionOptions::new())
-        .await
-        .map_err(|e| {
-            log::warn!("MQTT: subscribe failed: {:?}", e);
-        })?;
-
-    log::info!("MQTT: ready");
-
-    let keepalive = Duration::from_secs(55);
-    let mut last_ping = Instant::now();
-    let data_topic_name = TopicName::new_unchecked(MqttString::from_str_unchecked(data_topic));
-
-    loop {
-        // Drain outbound channel before polling inbound
-        while let Ok(msg) = MQTT_TX_CHANNEL.try_receive() {
-            let mut buf = Vec::new();
-            if msg.encode(&mut buf).is_ok() {
-                let t = data_topic_name.as_borrowed();
-                let pub_opts = PublicationOptions::new(TopicReference::Name(t));
-                client
-                    .publish(&pub_opts, Bytes::Borrowed(buf.as_slice()))
-                    .await
-                    .map_err(|e| {
-                        log::warn!("MQTT: publish failed: {:?}", e);
-                    })?;
-            }
-        }
-
-        // Keepalive ping
-        if last_ping.elapsed() >= keepalive {
-            client.ping().await.map_err(|e| {
-                log::warn!("MQTT: ping failed: {:?}", e);
-            })?;
-            last_ping = Instant::now();
-        }
-
-        // Poll for inbound with 100 ms timeout
-        let poll_result =
-            embassy_time::with_timeout(Duration::from_millis(100), client.poll()).await;
-
-        match poll_result {
-            Err(_timeout) => continue,
-            Ok(Err(e)) => {
-                log::warn!("MQTT: poll error: {:?}", e);
-                client.abort().await;
-                return Err(());
-            }
-            Ok(Ok(Event::Publish(p))) => {
-                if p.topic.as_ref().as_str() == cmd_topic {
-                    let payload = p.message.as_bytes();
-                    if let Ok(msg) = proto::AppToDevice::decode(payload) {
-                        MQTT_RX_CHANNEL.send(msg).await;
-                    }
-                }
-            }
-            Ok(Ok(_)) => {}
-        }
-    }
-}
-
-/// Public MQTT driver task. Opens a non-blocking TCP connection to the broker,
-/// runs the session, and reconnects on any failure.
 #[embassy_executor::task]
-pub async fn mqtt_driver_task(
-    broker_host: &'static str,
-    broker_port: u16,
-    client_id: &'static str,
-    cmd_topic: &'static str,
-    data_topic: &'static str,
-    username: &'static str,
-    password: &'static str,
-) {
-    use embassy_time::{Duration, Timer};
+pub async fn system_command_task() {
+    // Restore persisted bonded-phone registry on startup.
+    let path = ble::ble_paired_store_path();
+    let persisted = ble::load_paired_phones_from_file(path);
+    for id in &persisted {
+        let _ = core_interface::add_paired_phone(id).await;
+    }
+    if !persisted.is_empty() {
+        log::info!(
+            "BLE store: restored {} paired phone(s) from {}",
+            persisted.len(),
+            path
+        );
+    }
 
     loop {
-        let addr = format!("{}:{}", broker_host, broker_port);
-        log::info!("MQTT: connecting to {}", addr);
-
-        let stream = match std::net::TcpStream::connect(&addr) {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("MQTT: TCP connect failed: {}, retrying in 5s", e);
-                Timer::after(Duration::from_secs(5)).await;
-                continue;
+        let cmd = SYSTEM_COMMAND_CHANNEL.receiver().receive().await;
+        match cmd.action {
+            Some(core_interface::proto::system_command::Action::RestartCommand(_)) => {
+                log::warn!("SYSTEM: restart requested (PC board stub)");
             }
-        };
-        stream.set_nonblocking(true).expect("set_nonblocking failed");
-
-        let transport = NonBlockingTcpStream(stream);
-
-        if run_mqtt_session(
-            transport,
-            client_id,
-            cmd_topic,
-            data_topic,
-            username,
-            password,
-        )
-        .await
-        .is_err()
-        {
-            log::warn!("MQTT: session ended, reconnecting in 5s");
+            Some(core_interface::proto::system_command::Action::ListPairedPhones(_)) => {
+                let phones = core_interface::list_paired_phones().await;
+                log::info!(
+                    "SYSTEM: list paired phones requested, count={} (PC runtime)",
+                    phones.len()
+                );
+            }
+            Some(core_interface::proto::system_command::Action::RemovePairedPhone(req)) => {
+                if !core_interface::is_pairing_window_open() {
+                    log::warn!("SYSTEM: remove paired phone denied, pairing window is closed");
+                    continue;
+                }
+                let removed = core_interface::remove_paired_phone(&req.device_id).await;
+                if removed {
+                    ble::persist_paired_phones().await;
+                }
+                log::info!(
+                    "SYSTEM: remove paired phone requested, removed={}, device_id_len={}",
+                    removed,
+                    req.device_id.len(),
+                );
+            }
+            Some(core_interface::proto::system_command::Action::ClearPairedPhones(_)) => {
+                if !core_interface::is_pairing_window_open() {
+                    log::warn!("SYSTEM: clear paired phones denied, pairing window is closed");
+                    continue;
+                }
+                let removed = core_interface::clear_paired_phones().await;
+                if removed > 0 {
+                    ble::persist_paired_phones().await;
+                }
+                log::warn!(
+                    "SYSTEM: clear paired phones requested, removed={} (PC runtime)",
+                    removed
+                );
+            }
+            Some(core_interface::proto::system_command::Action::UpsertPairedPhone(req)) => {
+                if !core_interface::is_pairing_window_open() {
+                    log::warn!("SYSTEM: add paired phone denied, pairing window is closed");
+                    continue;
+                }
+                let added = core_interface::add_paired_phone(&req.device_id).await;
+                if added {
+                    ble::persist_paired_phones().await;
+                }
+                log::info!(
+                    "SYSTEM: upsert paired phone requested, accepted={}, device_id_len={}",
+                    added,
+                    req.device_id.len()
+                );
+            }
+            Some(core_interface::proto::system_command::Action::SetCanDebugEnabled(_)) => {
+                // Consumed by core-interface and not forwarded here.
+            }
+            Some(core_interface::proto::system_command::Action::UpdateCanDebugFilters(_)) => {
+                // Consumed by core-interface and not forwarded here.
+            }
+            None => {}
         }
-        Timer::after(Duration::from_secs(5)).await;
-    }
-}
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use embedded_can::{ExtendedId, StandardId};
-
-    fn sc_std_frame(raw_id: u16, data: &[u8]) -> socketcan::CanDataFrame {
-        let sid = socketcan::StandardId::new(raw_id).unwrap();
-        socketcan::CanDataFrame::new(sid, data).unwrap()
-    }
-
-    fn sc_ext_frame(raw_id: u32, data: &[u8]) -> socketcan::CanDataFrame {
-        let eid = socketcan::ExtendedId::new(raw_id).unwrap();
-        socketcan::CanDataFrame::new(eid, data).unwrap()
-    }
-
-    fn core_std_frame(bus_id: u8, raw_id: u16, data: &[u8]) -> CanFrame {
-        let mut buf = [0u8; 8];
-        buf[..data.len()].copy_from_slice(data);
-        CanFrame {
-            bus_id,
-            id: Id::Standard(StandardId::new(raw_id).unwrap()),
-            data: buf,
-            dlc: data.len() as u8,
-        }
-    }
-
-    fn core_ext_frame(bus_id: u8, raw_id: u32, data: &[u8]) -> CanFrame {
-        let mut buf = [0u8; 8];
-        buf[..data.len()].copy_from_slice(data);
-        CanFrame {
-            bus_id,
-            id: Id::Extended(ExtendedId::new(raw_id).unwrap()),
-            data: buf,
-            dlc: data.len() as u8,
-        }
-    }
-
-    // ── socketcan_to_core_frame ───────────────────────────────────────────────
-
-    #[test]
-    fn sc_to_core_standard_id_preserved() {
-        let f = sc_std_frame(0x123, &[1, 2, 3]);
-        let core = socketcan_to_core_frame(&f, 0);
-        assert_eq!(core.id, Id::Standard(StandardId::new(0x123).unwrap()));
-    }
-
-    #[test]
-    fn sc_to_core_extended_id_preserved() {
-        let f = sc_ext_frame(0x1234_5678, &[0xAA]);
-        let core = socketcan_to_core_frame(&f, 2);
-        assert_eq!(core.id, Id::Extended(ExtendedId::new(0x1234_5678).unwrap()));
-    }
-
-    #[test]
-    fn sc_to_core_bus_id_tagged() {
-        let f = sc_std_frame(0x100, &[]);
-        assert_eq!(socketcan_to_core_frame(&f, 0).bus_id, 0);
-        assert_eq!(socketcan_to_core_frame(&f, 3).bus_id, 3);
-    }
-
-    #[test]
-    fn sc_to_core_data_and_dlc_copied() {
-        let data = [0x11, 0x22, 0x33, 0x44];
-        let f = sc_std_frame(0x200, &data);
-        let core = socketcan_to_core_frame(&f, 0);
-        assert_eq!(core.dlc, 4);
-        assert_eq!(&core.data[..4], &data);
-    }
-
-    #[test]
-    fn sc_to_core_empty_frame() {
-        let f = sc_std_frame(0x300, &[]);
-        let core = socketcan_to_core_frame(&f, 0);
-        assert_eq!(core.dlc, 0);
-    }
-
-    // ── core_to_socketcan_frame ───────────────────────────────────────────────
-
-    #[test]
-    fn core_to_sc_standard_id_roundtrip() {
-        let core = core_std_frame(0, 0x123, &[1, 2, 3]);
-        let sc = core_to_socketcan_frame(&core).unwrap();
-        let back = socketcan_to_core_frame(
-            match &sc {
-                socketcan::CanFrame::Data(f) => f,
-                _ => panic!("expected data frame"),
-            },
-            0,
-        );
-        assert_eq!(back.id, core.id);
-        assert_eq!(back.dlc, core.dlc);
-        assert_eq!(
-            &back.data[..back.dlc as usize],
-            &core.data[..core.dlc as usize]
-        );
-    }
-
-    #[test]
-    fn core_to_sc_extended_id_roundtrip() {
-        let core = core_ext_frame(1, 0x1FFFFFFF, &[0xDE, 0xAD]);
-        let sc = core_to_socketcan_frame(&core).unwrap();
-        let back = socketcan_to_core_frame(
-            match &sc {
-                socketcan::CanFrame::Data(f) => f,
-                _ => panic!("expected data frame"),
-            },
-            1,
-        );
-        assert_eq!(back.id, core.id);
-        assert_eq!(&back.data[..back.dlc as usize], &[0xDE, 0xAD]);
-    }
-
-    #[test]
-    fn core_to_sc_max_payload() {
-        let core = core_std_frame(0, 0x100, &[1, 2, 3, 4, 5, 6, 7, 8]);
-        assert!(core_to_socketcan_frame(&core).is_some());
     }
 }

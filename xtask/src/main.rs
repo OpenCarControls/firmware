@@ -12,12 +12,19 @@ pub struct Config {
     pub target: TargetConfig,
     pub hardware: toml::Value,
     pub network: NetworkConfig,
+    /// Populated at runtime from `[workspace.dependencies]` in the root `Cargo.toml`.
+    /// Not deserialized from `config.toml` — set manually after parsing.
+    #[serde(skip, default = "default_empty_toml_table")]
+    pub workspace_deps: toml::Value,
+}
+
+fn default_empty_toml_table() -> toml::Value {
+    toml::Value::Table(Default::default())
 }
 
 #[derive(Deserialize)]
 pub struct TargetConfig {
     pub board: String, // e.g., "esp" or "pc"
-    pub brand: String,
     pub platform: String,
 }
 
@@ -30,8 +37,14 @@ pub struct NetworkConfig {
 
 #[derive(Deserialize, Default)]
 pub struct WifiConfig {
+    #[serde(default = "wifi_enabled_default")]
+    pub enabled: bool,
     pub ssid: Option<String>,
     pub password: Option<String>,
+}
+
+fn wifi_enabled_default() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -48,6 +61,62 @@ pub struct MqttConfig {
     pub password: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct TransportConfig {
+    pub mqtt: TransportMqtt,
+    pub ble: TransportBle,
+}
+
+#[derive(Deserialize)]
+pub struct TransportMqtt {
+    pub command_topic_template: String,
+    pub data_topic_template: String,
+}
+
+#[derive(Deserialize)]
+pub struct TransportBle {
+    pub service: TransportBleService,
+    pub characteristics: TransportBleCharacteristics,
+}
+
+#[derive(Deserialize)]
+pub struct TransportBleService {
+    pub name: String,
+    pub uuid: String,
+}
+
+#[derive(Deserialize)]
+pub struct TransportBleCharacteristics {
+    pub app_to_device: TransportBleCharacteristic,
+    pub device_to_app: TransportBleCharacteristic,
+}
+
+#[derive(Deserialize)]
+pub struct TransportBleCharacteristic {
+    pub uuid: String,
+    pub payload: String,
+    pub properties: Vec<String>,
+    pub direction: String,
+}
+
+/// Returns the version string for a `[workspace.dependencies]` entry.
+/// Handles both `dep = "1.2.3"` (plain string) and `dep = { version = "1.2.3", ... }` (table).
+pub fn ws_dep_version(workspace_deps: &toml::Value, name: &str) -> String {
+    let dep = workspace_deps.get(name).unwrap_or_else(|| {
+        panic!(
+            "❌ Missing workspace dependency '{}'. Add it to [workspace.dependencies] in Cargo.toml.",
+            name
+        )
+    });
+    if let Some(s) = dep.as_str() {
+        s.to_string()
+    } else if let Some(v) = dep.get("version").and_then(|v| v.as_str()) {
+        v.to_string()
+    } else {
+        panic!("❌ Workspace dependency '{}' has no 'version' field.", name)
+    }
+}
+
 /// Strips the scheme from a broker URL and returns `(host, port)` as strings.
 /// Falls back to port 1883 for `mqtt://` and 8883 for `mqtts://`.
 pub fn parse_broker_url(url: &str) -> (String, u16) {
@@ -56,7 +125,10 @@ pub fn parse_broker_url(url: &str) -> (String, u16) {
     } else if let Some(r) = url.strip_prefix("mqtt://") {
         ("mqtt", r)
     } else {
-        eprintln!("❌ broker_url must start with mqtt:// or mqtts://, got: {}", url);
+        eprintln!(
+            "❌ broker_url must start with mqtt:// or mqtts://, got: {}",
+            url
+        );
         std::process::exit(1);
     };
     let default_port: u16 = if scheme == "mqtts" { 8883 } else { 1883 };
@@ -75,6 +147,150 @@ pub fn parse_broker_url(url: &str) -> (String, u16) {
     }
 }
 
+pub fn load_transport_contract() -> TransportConfig {
+    let path = "contracts/opencar/core/v1/transport.toml";
+    let content = fs::read_to_string(path)
+        .unwrap_or_else(|_| panic!("❌ Failed to read transport contract: {}", path));
+    toml::from_str(&content).expect("❌ Failed to parse transport.toml")
+}
+
+pub fn render_topic_from_template(template: &str, client_id: &str, field_name: &str) -> String {
+    if !template.contains("{client_id}") {
+        eprintln!(
+            "❌ transport.toml {} must include '{{client_id}}': {}",
+            field_name, template
+        );
+        exit(1);
+    }
+    template.replace("{client_id}", client_id)
+}
+
+pub fn escape_rust_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+pub fn parse_uuid_u128(uuid: &str, field_name: &str) -> u128 {
+    let hex: String = uuid.chars().filter(|c| *c != '-').collect();
+    if hex.len() != 32 {
+        eprintln!(
+            "❌ transport.toml {} must be a 128-bit UUID, got: {}",
+            field_name, uuid
+        );
+        exit(1);
+    }
+    u128::from_str_radix(&hex, 16).unwrap_or_else(|_| {
+        eprintln!(
+            "❌ transport.toml {} is not valid hex UUID: {}",
+            field_name, uuid
+        );
+        exit(1);
+    })
+}
+
+pub fn validate_ble_transport_contract(transport: &TransportConfig) {
+    let app_to_device = &transport.ble.characteristics.app_to_device;
+    let device_to_app = &transport.ble.characteristics.device_to_app;
+
+    if app_to_device.payload != "opencar.core.v1.AppToDevice" {
+        eprintln!(
+            "❌ transport.toml ble.characteristics.app_to_device.payload must be opencar.core.v1.AppToDevice"
+        );
+        exit(1);
+    }
+    if app_to_device.direction != "app -> device" {
+        eprintln!(
+            "❌ transport.toml ble.characteristics.app_to_device.direction must be 'app -> device'"
+        );
+        exit(1);
+    }
+    if app_to_device.properties.len() != 2
+        || !app_to_device.properties.iter().any(|p| p == "write")
+        || !app_to_device
+            .properties
+            .iter()
+            .any(|p| p == "write_without_response")
+    {
+        eprintln!(
+            "❌ transport.toml ble.characteristics.app_to_device.properties must be [\"write\", \"write_without_response\"]"
+        );
+        exit(1);
+    }
+
+    if device_to_app.payload != "opencar.core.v1.DeviceToApp" {
+        eprintln!(
+            "❌ transport.toml ble.characteristics.device_to_app.payload must be opencar.core.v1.DeviceToApp"
+        );
+        exit(1);
+    }
+    if device_to_app.direction != "device -> app" {
+        eprintln!(
+            "❌ transport.toml ble.characteristics.device_to_app.direction must be 'device -> app'"
+        );
+        exit(1);
+    }
+    if device_to_app.properties.len() != 1 || device_to_app.properties[0] != "notify" {
+        eprintln!(
+            "❌ transport.toml ble.characteristics.device_to_app.properties must be [\"notify\"]"
+        );
+        exit(1);
+    }
+
+    let _ = parse_uuid_u128(&transport.ble.service.uuid, "ble.service.uuid");
+    let _ = parse_uuid_u128(
+        &transport.ble.characteristics.app_to_device.uuid,
+        "ble.characteristics.app_to_device.uuid",
+    );
+    let _ = parse_uuid_u128(
+        &transport.ble.characteristics.device_to_app.uuid,
+        "ble.characteristics.device_to_app.uuid",
+    );
+}
+
+pub fn validate_esp_ble_uuid_constants_against_contract(transport: &TransportConfig) {
+    let path = "boards/esp/src/ble/mod.rs";
+    let src = fs::read_to_string(path)
+        .unwrap_or_else(|_| panic!("❌ Failed to read ESP BLE module: {}", path));
+
+    let service_expected = format!(
+        "GATT_SERVICE_UUID: u128 = 0x{:032x}",
+        parse_uuid_u128(&transport.ble.service.uuid, "ble.service.uuid")
+    );
+    let rx_expected = format!(
+        "GATT_RX_UUID: u128 = 0x{:032x}",
+        parse_uuid_u128(
+            &transport.ble.characteristics.app_to_device.uuid,
+            "ble.characteristics.app_to_device.uuid"
+        )
+    );
+    let tx_expected = format!(
+        "GATT_TX_UUID: u128 = 0x{:032x}",
+        parse_uuid_u128(
+            &transport.ble.characteristics.device_to_app.uuid,
+            "ble.characteristics.device_to_app.uuid"
+        )
+    );
+
+    // Ignore readability separators so the check is resilient to underscore formatting.
+    let normalized_src = src.replace('_', "");
+    let service_ok = normalized_src.contains(&service_expected.replace('_', ""));
+    let rx_ok = normalized_src.contains(&rx_expected.replace('_', ""));
+    let tx_ok = normalized_src.contains(&tx_expected.replace('_', ""));
+
+    if !(service_ok && rx_ok && tx_ok) {
+        eprintln!(
+            "❌ ESP BLE UUID constants in {} are out of sync with contracts/opencar/core/v1/transport.toml",
+            path
+        );
+        eprintln!(
+            "   Expected service/rx/tx UUIDs: {}, {}, {}",
+            transport.ble.service.uuid,
+            transport.ble.characteristics.app_to_device.uuid,
+            transport.ble.characteristics.device_to_app.uuid
+        );
+        exit(1);
+    }
+}
+
 // ==========================================
 // 2. The Main CLI Entrypoint
 // ==========================================
@@ -87,7 +303,7 @@ fn main() {
         "build" | "run" | "clippy" | "test" => {}
         _ => {
             eprintln!(
-                "Usage: cargo xtask <build|run|clippy|test> [config_file.toml] [--board <board>] [--brand <brand>] [--platform <platform>] [--on-hardware]"
+                "Usage: cargo xtask <build|run|clippy|test> [config_file.toml] [--board <board>] [--platform <platform>] [--on-hardware]"
             );
             exit(1);
         }
@@ -96,7 +312,6 @@ fn main() {
     // Parse optional positional config path and named overrides from remaining args
     let mut config_path = "config.toml";
     let mut override_board: Option<String> = None;
-    let mut override_brand: Option<String> = None;
     let mut override_platform: Option<String> = None;
     let mut on_hardware = false;
 
@@ -105,9 +320,6 @@ fn main() {
         match arg.as_str() {
             "--board" => {
                 override_board = remaining.next().cloned();
-            }
-            "--brand" => {
-                override_brand = remaining.next().cloned();
             }
             "--platform" => {
                 override_platform = remaining.next().cloned();
@@ -133,11 +345,15 @@ fn main() {
     let mut config: Config =
         toml::from_str(&config_str).expect("Failed to parse TOML configuration");
 
+    // Load workspace dependency versions from root Cargo.toml so builders don't hardcode them.
+    let ws_toml_str =
+        fs::read_to_string("Cargo.toml").expect("❌ Could not read workspace Cargo.toml");
+    let ws_toml: toml::Value =
+        toml::from_str(&ws_toml_str).expect("❌ Failed to parse workspace Cargo.toml");
+    config.workspace_deps = ws_toml["workspace"]["dependencies"].clone();
+
     if let Some(board) = override_board {
         config.target.board = board;
-    }
-    if let Some(brand) = override_brand {
-        config.target.brand = brand;
     }
     if let Some(platform) = override_platform {
         config.target.platform = platform;
@@ -178,8 +394,8 @@ fn main() {
 fn run_host_tests(config: &Config) {
     // Discover the configured vehicle crate name
     let vehicle_cargo_path = format!(
-        "cars/{}/platforms/{}/Cargo.toml",
-        config.target.brand, config.target.platform
+        "cars/{}/Cargo.toml",
+        config.target.platform
     );
     let vehicle_cargo_str = fs::read_to_string(&vehicle_cargo_path).unwrap_or_else(|_| {
         panic!(

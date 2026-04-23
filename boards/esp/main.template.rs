@@ -54,6 +54,16 @@ async fn main(spawner: Spawner) -> ! {
 
     // ── Core 0: comms + vehicle tasks ─────────────────────────────────────
     board_esp::start(&spawner);
+{BLE_DRIVER_SPAWN}
+    spawner
+        .spawn(board_esp::ble_lifecycle_task(
+            BLE_PAIRING_BUTTON_PIN,
+            BLE_PAIRING_BUTTON_HOLD_S,
+            BLE_PAIRING_WINDOW_S,
+            BLE_MAX_BONDED_PHONES,
+            BLE_CONTROLLER_LEASE_TTL_S,
+        ))
+        .unwrap();
 {MQTT_DRIVER_SPAWN}    spawner.spawn({VEHICLE_CRATE_IDENT}::handle_basic_commands_task()).unwrap();
     spawner.spawn({VEHICLE_CRATE_IDENT}::handle_advanced_commands_task()).unwrap();
     spawner.spawn({VEHICLE_CRATE_IDENT}::state_update_task()).unwrap();
