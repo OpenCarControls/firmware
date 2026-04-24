@@ -297,7 +297,7 @@ async fn handle_request(
 pub async fn ble_http_task(port: u16, device_name: &'static str, pairing_window_s: u32) {
     use std::io;
 
-    let addr = format!("127.0.0.1:{}", port);
+    let addr = format!("0.0.0.0:{}", port);
     let listener = match std::net::TcpListener::bind(&addr) {
         Ok(v) => v,
         Err(e) => {

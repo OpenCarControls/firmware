@@ -2,6 +2,13 @@
     "build": {
         "dockerfile": "Dockerfile"
     },
+    "runArgs": [
+        "-p",
+        "4242:4242"
+    ],
+    "forwardPorts": [
+        4242
+    ],
     "customizations": {
         "vscode": {
             "extensions": [

@@ -158,6 +158,7 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str(&format!("embassy-executor = {{ version = \"{}\", features = [\"arch-std\", \"executor-thread\"] }}\n", v("embassy-executor")));
         cargo_toml.push_str(&format!("embassy-time = {{ version = \"{}\", features = [\"std\"] }}\n", v("embassy-time")));
         cargo_toml.push_str(&format!("critical-section = {{ version = \"{}\", features = [\"std\"] }}\n", v("critical-section")));
+        cargo_toml.push_str("env_logger = \"0.11\"\n");
 
         if config.network.mqtt.auth_mode == "mtls" {
             // certs are embedded via include_bytes! in main.rs, no extra deps needed
