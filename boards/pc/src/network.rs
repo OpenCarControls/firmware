@@ -4,6 +4,7 @@ use rust_mqtt::{
     Bytes,
     buffer::AllocBuffer,
     client::Client,
+    client::MqttError,
     client::event::Event,
     client::options::{ConnectOptions, PublicationOptions, SubscriptionOptions, TopicReference},
     types::{MqttBinary, MqttString, TopicFilter, TopicName},
@@ -137,14 +138,30 @@ async fn run_mqtt_session(
             Err(_timeout) => continue,
             Ok(Err(e)) => {
                 log::warn!("MQTT: poll error: {:?}", e);
-                client.abort().await;
+                // abort() panics if the broker sent a clean DISCONNECT
+                // (e.g. SessionTakenOver) because the network is still in
+                // Ok state. Only call it for IO/protocol errors.
+                if !matches!(e, MqttError::Disconnect { .. }) {
+                    client.abort().await;
+                }
                 return Err(());
             }
             Ok(Ok(Event::Publish(p))) => {
                 if p.topic.as_ref().as_str() == cmd_topic {
                     let payload = p.message.as_bytes();
                     if let Ok(msg) = proto::AppToDevice::decode(payload) {
-                        MQTT_RX_CHANNEL.send(msg).await;
+                        // Use try_send to avoid blocking here. If we blocked on
+                        // MQTT_RX_CHANNEL.send().await while downstream tasks are
+                        // simultaneously blocked on BASIC_CMD_CHANNEL and
+                        // CMD_RESP_CHANNEL, route_responses_task would be stuck
+                        // trying to send to MQTT_TX_CHANNEL — which we can't drain
+                        // because we're blocked. That forms a deadlock cycle.
+                        // Dropping one inbound command under back-pressure is safe;
+                        // the app can retry. What we must never do is stall the
+                        // outbound drain loop.
+                        if MQTT_RX_CHANNEL.try_send(msg).is_err() {
+                            log::warn!("MQTT: RX channel full, dropping inbound command");
+                        }
                     }
                 }
             }

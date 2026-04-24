@@ -1,0 +1,28 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Generate: app-build (xtask)",
+            "type": "shell",
+            "command": "cargo xtask build --board pc",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": ["$rustc"]
+        },
+        {
+            "label": "Build: app-build (debug)",
+            "type": "shell",
+            "command": "cargo build --manifest-path ${workspaceFolder}/.app_build/Cargo.toml",
+            "dependsOn": ["Generate: app-build (xtask)"],
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": ["$rustc"]
+        }
+    ]
+}

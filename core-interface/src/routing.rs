@@ -46,44 +46,56 @@ pub async fn route_responses_task() {
 /// - BLE receives the full state (basic + advanced).
 /// - MQTT receives basic only (`advanced_state_bytes` is always empty).
 /// `timestamp_ms` is passed explicitly so callers (and tests) control the clock.
+///
+/// Both TX channels are written non-blocking. State updates are ephemeral —
+/// the latest reading always supersedes older ones. If a channel is full
+/// (e.g. BLE is pull-based and nobody has polled yet, or the MQTT broker is
+/// temporarily unreachable), the oldest pending message is evicted to make
+/// room for the fresher state. This ensures `publish_state_task` never blocks,
+/// which would otherwise stall `VEHICLE_STATE_CHANNEL` and deadlock every
+/// producer task (`state_update_task`, command handlers).
 pub async fn publish_single_state(payload: VehicleStatePayload, timestamp_ms: u64) {
     let pid = crate::PLATFORM_ID.load(Ordering::Relaxed);
 
     // BLE: full state (basic + advanced)
-    BLE_TX_CHANNEL
-        .sender()
-        .send(proto::DeviceToApp {
-            timestamp_ms,
-            platform_id: pid,
-            payload: Some(proto::device_to_app::Payload::StateUpdate(
-                proto::StateUpdate {
-                    system_state: None,
-                    vehicle_state: Some(proto::VehicleState {
-                        basic_state_bytes: payload.basic.clone(),
-                        advanced_state_bytes: payload.advanced,
-                    }),
-                },
-            )),
-        })
-        .await;
+    let ble_msg = proto::DeviceToApp {
+        timestamp_ms,
+        platform_id: pid,
+        payload: Some(proto::device_to_app::Payload::StateUpdate(
+            proto::StateUpdate {
+                system_state: None,
+                vehicle_state: Some(proto::VehicleState {
+                    basic_state_bytes: payload.basic.clone(),
+                    advanced_state_bytes: payload.advanced,
+                }),
+            },
+        )),
+    };
+    if let Err(embassy_sync::channel::TrySendError::Full(msg)) = BLE_TX_CHANNEL.try_send(ble_msg) {
+        // Channel full — evict the oldest stale state and replace with latest.
+        let _ = BLE_TX_CHANNEL.try_receive();
+        let _ = BLE_TX_CHANNEL.try_send(msg);
+    }
 
     // MQTT: basic only (advanced is BLE-exclusive)
-    MQTT_TX_CHANNEL
-        .sender()
-        .send(proto::DeviceToApp {
-            timestamp_ms,
-            platform_id: pid,
-            payload: Some(proto::device_to_app::Payload::StateUpdate(
-                proto::StateUpdate {
-                    system_state: None,
-                    vehicle_state: Some(proto::VehicleState {
-                        basic_state_bytes: payload.basic,
-                        advanced_state_bytes: vec![],
-                    }),
-                },
-            )),
-        })
-        .await;
+    let mqtt_msg = proto::DeviceToApp {
+        timestamp_ms,
+        platform_id: pid,
+        payload: Some(proto::device_to_app::Payload::StateUpdate(
+            proto::StateUpdate {
+                system_state: None,
+                vehicle_state: Some(proto::VehicleState {
+                    basic_state_bytes: payload.basic,
+                    advanced_state_bytes: vec![],
+                }),
+            },
+        )),
+    };
+    if let Err(embassy_sync::channel::TrySendError::Full(msg)) = MQTT_TX_CHANNEL.try_send(mqtt_msg) {
+        // Channel full — evict the oldest stale state and replace with latest.
+        let _ = MQTT_TX_CHANNEL.try_receive();
+        let _ = MQTT_TX_CHANNEL.try_send(msg);
+    }
 }
 
 /// Reads `VehicleStatePayload` from `VEHICLE_STATE_CHANNEL` and publishes two

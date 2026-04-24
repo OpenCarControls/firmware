@@ -25,6 +25,7 @@ pub struct VirtualCarState {
     pub are_doors_locked: Option<bool>,
     pub speed: Option<i32>,
     pub gear: Option<i32>,
+    pub custom_state1: Option<bool>,
 }
 
 impl VirtualCarState {
@@ -35,6 +36,7 @@ impl VirtualCarState {
             are_doors_locked: Some(false),
             speed: Some(0),
             gear: Some(0),
+            custom_state1: Some(false),
         }
     }
 }
@@ -81,6 +83,7 @@ pub fn encode_state(state: &VirtualCarState) -> VehicleStatePayload {
     let advanced = proto::AdvancedState {
         speed: state.speed,
         gear: state.gear,
+        custom_state1: state.custom_state1,
     };
     VehicleStatePayload {
         basic: basic.encode_to_vec(),
@@ -238,11 +241,10 @@ pub async fn process_basic_command(bytes: &[u8]) -> Result<(), &'static str> {
 pub async fn handle_advanced_commands_task() {
     loop {
         let inbound = ADVANCED_CMD_CHANNEL.receiver().receive().await;
-        let (success, error_message) =
-            match proto::AdvancedCommand::decode(inbound.bytes.as_slice()) {
-                Ok(_) => (true, String::new()),
-                Err(_) => (false, String::from("Failed to decode AdvancedCommand")),
-            };
+        let (success, error_message) = match process_advanced_command(inbound.bytes.as_slice()).await {
+            Ok(()) => (true, String::new()),
+            Err(e) => (false, String::from(e)),
+        };
         let response = core_interface::proto::CommandResponse {
             message_id: inbound.message_id,
             success,
@@ -254,6 +256,22 @@ pub async fn handle_advanced_commands_task() {
             .sender()
             .send((inbound.transport, response))
             .await;
+    }
+}
+
+pub async fn process_advanced_command(bytes: &[u8]) -> Result<(), &'static str> {
+    let cmd = proto::AdvancedCommand::decode(bytes).map_err(|_| "Failed to decode AdvancedCommand")?;
+    match cmd.action {
+        Some(proto::advanced_command::Action::ToggleCustomState1(_)) => {
+            let payload = {
+                let mut state = CAR_STATE.lock().await;
+                state.custom_state1 = Some(!state.custom_state1.unwrap_or(false));
+                encode_state(&state)
+            };
+            VEHICLE_STATE_CHANNEL.sender().send(payload).await;
+            Ok(())
+        }
+        None => Err("No action in AdvancedCommand"),
     }
 }
 
@@ -312,6 +330,7 @@ mod tests {
             is_driving: None,
             are_doors_locked: None,
             gear: None,
+            custom_state1: None,
         };
         let payload = encode_state(&state);
         let basic = proto::BasicState::decode(payload.basic.as_slice()).unwrap();
