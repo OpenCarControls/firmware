@@ -417,7 +417,7 @@ impl TargetBuilder for Builder {
         };
 
         let ble_driver_spawn = "    spawner\n\
-               .spawn(board_esp::ble_transport_task(ble_radio_controller, peripherals.BT, peripherals.FLASH, BLE_DEVICE_NAME_BASE))\n\
+               .spawn(board_esp::ble_transport_task(ble_radio_controller, peripherals.BT, peripherals.FLASH, peripherals.RNG, peripherals.ADC1, BLE_DEVICE_NAME_BASE))\n\
              .unwrap();\n"
             .to_string();
 

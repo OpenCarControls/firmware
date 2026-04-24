@@ -21,7 +21,8 @@ use crate::network::SharedRadioController;
 
 #[cfg(feature = "hardware")]
 use super::store::{
-    init_paired_phones_flash_store, persist_paired_phones_to_store, restore_paired_phones_from_store,
+    init_paired_phones_flash_store, persist_paired_phones_to_store, persist_security_store,
+    restore_paired_phones_from_store, restore_security_store,
 };
 #[cfg(feature = "hardware")]
 use super::{GATT_RX_UUID, GATT_SERVICE_UUID, GATT_TX_UUID, mac_to_ble_address};
@@ -75,6 +76,8 @@ pub async fn ble_transport_task(
     radio: &'static SharedRadioController,
     bt_peri: peripherals::BT<'static>,
     flash_peri: peripherals::FLASH<'static>,
+    rng_peri: peripherals::RNG<'static>,
+    adc1_peri: peripherals::ADC1<'static>,
     name_base: &'static str,
 ) {
     use static_cell::StaticCell;
@@ -86,6 +89,9 @@ pub async fn ble_transport_task(
     if restored > 0 {
         log::info!("BLE store: restored {} paired phone(s) from flash", restored);
     }
+
+    let saved_bonds = restore_security_store().await;
+    log::info!("BLE security store: restored {} LTK(s) from flash", saved_bonds.len());
 
     let connector = match ble::controller::BleConnector::new(radio, bt_peri, ble::Config::default())
     {
@@ -107,7 +113,18 @@ pub async fn ble_transport_task(
     let name = name.as_str();
     let address: Address = Address::random(mac_to_ble_address(mac));
 
-    let host = trouble_host::new(controller, &mut resources).set_random_address(address);
+    let _trng_source = esp_hal::rng::TrngSource::new(rng_peri, adc1_peri);
+    let mut trng = esp_hal::rng::Trng::try_new().expect("TRNG entropy source should be active");
+    let host = trouble_host::new(controller, &mut resources)
+        .set_random_address(address)
+        .set_random_generator_seed(&mut trng);
+
+    for bond in &saved_bonds {
+        if let Err(e) = host.add_bond_information(bond.clone()) {
+            log::warn!("BLE security store: failed to restore LTK: {:?}", e);
+        }
+    }
+
     let Host {
         mut peripheral,
         mut runner,
@@ -148,7 +165,7 @@ pub async fn ble_transport_task(
                         }
                         log::info!("BLE transport: central connected");
                         let _ = select(
-                            gatt_event_task(&server, &conn),
+                            gatt_event_task(&server, &conn, &host),
                             ble_tx_notify_task(&server, &conn),
                         )
                         .await;
@@ -245,9 +262,10 @@ fn peer_device_id<P: PacketPool>(conn: &GattConnection<'_, '_, P>) -> Vec<u8> {
 }
 
 #[cfg(feature = "hardware")]
-async fn gatt_event_task<P: PacketPool>(
+async fn gatt_event_task<C: Controller, P: PacketPool>(
     server: &OpenCarGattServer<'_>,
     conn: &GattConnection<'_, '_, P>,
+    stack: &Stack<'_, C, P>,
 ) {
     let rx_handle = server.link.rx.handle;
 
@@ -283,6 +301,11 @@ async fn gatt_event_task<P: PacketPool>(
                 let added_or_existing = core_interface::add_paired_phone(&device_id).await;
                 if added_or_existing {
                     persist_paired_phones_to_store().await;
+                }
+                if bond.is_some() {
+                    let all_bonds = stack.get_bond_information();
+                    persist_security_store(all_bonds.as_slice()).await;
+                    log::info!("BLE security store: persisted {} LTK(s)", all_bonds.len());
                 }
                 log::info!(
                     "BLE pairing complete: encrypted={}, authenticated={}, bonded={}, paired_state_ok={}",
