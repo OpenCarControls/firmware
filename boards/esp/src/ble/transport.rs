@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "hardware")]
 use core_interface::{BLE_RX_CHANNEL, BLE_TX_CHANNEL, proto};
 #[cfg(feature = "hardware")]
-use embassy_futures::{join::join, select::select};
+use embassy_futures::{join::join, select::{select, Either}};
 #[cfg(feature = "hardware")]
 use esp_hal::peripherals;
 #[cfg(feature = "hardware")]
@@ -31,8 +31,6 @@ use super::{GATT_RX_UUID, GATT_SERVICE_UUID, GATT_TX_UUID, mac_to_ble_address};
 const BLE_CONNECTIONS_MAX: usize = 1;
 #[cfg(feature = "hardware")]
 const BLE_L2CAP_CHANNELS_MAX: usize = 3;
-#[cfg(feature = "hardware")]
-const BLE_REPAIR_WINDOW_S: u32 = 30;
 
 #[cfg(feature = "hardware")]
 #[gatt_server]
@@ -103,11 +101,10 @@ pub async fn ble_transport_task(
     };
 
     let controller: ExternalController<_, 20> = ExternalController::new(connector);
-    let mut resources: HostResources<
-        DefaultPacketPool,
-        BLE_CONNECTIONS_MAX,
-        BLE_L2CAP_CHANNELS_MAX,
-    > = HostResources::new();
+    static HOST_RESOURCES: StaticCell<
+        HostResources<DefaultPacketPool, BLE_CONNECTIONS_MAX, BLE_L2CAP_CHANNELS_MAX>,
+    > = StaticCell::new();
+    let resources = HOST_RESOURCES.init(HostResources::new());
     let mac = esp_hal::efuse::Efuse::read_base_mac_address();
     let name = BLE_DEVICE_NAME.init(build_ble_device_name(name_base, mac));
     let name = name.as_str();
@@ -115,7 +112,7 @@ pub async fn ble_transport_task(
 
     let _trng_source = esp_hal::rng::TrngSource::new(rng_peri, adc1_peri);
     let mut trng = esp_hal::rng::Trng::try_new().expect("TRNG entropy source should be active");
-    let host = trouble_host::new(controller, &mut resources)
+    let host = trouble_host::new(controller, resources)
         .set_random_address(address)
         .set_random_generator_seed(&mut trng);
 
@@ -148,28 +145,36 @@ pub async fn ble_transport_task(
             }
         },
         async {
+            let mut last_pairing_open = core_interface::is_pairing_window_open();
             loop {
-                match advertise_and_accept(name, &mut peripheral, &server).await {
-                    Ok(conn) => {
-                        let peer_id = peer_device_id(&conn);
-                        if core_interface::is_phone_paired(&peer_id).await {
-                            core_interface::open_pairing_window_for(BLE_REPAIR_WINDOW_S);
-                            log::info!(
-                                "BLE transport: known peer reconnected, opened {}s pairing window",
-                                BLE_REPAIR_WINDOW_S
-                            );
-                        }
-                        let pairing_open = core_interface::is_pairing_window_open();
+                let pairing_open = core_interface::is_pairing_window_open();
+                if pairing_open != last_pairing_open {
+                    if pairing_open {
+                        log::info!("BLE: pairing window opened — switching to discoverable advertising");
+                    } else {
+                        log::info!("BLE: pairing window closed — switching to non-discoverable advertising");
+                    }
+                    last_pairing_open = pairing_open;
+                }
+                match advertise_and_accept(name, pairing_open, &mut peripheral, &server).await {
+                    Ok(Some(conn)) => {
                         if let Err(e) = conn.raw().set_bondable(pairing_open) {
                             log::warn!("BLE set_bondable({}) failed: {:?}", pairing_open, e);
                         }
-                        log::info!("BLE transport: central connected");
+                        log::info!("BLE transport: central connected (pairing_window={})", pairing_open);
+                        // tx_auth starts false; gatt_event_task sets it to true once the
+                        // peer is confirmed as paired or bonded (synchronously at task
+                        // startup for preexisting bonds, or on PairingComplete for new ones).
+                        let tx_auth = core::sync::atomic::AtomicBool::new(false);
                         let _ = select(
-                            gatt_event_task(&server, &conn, &host),
-                            ble_tx_notify_task(&server, &conn),
+                            gatt_event_task(&server, &conn, &host, &tx_auth),
+                            ble_tx_notify_task(&server, &conn, &tx_auth),
                         )
                         .await;
                         log::info!("BLE transport: connection closed, returning to advertise");
+                    }
+                    Ok(None) => {
+                        // Advertise timeout — re-check pairing window mode on next iteration.
                     }
                     Err(e) => {
                         log::warn!("BLE advertise/accept failed: {:?}", e);
@@ -185,24 +190,37 @@ pub async fn ble_transport_task(
 #[cfg(feature = "hardware")]
 async fn advertise_and_accept<'values, 'server, C: Controller>(
     name: &'values str,
+    pairing_window_open: bool,
     peripheral: &mut Peripheral<'values, C, DefaultPacketPool>,
     server: &'server OpenCarGattServer<'values>,
-) -> Result<GattConnection<'values, 'server, DefaultPacketPool>, BleHostError<C::Error>> {
+) -> Result<Option<GattConnection<'values, 'server, DefaultPacketPool>>, BleHostError<C::Error>> {
     let mut adv_data = [0u8; 31];
-    let adv_len = AdStructure::encode_slice(
-        &[
-            AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-            AdStructure::CompleteLocalName(name.as_bytes()),
-        ],
-        &mut adv_data,
-    )?;
-
-    let svc_uuid_bytes: [u8; 16] = GATT_SERVICE_UUID.to_le_bytes();
     let mut scan_data = [0u8; 31];
-    let scan_len = AdStructure::encode_slice(
-        &[AdStructure::ServiceUuids128(&[svc_uuid_bytes])],
-        &mut scan_data,
-    )?;
+
+    let (adv_len, scan_len) = if pairing_window_open {
+        // Mode A: discoverable — new phones can find and pair with the device.
+        let svc_uuid_bytes: [u8; 16] = GATT_SERVICE_UUID.to_le_bytes();
+        let adv_len = AdStructure::encode_slice(
+            &[
+                AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
+                AdStructure::CompleteLocalName(name.as_bytes()),
+            ],
+            &mut adv_data,
+        )?;
+        let scan_len = AdStructure::encode_slice(
+            &[AdStructure::ServiceUuids128(&[svc_uuid_bytes])],
+            &mut scan_data,
+        )?;
+        (adv_len, scan_len)
+    } else {
+        // Mode B: non-discoverable — device does not appear in general BLE scans.
+        // Bonded phones that know the device address can still reconnect.
+        let adv_len = AdStructure::encode_slice(
+            &[AdStructure::Flags(BR_EDR_NOT_SUPPORTED)],
+            &mut adv_data,
+        )?;
+        (adv_len, 0)
+    };
 
     let advertiser = peripheral
         .advertise(
@@ -214,8 +232,17 @@ async fn advertise_and_accept<'values, 'server, C: Controller>(
         )
         .await?;
 
-    let conn = advertiser.accept().await?.with_attribute_server(server)?;
-    Ok(conn)
+    // Apply a timeout so the outer loop can re-check the pairing window state
+    // and switch advertising modes if needed (within ~10 seconds of any change).
+    match select(
+        advertiser.accept(),
+        embassy_time::Timer::after(embassy_time::Duration::from_secs(10)),
+    )
+    .await
+    {
+        Either::First(result) => Ok(Some(result?.with_attribute_server(server)?)),
+        Either::Second(_) => Ok(None),
+    }
 }
 
 #[cfg(feature = "hardware")]
@@ -238,7 +265,13 @@ fn request_link_security<P: PacketPool>(conn: &GattConnection<'_, '_, P>) {
 
 #[cfg(feature = "hardware")]
 fn sync_bondable_with_window<P: PacketPool>(conn: &GattConnection<'_, '_, P>) {
-    let desired = core_interface::is_pairing_window_open();
+    // Keep bonding enabled until the link is encrypted so both peers can
+    // exchange/store LTKs on first connect.
+    let desired = if link_is_encrypted(conn) {
+        core_interface::is_pairing_window_open()
+    } else {
+        true
+    };
     match conn.raw().bondable() {
         Ok(current) if current == desired => {}
         Ok(_) => {
@@ -266,8 +299,35 @@ async fn gatt_event_task<C: Controller, P: PacketPool>(
     server: &OpenCarGattServer<'_>,
     conn: &GattConnection<'_, '_, P>,
     stack: &Stack<'_, C, P>,
+    tx_auth: &core::sync::atomic::AtomicBool,
 ) {
     let rx_handle = server.link.rx.handle;
+    let preexisting_bond_addrs: Vec<[u8; 6]> = stack
+        .get_bond_information()
+        .iter()
+        .map(|bond| {
+            let mut addr = [0u8; 6];
+            addr.copy_from_slice(bond.identity.bd_addr.raw());
+            addr
+        })
+        .collect();
+
+    // If the peer already has a preexisting LTK bond, authorize TX immediately
+    // so state updates flow without waiting for PairingComplete. Re-encryption
+    // fires PairingComplete asynchronously; we cannot block TX until then or
+    // the phone reconnect after BLE toggle would receive no state updates.
+    {
+        let mut peer_addr_at_connect = [0u8; 6];
+        peer_addr_at_connect.copy_from_slice(conn.raw().peer_identity().bd_addr.raw());
+        if preexisting_bond_addrs
+            .iter()
+            .any(|addr| *addr == peer_addr_at_connect)
+        {
+            tx_auth.store(true, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    let mut verified_peer_id: Option<Vec<u8>> = None;
 
     loop {
         sync_bondable_with_window(conn);
@@ -297,9 +357,42 @@ async fn gatt_event_task<C: Controller, P: PacketPool>(
                 security_level,
                 bond,
             } => {
-                let device_id = peer_device_id(conn);
-                let added_or_existing = core_interface::add_paired_phone(&device_id).await;
+                // Phase 2: prefer the stable identity address from the key-distribution
+                // PDU (bond.identity.bd_addr) over peer_identity().bd_addr, which may
+                // still be the current RPA at the moment this event fires.
+                let device_id = if let Some(ref b) = bond {
+                    let mut id = Vec::with_capacity(10);
+                    id.extend_from_slice(b"ble:");
+                    id.extend_from_slice(b.identity.bd_addr.raw());
+                    id
+                } else {
+                    // Re-encryption via existing LTK: no new keys exchanged, IRK
+                    // resolution has already resolved peer_identity() to the stable
+                    // identity address before this event fires.
+                    peer_device_id(conn)
+                };
+                verified_peer_id = Some(device_id.clone());
+
+                // Phase 1: also allow re-registration for preexisting-bonded phones
+                // that reconnect outside the pairing window.
+                let mut peer_addr = [0u8; 6];
+                peer_addr.copy_from_slice(conn.raw().peer_identity().bd_addr.raw());
+                let is_preexisting_bond =
+                    preexisting_bond_addrs.iter().any(|addr| *addr == peer_addr);
+
+                let pairing_open = core_interface::is_pairing_window_open();
+                let already_known = core_interface::is_phone_paired(&device_id).await;
+                let added_or_existing = if pairing_open || already_known || is_preexisting_bond {
+                    core_interface::add_paired_phone(&device_id).await
+                } else {
+                    log::warn!(
+                        "BLE pairing complete for unknown phone outside pairing window; not adding to registry"
+                    );
+                    false
+                };
                 if added_or_existing {
+                    // Phase 3: authorize TX now that the phone is confirmed.
+                    tx_auth.store(true, core::sync::atomic::Ordering::Relaxed);
                     persist_paired_phones_to_store().await;
                 }
                 if bond.is_some() {
@@ -308,10 +401,13 @@ async fn gatt_event_task<C: Controller, P: PacketPool>(
                     log::info!("BLE security store: persisted {} LTK(s)", all_bonds.len());
                 }
                 log::info!(
-                    "BLE pairing complete: encrypted={}, authenticated={}, bonded={}, paired_state_ok={}",
+                    "BLE pairing complete: encrypted={}, authenticated={}, bonded={}, pairing_open={}, already_known={}, preexisting_bond={}, paired_state_ok={}",
                     security_level.encrypted(),
                     security_level.authenticated(),
                     bond.is_some(),
+                    pairing_open,
+                    already_known,
+                    is_preexisting_bond,
                     added_or_existing,
                 );
             }
@@ -328,10 +424,16 @@ async fn gatt_event_task<C: Controller, P: PacketPool>(
                         continue;
                     }
 
-                    let device_id = peer_device_id(conn);
+                    let device_id = verified_peer_id
+                        .clone()
+                        .unwrap_or_else(|| peer_device_id(conn));
                     let pairing_open = core_interface::is_pairing_window_open();
                     let is_paired = core_interface::is_phone_paired(&device_id).await;
-                    if !pairing_open && !is_paired {
+                    let mut peer_addr = [0u8; 6];
+                    peer_addr.copy_from_slice(conn.raw().peer_identity().bd_addr.raw());
+                    let is_preexisting_bond =
+                        preexisting_bond_addrs.iter().any(|addr| *addr == peer_addr);
+                    if !pairing_open && !is_paired && !is_preexisting_bond {
                         if let Ok(reply) =
                             write_evt.reject(AttErrorCode::INSUFFICIENT_AUTHORISATION)
                         {
@@ -370,6 +472,7 @@ async fn gatt_event_task<C: Controller, P: PacketPool>(
 async fn ble_tx_notify_task<P: PacketPool>(
     server: &OpenCarGattServer<'_>,
     conn: &GattConnection<'_, '_, P>,
+    tx_auth: &core::sync::atomic::AtomicBool,
 ) {
     let mut pending_security_request = false;
     let mut pending_msg: Option<proto::DeviceToApp> = None;
@@ -392,6 +495,13 @@ async fn ble_tx_notify_task<P: PacketPool>(
             continue;
         }
         pending_security_request = false;
+
+        // Only send to phones that have been confirmed as paired or bonded.
+        if !tx_auth.load(core::sync::atomic::Ordering::Relaxed) {
+            pending_msg = Some(msg);
+            embassy_time::Timer::after(embassy_time::Duration::from_millis(50)).await;
+            continue;
+        }
 
         let mut encoded = Vec::<u8>::new();
         if msg.encode(&mut encoded).is_err() {

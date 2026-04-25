@@ -15,8 +15,6 @@ struct EspBleConfig {
     pairing_button_pin: u8,
     #[serde(default = "default_pairing_button_hold_s")]
     pairing_button_hold_s: u32,
-    #[serde(default = "default_pairing_window_s")]
-    pairing_window_s: u32,
     #[serde(default = "default_max_bonded_phones")]
     max_bonded_phones: u8,
     #[serde(default = "default_controller_lease_ttl_s")]
@@ -29,7 +27,6 @@ impl Default for EspBleConfig {
             device_name: None,
             pairing_button_pin: default_pairing_button_pin(),
             pairing_button_hold_s: default_pairing_button_hold_s(),
-            pairing_window_s: default_pairing_window_s(),
             max_bonded_phones: default_max_bonded_phones(),
             controller_lease_ttl_s: default_controller_lease_ttl_s(),
         }
@@ -42,10 +39,6 @@ fn default_pairing_button_pin() -> u8 {
 
 fn default_pairing_button_hold_s() -> u32 {
     3
-}
-
-fn default_pairing_window_s() -> u32 {
-    120
 }
 
 fn default_max_bonded_phones() -> u8 {
@@ -111,7 +104,7 @@ impl Builder {
             .arg("--target").arg(target_arch)
             .arg("--release");
 
-        let features = format!("esp-hal/{mcu},esp-rtos/{mcu},esp-backtrace/{mcu},esp-println/{mcu},esp-radio/{mcu},esp-storage/{mcu}");
+        let features = format!("esp-hal/{mcu},esp-rtos/{mcu},esp-backtrace/{mcu},esp-println/{mcu},esp-radio/{mcu},esp-storage/{mcu},esp-bootloader-esp-idf/{mcu}");
         cmd.arg("--features").arg(features);
 
         cmd.env("RUSTFLAGS", "-C link-arg=-Tlinkall.x");
@@ -143,12 +136,11 @@ impl TargetBuilder for Builder {
             exit(1);
         }
         if esp.ble.pairing_button_hold_s == 0
-            || esp.ble.pairing_window_s == 0
             || esp.ble.max_bonded_phones == 0
             || esp.ble.controller_lease_ttl_s == 0
         {
             eprintln!(
-                "❌ Error: BLE lifecycle values must be > 0 (pairing_button_hold_s, pairing_window_s, max_bonded_phones, controller_lease_ttl_s)."
+                "❌ Error: BLE lifecycle values must be > 0 (pairing_button_hold_s, max_bonded_phones, controller_lease_ttl_s)."
             );
             exit(1);
         }
@@ -213,7 +205,7 @@ impl TargetBuilder for Builder {
                     let rx = bus.get("rx_pin").and_then(|v| v.as_integer())
                         .unwrap_or_else(|| { eprintln!("\u{274c} TWAI bus {} missing 'rx_pin'", bus_id); exit(1); });
                     can_hardware_init.push_str(&format!(
-                        "    let can_bus_{0} = board_esp::init_twai(peripherals.TWAI0, peripherals.GPIO{1}, peripherals.GPIO{2}, {3});\n",
+                        "    let can_bus_{0} = board_esp::init_twai(peripherals.TWAI0, peripherals.GPIO{2}, peripherals.GPIO{1}, {3});\n",
                         bus_id, tx, rx, filters_expr
                     ));
                     can_task_defs.push_str(&format!(
@@ -304,6 +296,8 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str(&format!("esp-radio = {{ version = \"{}\", features = [\"wifi\", \"ble\", \"smoltcp\", \"unstable\"] }}\n", v("esp-radio")));
         // Direct dep so we can forward the MCU chip feature via --features esp-storage/<mcu>
         cargo_toml.push_str(&format!("esp-storage = {{ version = \"{}\", features = [\"critical-section\"] }}\n", v("esp-storage")));
+        // App descriptor for the ESP-IDF 2nd stage bootloader (sets min_efuse_blk_rev_full to 0)
+        cargo_toml.push_str(&format!("esp-bootloader-esp-idf = {{ version = \"{}\" }}\n", v("esp-bootloader-esp-idf")));
 
         if config.network.mqtt.auth_mode == "mtls" {
             // certs are embedded via include_bytes! in main.rs, no extra deps needed
@@ -370,7 +364,7 @@ impl TargetBuilder for Builder {
             ble_name = ble_device_name,
             pair_btn = esp_hw.ble.pairing_button_pin,
             pair_hold = esp_hw.ble.pairing_button_hold_s,
-            pair_window = esp_hw.ble.pairing_window_s,
+            pair_window = transport.ble.pairing.pairing_window_seconds,
             max_bonds = esp_hw.ble.max_bonded_phones,
             lease_ttl = esp_hw.ble.controller_lease_ttl_s,
         );

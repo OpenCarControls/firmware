@@ -12,6 +12,8 @@ use esp_hal::{
 };
 use static_cell::StaticCell;
 
+esp_bootloader_esp_idf::esp_app_desc!();
+
 const PLATFORM_ID: u32 = {PLATFORM_ID};
 {MTLS_CERTS}
 {NETWORK_CONSTANTS}
@@ -22,7 +24,7 @@ const PLATFORM_ID: u32 = {PLATFORM_ID};
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env();
-    esp_alloc::heap_allocator!(size: 72 * 1024);
+    esp_alloc::heap_allocator!(size: 160 * 1024);
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);

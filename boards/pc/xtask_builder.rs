@@ -17,8 +17,6 @@ struct PcBleConfig {
     device_name: Option<String>,
     #[serde(default = "default_ble_http_port")]
     http_port: u16,
-    #[serde(default = "default_pairing_window_s")]
-    pairing_window_s: u32,
     #[serde(default = "default_max_bonded_phones")]
     max_bonded_phones: u8,
     #[serde(default = "default_paired_phones_file")]
@@ -30,7 +28,6 @@ impl Default for PcBleConfig {
         Self {
             device_name: None,
             http_port: default_ble_http_port(),
-            pairing_window_s: default_pairing_window_s(),
             max_bonded_phones: default_max_bonded_phones(),
             paired_phones_file: default_paired_phones_file(),
         }
@@ -39,10 +36,6 @@ impl Default for PcBleConfig {
 
 fn default_ble_http_port() -> u16 {
     4242
-}
-
-fn default_pairing_window_s() -> u32 {
-    120
 }
 
 fn default_max_bonded_phones() -> u8 {
@@ -203,9 +196,9 @@ impl TargetBuilder for Builder {
         let client_id = escape_rust_string(client_id);
         let paired_phones_file = escape_rust_string(&pc_hw.ble.paired_phones_file);
 
-        if pc_hw.ble.pairing_window_s == 0 || pc_hw.ble.max_bonded_phones == 0 || pc_hw.ble.http_port == 0 {
+        if pc_hw.ble.max_bonded_phones == 0 || pc_hw.ble.http_port == 0 {
             eprintln!(
-                "❌ [hardware.pc.ble].pairing_window_s, max_bonded_phones, and http_port must be > 0"
+                "❌ [hardware.pc.ble].max_bonded_phones and http_port must be > 0"
             );
             exit(1);
         }
@@ -227,7 +220,7 @@ impl TargetBuilder for Builder {
             port = broker_port,
             ble_name = ble_device_name,
             ble_http_port = pc_hw.ble.http_port,
-            pair_window = pc_hw.ble.pairing_window_s,
+            pair_window = transport.ble.pairing.pairing_window_seconds,
             max_bonds = pc_hw.ble.max_bonded_phones,
             store_path = paired_phones_file,
             cid = client_id,

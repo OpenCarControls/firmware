@@ -77,6 +77,12 @@ pub struct TransportMqtt {
 pub struct TransportBle {
     pub service: TransportBleService,
     pub characteristics: TransportBleCharacteristics,
+    pub pairing: TransportBlePairing,
+}
+
+#[derive(Deserialize)]
+pub struct TransportBlePairing {
+    pub pairing_window_seconds: u32,
 }
 
 #[derive(Deserialize)]
@@ -244,6 +250,11 @@ pub fn validate_ble_transport_contract(transport: &TransportConfig) {
         &transport.ble.characteristics.device_to_app.uuid,
         "ble.characteristics.device_to_app.uuid",
     );
+
+    if transport.ble.pairing.pairing_window_seconds == 0 {
+        eprintln!("❌ transport.toml ble.pairing.pairing_window_seconds must be > 0");
+        exit(1);
+    }
 }
 
 pub fn validate_esp_ble_uuid_constants_against_contract(transport: &TransportConfig) {

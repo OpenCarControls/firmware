@@ -24,7 +24,6 @@ modem_rx_pin = 16
 device_name = "OpenCar"
 pairing_button_pin = 0
 pairing_button_hold_s = 3
-pairing_window_s = 120
 max_bonded_phones = 8
 controller_lease_ttl_s = 15
 
@@ -53,7 +52,6 @@ rx_pin = 4
 # PC-only test hooks.
 device_name = "OpenCar"
 http_port = 4242
-pairing_window_s = 120
 max_bonded_phones = 8
 paired_phones_file = "/tmp/opencar-paired-phones.txt"
 

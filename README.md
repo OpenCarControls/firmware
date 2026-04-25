@@ -182,6 +182,38 @@ Generates `.app_test_build/`, compiles an [embedded-test](https://github.com/emb
 
 Add custom on-device tests to `boards/esp/tests/hardware.rs` — xtask injects that file automatically.
 
+## 📦 Build A Ready-To-Flash ESP BIN
+
+When building inside a dev container, generate the firmware image in-container and flash it later from your host machine.
+
+1. Build the ESP firmware ELF:
+
+```bash
+cargo xtask build --board esp
+```
+
+2. Export a flashable BIN with `espflash`:
+
+```bash
+# ESP32-S3 example (single merged image)
+espflash save-image \
+        --chip esp32s3 \
+        --merge \
+        .app_build/target/xtensa-esp32s3-none-elf/release/app-build \
+        ./dist/open-car-esp32s3-merged.bin
+```
+
+`--ignore-app-descriptor` and `--min-chip-rev` are no longer needed: the firmware now calls `esp_bootloader_esp_idf::esp_app_desc!()`, which emits a valid `esp_app_desc_t` with `min_efuse_blk_rev_full = 0`. Without this, the ESP-IDF bootloader reads garbage data from that field and rejects the image with `Image requires efuse blk rev >= vXXX.XX`.
+
+3. Copy the generated `./dist/*.bin` to your local machine and flash there.
+
+Target triples by MCU:
+
+- `esp32` → `xtensa-esp32-none-elf`
+- `esp32s3` → `xtensa-esp32s3-none-elf`
+- `esp32c3` → `riscv32imc-unknown-none-elf`
+- `esp32c6` → `riscv32imac-unknown-none-elf`
+
 ## 🤖 CI/CD and Versioning
 
 - **Continuous Integration:** GitHub Actions runs `fmt`, `clippy`, host tests (diff-based, only affected crates), and full builds for both `esp` and `pc` targets.

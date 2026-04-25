@@ -29,3 +29,6 @@ config.toml
 
 # xtask temporary files
 .app_build
+
+# Build artifacts
+dist/*
