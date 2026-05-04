@@ -1,13 +1,12 @@
 {
+    "name": "Open Car — ESP (RISC-V, ESP32-C3)",
     "build": {
-        "dockerfile": "Dockerfile"
+        "dockerfile": "../Dockerfile",
+        "target": "esp-riscv"
     },
-    "runArgs": [
-        "-p",
-        "4242:4242"
-    ],
-    "forwardPorts": [
-        4242
+    "runArgs": ["--privileged"],
+    "mounts": [
+        "source=/dev,target=/dev,type=bind"
     ],
     "customizations": {
         "vscode": {
@@ -20,7 +19,11 @@
                 "Gruntfuggly.todo-tree",
                 "mk12.better-git-line-blame",
                 "bufbuild.vscode-buf"
-            ]
+            ],
+            "settings": {
+                "rust-analyzer.cargo.features": ["dev-esp32c3"],
+                "rust-analyzer.cargo.target": "riscv32imc-unknown-none-elf"
+            }
         }
     },
     "remoteUser": "vscode"

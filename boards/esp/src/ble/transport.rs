@@ -25,7 +25,7 @@ use super::store::{
     restore_paired_phones_from_store, restore_security_store,
 };
 #[cfg(feature = "hardware")]
-use super::{GATT_RX_UUID, GATT_SERVICE_UUID, GATT_TX_UUID, mac_to_ble_address};
+use core_interface::ble::{GATT_RX_UUID, GATT_SERVICE_UUID, GATT_TX_UUID, mac_to_ble_address};
 
 #[cfg(feature = "hardware")]
 const BLE_CONNECTIONS_MAX: usize = 1;
@@ -161,7 +161,12 @@ pub async fn ble_transport_task(
                         if let Err(e) = conn.raw().set_bondable(pairing_open) {
                             log::warn!("BLE set_bondable({}) failed: {:?}", pairing_open, e);
                         }
-                        log::info!("BLE transport: central connected (pairing_window={})", pairing_open);
+                        let peer_addr = conn.raw().peer_identity().bd_addr;
+                        log::info!(
+                            "BLE transport: central connected peer={:02X?} (pairing_window={})",
+                            peer_addr.raw(),
+                            pairing_open
+                        );
                         // tx_auth starts false; gatt_event_task sets it to true once the
                         // peer is confirmed as paired or bonded (synchronously at task
                         // startup for preexisting bonds, or on PairingComplete for new ones).
@@ -323,7 +328,19 @@ async fn gatt_event_task<C: Controller, P: PacketPool>(
             .iter()
             .any(|addr| *addr == peer_addr_at_connect)
         {
+            log::info!(
+                "BLE gatt: peer {:02X?} matched preexisting bond — tx_auth=true immediately ({} bond(s) in store)",
+                peer_addr_at_connect,
+                preexisting_bond_addrs.len()
+            );
             tx_auth.store(true, core::sync::atomic::Ordering::Relaxed);
+        } else {
+            log::info!(
+                "BLE gatt: peer {:02X?} NOT in preexisting bonds (store has {} entry/entries: {:02X?}) — awaiting PairingComplete",
+                peer_addr_at_connect,
+                preexisting_bond_addrs.len(),
+                preexisting_bond_addrs
+            );
         }
     }
 
@@ -401,7 +418,7 @@ async fn gatt_event_task<C: Controller, P: PacketPool>(
                     log::info!("BLE security store: persisted {} LTK(s)", all_bonds.len());
                 }
                 log::info!(
-                    "BLE pairing complete: encrypted={}, authenticated={}, bonded={}, pairing_open={}, already_known={}, preexisting_bond={}, paired_state_ok={}",
+                    "BLE pairing complete: encrypted={}, authenticated={}, bonded={}, pairing_open={}, already_known={}, preexisting_bond={}, paired_state_ok={}, device_id={:02X?}",
                     security_level.encrypted(),
                     security_level.authenticated(),
                     bond.is_some(),
@@ -409,6 +426,7 @@ async fn gatt_event_task<C: Controller, P: PacketPool>(
                     already_known,
                     is_preexisting_bond,
                     added_or_existing,
+                    device_id,
                 );
             }
             GattConnectionEvent::PairingFailed(e) => {
@@ -476,6 +494,7 @@ async fn ble_tx_notify_task<P: PacketPool>(
 ) {
     let mut pending_security_request = false;
     let mut pending_msg: Option<proto::DeviceToApp> = None;
+    let mut tx_held_logged = false;
 
     loop {
         let msg = if let Some(msg) = pending_msg.take() {
@@ -490,6 +509,10 @@ async fn ble_tx_notify_task<P: PacketPool>(
                 request_link_security(conn);
                 pending_security_request = true;
             }
+            if !tx_held_logged {
+                log::info!("BLE TX: holding message — link not yet encrypted, security requested");
+                tx_held_logged = true;
+            }
             pending_msg = Some(msg);
             embassy_time::Timer::after(embassy_time::Duration::from_millis(50)).await;
             continue;
@@ -498,10 +521,15 @@ async fn ble_tx_notify_task<P: PacketPool>(
 
         // Only send to phones that have been confirmed as paired or bonded.
         if !tx_auth.load(core::sync::atomic::Ordering::Relaxed) {
+            if !tx_held_logged {
+                log::info!("BLE TX: holding message — awaiting tx_auth (PairingComplete not yet received)");
+                tx_held_logged = true;
+            }
             pending_msg = Some(msg);
             embassy_time::Timer::after(embassy_time::Duration::from_millis(50)).await;
             continue;
         }
+        tx_held_logged = false;
 
         let mut encoded = Vec::<u8>::new();
         if msg.encode(&mut encoded).is_err() {

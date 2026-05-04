@@ -23,6 +23,34 @@
                 "panel": "shared"
             },
             "problemMatcher": ["$rustc"]
+        },
+        {
+            "label": "Build: ESP32-S3 firmware (release)",
+            "type": "shell",
+            "command": "cargo xtask build --board esp",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": ["$rustc"]
+        },
+        {
+            "label": "Build: ESP32-S3 firmware (debug)",
+            "type": "shell",
+            "command": "cargo xtask build --board esp --debug",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": ["$rustc"]
+        },
+        {
+            "label": "Fix: ESP JTAG USB permissions",
+            "type": "shell",
+            "command": "for f in /sys/bus/usb/devices/*/idVendor; do if [ \"$(cat $f 2>/dev/null)\" = \"303a\" ]; then bus=$(cat $(dirname $f)/busnum); dev=$(cat $(dirname $f)/devnum); sudo chmod a+rw /dev/bus/usb/$(printf '%03d' $bus)/$(printf '%03d' $dev); fi; done",
+            "presentation": { "reveal": "silent", "panel": "shared" }
         }
     ]
 }

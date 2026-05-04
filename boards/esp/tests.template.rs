@@ -3,16 +3,16 @@
 // Uses `embedded-test` with Embassy executor. Flash and run via probe-rs:
 //   cargo xtask test --board esp --on-hardware
 //
-// Results are reported over RTT (defmt). Each `#[test]` maps to a probe-rs
-// test case; a `defmt::assert!` failure counts as a test failure.
+// Results are reported via semihosting. Each `#[test]` maps to a probe-rs
+// test case; a panic (e.g. from `assert!`) counts as a test failure.
 
 #![no_std]
 #![no_main]
 extern crate alloc;
 
 use esp_alloc as _;
-use defmt_rtt as _;
-use panic_probe as _;
+
+esp_bootloader_esp_idf::esp_app_desc!();
 
 use esp_hal::{clock::CpuClock, timer::timg::TimerGroup};
 
@@ -47,7 +47,7 @@ mod tests {
         };
         BASIC_CMD_CHANNEL.sender().send(cmd).await;
         let received = BASIC_CMD_CHANNEL.receiver().receive().await;
-        defmt::assert_eq!(received.message_id, 1);
+        assert_eq!(received.message_id, 1);
     }
 
     // ── passes_filter on-hardware smoke test ────────────────────────────────
@@ -65,7 +65,7 @@ mod tests {
             data: [0u8; 8],
             dlc: 0,
         };
-        defmt::assert!(core_interface::passes_filter(&frame, &filters));
+        assert!(core_interface::passes_filter(&frame, &filters));
     }
 
     #[test]
@@ -81,7 +81,7 @@ mod tests {
             data: [0u8; 8],
             dlc: 0,
         };
-        defmt::assert!(!core_interface::passes_filter(&frame, &filters));
+        assert!(!core_interface::passes_filter(&frame, &filters));
     }
 
     // ── User-defined on-hardware tests (boards/esp/tests/hardware.rs) ────────

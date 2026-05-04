@@ -1,13 +1,23 @@
+#![cfg_attr(not(feature = "hardware"), no_std)]
+
+#[cfg(feature = "hardware")]
 mod ble;
+#[cfg(feature = "hardware")]
 mod can;
+#[cfg(feature = "hardware")]
 mod network;
 
+#[cfg(feature = "hardware")]
 use core_interface::SYSTEM_COMMAND_CHANNEL;
 
+#[cfg(feature = "hardware")]
 pub use ble::{ble_http_task, set_ble_paired_store_path};
+#[cfg(feature = "hardware")]
 pub use can::socket_can_task;
+#[cfg(feature = "hardware")]
 pub use network::mqtt_driver_task;
 
+#[cfg(feature = "hardware")]
 pub fn start(spawner: &embassy_executor::Spawner) {
     spawner
         .spawn(core_interface::process_ble_commands_task())
@@ -25,6 +35,7 @@ pub fn start(spawner: &embassy_executor::Spawner) {
     spawner.spawn(system_command_task()).unwrap();
 }
 
+#[cfg(feature = "hardware")]
 #[embassy_executor::task]
 pub async fn system_command_task() {
     // Restore persisted bonded-phone registry on startup.

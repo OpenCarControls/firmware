@@ -8,57 +8,92 @@ edition = "2024"
 # Required for firmware builds; omit when running host-side unit tests
 # (e.g. `cargo test -p board-esp` or `cargo xtask test`).
 hardware = [
-    "dep:esp-hal",
-    "dep:esp-rtos",
-    "dep:esp-println",
-    "dep:log",
     "dep:embassy-executor",
-    "dep:embassy-time",
+    "dep:embassy-futures",
     "dep:embassy-net",
-    "dep:embedded-hal",
+    "dep:embassy-sync",
+    "dep:embassy-time",
     "dep:embedded-hal-bus",
+    "dep:embedded-hal",
     "dep:embedded-io-async",
+    "dep:embedded-storage",
+    "dep:esp-hal",
+    "dep:esp-println",
     "dep:esp-radio",
-    "dep:rust-mqtt",
-    "dep:prost",
-    "dep:smoltcp",
+    "dep:esp-rtos",
+    "dep:esp-storage",
+    "dep:heapless",
+    "dep:log",
     "dep:mcp2515",
     "dep:nb",
+    "dep:prost",
+    "dep:rust-mqtt",
+    "dep:smoltcp",
     "dep:static_cell",
-    "dep:embassy-futures",
-    "dep:embassy-sync",
     "dep:trouble-host",
-    "dep:heapless",
-    "dep:esp-storage",
-    "dep:embedded-storage",
+]
+
+# Development features — enable hardware + a specific chip for rust-analyzer IDE support.
+# Usage: set rust-analyzer.cargo.features = ["dev-esp32s3"] in .vscode/settings.json.
+dev-esp32   = [
+    "hardware",
+    "esp-hal/esp32",
+    "esp-println/esp32", "esp-println/no-op",
+    "esp-radio/esp32",
+    "esp-rtos/esp32",
+    "esp-storage/esp32",
+]
+dev-esp32s3 = [
+    "hardware",
+    "esp-hal/esp32s3",
+    "esp-println/esp32s3", "esp-println/no-op",
+    "esp-radio/esp32s3",
+    "esp-rtos/esp32s3",
+    "esp-storage/esp32s3",
+]
+dev-esp32c3 = [
+    "hardware",
+    "esp-hal/esp32c3",
+    "esp-println/esp32c3", "esp-println/no-op",
+    "esp-radio/esp32c3",
+    "esp-rtos/esp32c3",
+    "esp-storage/esp32c3",
+]
+dev-esp32c6 = [
+    "hardware",
+    "esp-hal/esp32c6",
+    "esp-println/esp32c6", "esp-println/no-op",
+    "esp-radio/esp32c6",
+    "esp-rtos/esp32c6",
+    "esp-storage/esp32c6",
 ]
 
 [dependencies]
-core-interface   = { workspace = true }
-embedded-can     = { workspace = true }
-esp-hal          = { workspace = true, features = ["unstable"],                            optional = true }
-esp-rtos         = { workspace = true, features = ["embassy", "esp-radio", "esp-alloc"],   optional = true }
-esp-println      = { workspace = true, features = ["log-04"],                               optional = true }
-log              = { workspace = true,                                            optional = true }
-embassy-executor = { workspace = true,                                           optional = true }
-embassy-time     = { workspace = true,                                           optional = true }
-embedded-hal     = { workspace = true,                                           optional = true }
-embedded-hal-bus = { version = "0.3.0",                                          optional = true }
-embassy-net      = { version = "0.9.0", features = ["tcp", "dhcpv4", "medium-ethernet"], optional = true }
-embedded-io-async = { workspace = true,                                          optional = true }
-esp-radio        = { workspace = true, features = ["wifi", "ble", "smoltcp", "unstable"], optional = true }
-rust-mqtt        = { workspace = true,                                           optional = true }
-prost            = { workspace = true,                                           optional = true }
-smoltcp          = { version = "0.12.0", default-features = false, features = ["socket-tcp", "proto-ipv4"], optional = true }
-static_cell      = { workspace = true,                                                      optional = true }
-mcp2515          = { version = "0.3.0",                          optional = true }
-nb               = { version = "1.1.0",                          optional = true }
-embassy-futures  = { workspace = true,                                           optional = true }
-embassy-sync     = { workspace = true,                                           optional = true }
-trouble-host     = { version = "0.5.0", features = ["derive", "peripheral", "gatt", "security", "default-packet-pool-mtu-255"], optional = true }
-heapless         = { version = "0.9.2",                          optional = true }
-esp-storage      = { workspace = true, features = ["critical-section"],                   optional = true }
-embedded-storage = { version = "0.3.1",                          optional = true }
+core-interface = { workspace = true }
+embassy-executor = { workspace = true, optional = true }
+embassy-futures = { workspace = true, optional = true }
+embassy-net = { version = "0.9.0", features = ["tcp", "dhcpv4", "medium-ethernet"], optional = true }
+embassy-sync = { workspace = true, optional = true }
+embassy-time = { workspace = true, optional = true }
+embedded-can = { workspace = true }
+embedded-hal = { workspace = true, optional = true }
+embedded-hal-bus = { version = "0.3.0", optional = true }
+embedded-io-async = { workspace = true, optional = true }
+embedded-storage = { version = "0.3.1", optional = true }
+esp-hal = { workspace = true, features = ["unstable"], optional = true }
+esp-println = { workspace = true, features = ["log-04"], optional = true }
+esp-radio = { workspace = true, features = ["wifi", "ble", "smoltcp", "unstable"], optional = true }
+esp-rtos = { workspace = true, features = ["embassy", "esp-radio", "esp-alloc"], optional = true }
+esp-storage = { workspace = true, features = ["critical-section"], optional = true }
+heapless = { version = "0.9.2", optional = true }
+log = { workspace = true, optional = true }
+mcp2515 = { version = "0.3.0", optional = true }
+nb = { version = "1.1.0", optional = true }
+prost = { workspace = true, optional = true }
+rust-mqtt = { workspace = true, optional = true }
+smoltcp = { version = "0.12.0", default-features = false, features = ["socket-tcp", "proto-ipv4"], optional = true }
+static_cell = { workspace = true, optional = true }
+trouble-host = { version = "0.5.0", features = ["derive", "peripheral", "gatt", "security", "default-packet-pool-mtu-255"], optional = true }
 
 [dev-dependencies]
 prost = { workspace = true }

@@ -71,11 +71,13 @@ impl Builder {
             .expect("\u{274c} Invalid [hardware.pc] config format")
     }
 
-    fn execute_cargo_command(&self, cargo_cmd: &str) {
+    fn execute_cargo_command(&self, cargo_cmd: &str, release: bool) {
         let mut cmd = Command::new("cargo");
         cmd.arg(cargo_cmd)
-           .arg("--manifest-path").arg(".app_build/Cargo.toml")
-           .arg("--release");
+           .arg("--manifest-path").arg(".app_build/Cargo.toml");
+        if release {
+            cmd.arg("--release");
+        }
         let status = cmd.status().expect("Failed to execute cargo command");
         if !status.success() {
             exit(status.code().unwrap_or(1));
@@ -142,7 +144,7 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str("[package]\nname = \"app-build\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n");
         cargo_toml.push_str("[dependencies]\n");
         cargo_toml.push_str("core-interface = { path = \"../core-interface\" }\n");
-        cargo_toml.push_str("board-pc = { path = \"../boards/pc\" }\n");
+        cargo_toml.push_str("board-pc = { path = \"../boards/pc\", features = [\"hardware\"] }\n");
         cargo_toml.push_str(&format!(
             "{} = {{ path = \"../cars/{}\" }}\n",
             vehicle_crate_name, vehicle_platform
@@ -264,18 +266,19 @@ impl TargetBuilder for Builder {
         fs::write(".app_build/src/main.rs", main_rs).expect("Failed to write .app_build/src/main.rs");
     }
 
-    fn compile(&self, _config: &Config) {
-        println!("⚙️  Compiling the PC simulator natively...");
-        self.execute_cargo_command("build");
+    fn compile(&self, _config: &Config, release: bool) {
+        let profile = if release { "release" } else { "debug (unoptimized)" };
+        println!("⚙️  Compiling the PC simulator ({profile})...");
+        self.execute_cargo_command("build", release);
     }
 
     fn run(&self, _config: &Config) {
         println!("🚀 Running the PC simulator natively...");
-        self.execute_cargo_command("run");
+        self.execute_cargo_command("run", true);
     }
 
     fn clippy(&self, _config: &Config) {
         println!("🔍 Running clippy on the PC simulator...");
-        self.execute_cargo_command("clippy");
+        self.execute_cargo_command("clippy", true);
     }
 }

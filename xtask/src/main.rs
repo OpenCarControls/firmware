@@ -257,51 +257,6 @@ pub fn validate_ble_transport_contract(transport: &TransportConfig) {
     }
 }
 
-pub fn validate_esp_ble_uuid_constants_against_contract(transport: &TransportConfig) {
-    let path = "boards/esp/src/ble/mod.rs";
-    let src = fs::read_to_string(path)
-        .unwrap_or_else(|_| panic!("❌ Failed to read ESP BLE module: {}", path));
-
-    let service_expected = format!(
-        "GATT_SERVICE_UUID: u128 = 0x{:032x}",
-        parse_uuid_u128(&transport.ble.service.uuid, "ble.service.uuid")
-    );
-    let rx_expected = format!(
-        "GATT_RX_UUID: u128 = 0x{:032x}",
-        parse_uuid_u128(
-            &transport.ble.characteristics.app_to_device.uuid,
-            "ble.characteristics.app_to_device.uuid"
-        )
-    );
-    let tx_expected = format!(
-        "GATT_TX_UUID: u128 = 0x{:032x}",
-        parse_uuid_u128(
-            &transport.ble.characteristics.device_to_app.uuid,
-            "ble.characteristics.device_to_app.uuid"
-        )
-    );
-
-    // Ignore readability separators so the check is resilient to underscore formatting.
-    let normalized_src = src.replace('_', "");
-    let service_ok = normalized_src.contains(&service_expected.replace('_', ""));
-    let rx_ok = normalized_src.contains(&rx_expected.replace('_', ""));
-    let tx_ok = normalized_src.contains(&tx_expected.replace('_', ""));
-
-    if !(service_ok && rx_ok && tx_ok) {
-        eprintln!(
-            "❌ ESP BLE UUID constants in {} are out of sync with contracts/opencar/core/v1/transport.toml",
-            path
-        );
-        eprintln!(
-            "   Expected service/rx/tx UUIDs: {}, {}, {}",
-            transport.ble.service.uuid,
-            transport.ble.characteristics.app_to_device.uuid,
-            transport.ble.characteristics.device_to_app.uuid
-        );
-        exit(1);
-    }
-}
-
 // ==========================================
 // 2. The Main CLI Entrypoint
 // ==========================================
@@ -314,7 +269,7 @@ fn main() {
         "build" | "run" | "clippy" | "test" => {}
         _ => {
             eprintln!(
-                "Usage: cargo xtask <build|run|clippy|test> [config_file.toml] [--board <board>] [--platform <platform>] [--on-hardware]"
+                "Usage: cargo xtask <build|run|clippy|test> [config_file.toml] [--board <board>] [--platform <platform>] [--on-hardware] [--debug]"
             );
             exit(1);
         }
@@ -325,6 +280,7 @@ fn main() {
     let mut override_board: Option<String> = None;
     let mut override_platform: Option<String> = None;
     let mut on_hardware = false;
+    let mut release = true;
 
     let mut remaining = args[2..].iter();
     while let Some(arg) = remaining.next() {
@@ -337,6 +293,9 @@ fn main() {
             }
             "--on-hardware" => {
                 on_hardware = true;
+            }
+            "--debug" => {
+                release = false;
             }
             other if !other.starts_with("--") => {
                 config_path = other;
@@ -400,7 +359,7 @@ fn main() {
             match command {
                 "run" => builder.run(&config),
                 "clippy" => builder.clippy(&config),
-                "build" => builder.compile(&config),
+                "build" => builder.compile(&config, release),
                 _ => unreachable!(),
             }
         }
@@ -461,7 +420,7 @@ pub trait TargetBuilder {
 
     fn generate_app_build(&self, config: &Config);
 
-    fn compile(&self, config: &Config);
+    fn compile(&self, config: &Config, release: bool);
 
     // Default implementation for running clippy
     fn clippy(&self, _config: &Config) {

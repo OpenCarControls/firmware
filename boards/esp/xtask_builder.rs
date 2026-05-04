@@ -1,7 +1,6 @@
 use crate::{
     Config, TargetBuilder, escape_rust_string, load_transport_contract, parse_broker_url,
     render_topic_from_template, validate_ble_transport_contract,
-    validate_esp_ble_uuid_constants_against_contract,
 };
 use serde::Deserialize;
 use std::fs;
@@ -79,13 +78,12 @@ impl Builder {
             .expect("❌ Invalid [hardware.esp] config format")
     }
 
-    fn execute_cargo_command(&self, config: &Config, cargo_cmd: &str) {
+    fn execute_cargo_command(&self, config: &Config, cargo_cmd: &str, release: bool) {
         let esp_hw = Self::get_esp_config(config);
         let mcu = &esp_hw.mcu;
 
         let target_arch = match mcu.as_str() {
             "esp32"  => "xtensa-esp32-none-elf",
-            "esp32s2" => "xtensa-esp32s2-none-elf",
             "esp32s3" => "xtensa-esp32s3-none-elf",
             "esp32c3" => "riscv32imc-unknown-none-elf",
             "esp32c6" => "riscv32imac-unknown-none-elf",
@@ -101,8 +99,11 @@ impl Builder {
 
         cmd.arg(cargo_cmd)
             .arg("--manifest-path").arg(".app_build/Cargo.toml")
-            .arg("--target").arg(target_arch)
-            .arg("--release");
+            .arg("--target").arg(target_arch);
+
+        if release {
+            cmd.arg("--release");
+        }
 
         let features = format!("esp-hal/{mcu},esp-rtos/{mcu},esp-backtrace/{mcu},esp-println/{mcu},esp-radio/{mcu},esp-storage/{mcu},esp-bootloader-esp-idf/{mcu}");
         cmd.arg("--features").arg(features);
@@ -144,12 +145,24 @@ impl TargetBuilder for Builder {
             );
             exit(1);
         }
+        // BLE_STORE_MAX_PHONES in boards/esp/src/ble/store.rs is the physical flash
+        // layout limit. max_bonded_phones is a runtime policy cap that must never
+        // exceed the store's capacity, because surplus entries would be silently
+        // dropped on every persist and never re-paired.
+        const BLE_STORE_MAX_PHONES: u8 = 8;
+        if esp.ble.max_bonded_phones > BLE_STORE_MAX_PHONES {
+            eprintln!(
+                "❌ Error: [hardware.esp.ble].max_bonded_phones={} exceeds the flash store capacity ({BLE_STORE_MAX_PHONES}). \
+                 Lower max_bonded_phones or increase BLE_STORE_MAX_PHONES in store.rs (requires a BLE_STORE_VERSION bump).",
+                esp.ble.max_bonded_phones
+            );
+            exit(1);
+        }
     }
 
     fn generate_app_build(&self, config: &Config) {
         let transport = load_transport_contract();
         validate_ble_transport_contract(&transport);
-        validate_esp_ble_uuid_constants_against_contract(&transport);
 
         let esp_hw = Self::get_esp_config(config);
         let vehicle_platform = &config.target.platform;
@@ -186,7 +199,7 @@ impl TargetBuilder for Builder {
         let vehicle_crate_ident = vehicle_crate_name.replace('-', "_");
 
         // Generate per-bus CAN hardware init expressions and task definitions.
-        // Only the first `can_bus_count` buses are wired up; extras in config are ignored.
+        // FIXME: Only the first `can_bus_count` buses are wired up; extras in config are ignored.
         let mut can_hardware_init = String::new();
         let mut can_task_defs = String::new();
         let mut can_task_spawns = String::new();
@@ -209,11 +222,11 @@ impl TargetBuilder for Builder {
                         bus_id, tx, rx, filters_expr
                     ));
                     can_task_defs.push_str(&format!(
-                        "    #[embassy_executor::task]\n    async fn can_bus_{0}_task(driver: board_esp::TwaiDriver) {{\n        board_esp::run_twai_loop(driver, {0}, {1}).await;\n    }}\n",
+                        "#[embassy_executor::task]\nasync fn can_bus_{0}_task(driver: board_esp::TwaiDriver) {{\n    board_esp::run_twai_loop(driver, {0}, {1}).await;\n}}\n",
                         bus_id, filters_expr
                     ));
                     can_task_spawns.push_str(&format!(
-                        "            s.spawn(can_bus_{0}_task(can_bus_{0})).unwrap();\n",
+                        "                s.spawn(can_bus_{0}_task(can_bus_{0})).unwrap();\n",
                         bus_id
                     ));
                 }
@@ -258,11 +271,11 @@ impl TargetBuilder for Builder {
                         bus_id, spi, cs, clk, mosi, miso, filters_expr, int, can_speed_expr, mcp_speed_expr
                     ));
                     can_task_defs.push_str(&format!(
-                        "    #[embassy_executor::task]\n    async fn can_bus_{0}_task(driver: board_esp::Mcp2515Driver, int_pin: board_esp::CanIntPin) {{\n        board_esp::run_mcp2515_loop(driver, int_pin, {0}, {1}).await;\n    }}\n",
+                        "#[embassy_executor::task]\nasync fn can_bus_{0}_task(driver: board_esp::Mcp2515Driver, int_pin: board_esp::CanIntPin) {{\n    board_esp::run_mcp2515_loop(driver, int_pin, {0}, {1}).await;\n}}\n",
                         bus_id, filters_expr
                     ));
                     can_task_spawns.push_str(&format!(
-                        "            s.spawn(can_bus_{0}_task(can_bus_{0}, can_bus_{0}_int)).unwrap();\n",
+                        "                s.spawn(can_bus_{0}_task(can_bus_{0}, can_bus_{0}_int)).unwrap();\n",
                         bus_id
                     ));
                 }
@@ -397,37 +410,48 @@ impl TargetBuilder for Builder {
         };
 
         let network_hardware_init = if wifi_enabled {
-            "    let ble_radio_controller = board_esp::init_radio();\n\
-             let wifi_stack = board_esp::init_wifi(\n\
-             ble_radio_controller,\n\
-             &spawner,\n\
-             peripherals.WIFI,\n\
-             WIFI_SSID,\n\
-             WIFI_PASSWORD,\n\
-             );\n"
-                .to_string()
+            concat!(
+                "    let ble_radio_controller = board_esp::init_radio();\n",
+                "    let wifi_stack = board_esp::init_wifi(\n",
+                "        ble_radio_controller,\n",
+                "        &spawner,\n",
+                "        peripherals.WIFI,\n",
+                "        WIFI_SSID,\n",
+                "        WIFI_PASSWORD,\n",
+                "    );\n",
+            ).to_string()
         } else {
             "    let ble_radio_controller = board_esp::init_radio();\n".to_string()
         };
 
-        let ble_driver_spawn = "    spawner\n\
-               .spawn(board_esp::ble_transport_task(ble_radio_controller, peripherals.BT, peripherals.FLASH, peripherals.RNG, peripherals.ADC1, BLE_DEVICE_NAME_BASE))\n\
-             .unwrap();\n"
-            .to_string();
+        let ble_driver_spawn = concat!(
+            "    spawner\n",
+            "        .spawn(board_esp::ble_transport_task(\n",
+            "            ble_radio_controller,\n",
+            "            peripherals.BT,\n",
+            "            peripherals.FLASH,\n",
+            "            peripherals.RNG,\n",
+            "            peripherals.ADC1,\n",
+            "            BLE_DEVICE_NAME_BASE,\n",
+            "        ))\n",
+            "        .unwrap();\n",
+        ).to_string();
 
         let mqtt_driver_spawn = if wifi_enabled {
-            "    spawner\n\
-                .spawn(board_esp::mqtt_driver_task(\n\
-                wifi_stack,\n\
-                MQTT_BROKER_HOST,\n\
-                MQTT_BROKER_PORT,\n\
-                MQTT_CLIENT_ID,\n\
-                MQTT_CMD_TOPIC,\n\
-                MQTT_DATA_TOPIC,\n\
-                MQTT_USERNAME,\n\
-                MQTT_PASSWORD,\n\
-                ))\n\
-                .unwrap();\n".to_string()
+            concat!(
+                "    spawner\n",
+                "        .spawn(board_esp::mqtt_driver_task(\n",
+                "            wifi_stack,\n",
+                "            MQTT_BROKER_HOST,\n",
+                "            MQTT_BROKER_PORT,\n",
+                "            MQTT_CLIENT_ID,\n",
+                "            MQTT_CMD_TOPIC,\n",
+                "            MQTT_DATA_TOPIC,\n",
+                "            MQTT_USERNAME,\n",
+                "            MQTT_PASSWORD,\n",
+                "        ))\n",
+                "        .unwrap();\n",
+            ).to_string()
         } else {
             "    // WiFi disabled: MQTT driver not spawned.\n".to_string()
         };
@@ -451,19 +475,20 @@ impl TargetBuilder for Builder {
         fs::write(".app_build/src/main.rs", main_rs).expect("Failed to write .app_build/src/main.rs");
     }
 
-    fn compile(&self, config: &Config) {
-        println!("⚙️ Compiling the bare-metal firmware...");
-        self.execute_cargo_command(config, "build");
+    fn compile(&self, config: &Config, release: bool) {
+        let profile = if release { "release" } else { "debug (unoptimized)" };
+        println!("⚙️  Compiling the bare-metal firmware ({profile})...");
+        self.execute_cargo_command(config, "build", release);
     }
 
     fn run(&self, config: &Config) {
         println!("🚀 Running the firmware build pipeline...");
-        self.execute_cargo_command(config, "run");
+        self.execute_cargo_command(config, "run", true);
     }
 
     fn clippy(&self, config: &Config) {
         println!("🔍 Running clippy on the firmware build pipeline...");
-        self.execute_cargo_command(config, "clippy");
+        self.execute_cargo_command(config, "clippy", true);
     }
 
     fn generate_app_test_build(&self, config: &Config) {
@@ -486,26 +511,47 @@ impl TargetBuilder for Builder {
 
         // Build .app_test_build/Cargo.toml
         let mut cargo_toml = String::new();
-        cargo_toml.push_str("[package]\nname = \"app-test-build\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n");
+        cargo_toml.push_str("[workspace]\n\n[package]\nname = \"app-test-build\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n");
         cargo_toml.push_str("[dependencies]\n");
         cargo_toml.push_str("core-interface = { path = \"../core-interface\" }\n");
         cargo_toml.push_str("board-esp = { path = \"../boards/esp\", features = [\"hardware\"] }\n");
         let v = |name: &str| crate::ws_dep_version(&config.workspace_deps, name);
         cargo_toml.push_str(&format!("esp-hal = {{ version = \"{}\", features = [\"unstable\"] }}\n", v("esp-hal")));
-        cargo_toml.push_str(&format!("esp-rtos = {{ version = \"{}\", features = [\"embassy\", \"esp-radio\", \"esp-alloc\"] }}\n", v("esp-rtos")));
+        cargo_toml.push_str(&format!("esp-rtos = {{ version = \"{}\", features = [\"embassy\", \"esp-alloc\"] }}\n", v("esp-rtos")));
+        cargo_toml.push_str(&format!("esp-radio = {{ version = \"{}\", features = [\"unstable\"] }}\n", v("esp-radio")));
+        cargo_toml.push_str(&format!("esp-storage = {{ version = \"{}\", features = [\"critical-section\"] }}\n", v("esp-storage")));
         cargo_toml.push_str(&format!("esp-alloc = \"{}\"\n", v("esp-alloc")));
         cargo_toml.push_str(&format!("esp-println = {{ version = \"{}\", features = [\"log-04\"] }}\n", v("esp-println")));
         cargo_toml.push_str(&format!("embassy-executor = \"{}\"\n", v("embassy-executor")));
         cargo_toml.push_str(&format!("embassy-time = \"{}\"\n", v("embassy-time")));
         cargo_toml.push_str(&format!("static_cell = \"{}\"\n", v("static_cell")));
-        cargo_toml.push_str(&format!("embedded-test = {{ version = \"{}\", features = [\"embassy\"] }}\n", v("embedded-test")));
-        cargo_toml.push_str(&format!("defmt = \"{}\"\n", v("defmt")));
-        cargo_toml.push_str(&format!("defmt-rtt = \"{}\"\n", v("defmt-rtt")));
-        cargo_toml.push_str(&format!("panic-probe = {{ version = \"{}\", features = [\"print-defmt\"] }}\n", v("panic-probe")));
+        // external-executor: pass esp_rtos::embassy::Executor to the tests macro.
+        // embassy-09: also required by the macro even with external-executor.
+        // xtensa-semihosting: required for Xtensa targets (openocd-semihosting interface).
+        // semihosting + panic-handler: re-enable defaults (workspace has default-features = false).
+        // Do NOT include esp-backtrace here — embedded-test's panic-handler feature covers it,
+        // and the chip feature for esp-backtrace is forwarded via board-esp's hardware feature.
+        let is_xtensa = matches!(mcu.as_str(), "esp32" | "esp32s3");
+        let embedded_test_features = if is_xtensa {
+            "\"external-executor\", \"embassy-09\", \"semihosting\", \"xtensa-semihosting\", \"panic-handler\""
+        } else {
+            "\"external-executor\", \"embassy-09\", \"semihosting\", \"panic-handler\""
+        };
+        cargo_toml.push_str(&format!("embedded-test = {{ version = \"{}\", features = [{embedded_test_features}] }}\n", v("embedded-test")));
+        // No defmt in test build: _defmt_timestamp and _defmt_panic are not wired for Xtensa
+        // without panic-probe. Test pass/fail is communicated via semihosting, not defmt RTT.
+        cargo_toml.push_str(&format!("embedded-can = \"{}\"\n", v("embedded-can")));
+        cargo_toml.push_str(&format!("esp-bootloader-esp-idf = {{ version = \"{}\" }}\n", v("esp-bootloader-esp-idf")));
 
-        // Chip-specific feature string for esp-hal/esp-rtos
-        let features = format!("esp-hal/{mcu},esp-rtos/{mcu},esp-println/{mcu}");
-        cargo_toml.push_str(&format!("\n[features]\ndefault = [\"{}\"]", features));
+        // Chip-specific feature string — must include esp-radio/{mcu}, esp-storage/{mcu},
+        // and esp-backtrace/{mcu} to satisfy build scripts pulled in transitively by board-esp's hardware feature.
+        let features = format!(
+            "\"esp-hal/{mcu}\", \"esp-rtos/{mcu}\", \"esp-println/{mcu}\", \"esp-radio/{mcu}\", \"esp-storage/{mcu}\", \"esp-bootloader-esp-idf/{mcu}\""
+        );
+        cargo_toml.push_str(&format!("\n[features]\ndefault = [{}]\n", features));
+
+        // embedded-test requires harness = false for the binary target.
+        cargo_toml.push_str("\n[[bin]]\nname = \"app-test-build\"\ntest = true\nharness = false\n");
 
         // Generate main.rs from template
         let template = fs::read_to_string("boards/esp/tests.template.rs")
@@ -528,7 +574,6 @@ impl TargetBuilder for Builder {
 
         let target_arch = match mcu.as_str() {
             "esp32"   => "xtensa-esp32-none-elf",
-            "esp32s2" => "xtensa-esp32s2-none-elf",
             "esp32s3" => "xtensa-esp32s3-none-elf",
             "esp32c3" => "riscv32imc-unknown-none-elf",
             "esp32c6" => "riscv32imac-unknown-none-elf",
@@ -546,27 +591,42 @@ impl TargetBuilder for Builder {
             .arg("--no-run")
             .arg("--manifest-path").arg(".app_test_build/Cargo.toml")
             .arg("--target").arg(target_arch);
-        build_cmd.env("RUSTFLAGS", "-C link-arg=-Tlinkall.x");
+        build_cmd.env("RUSTFLAGS", "-C link-arg=-Tlinkall.x -C link-arg=-Tembedded-test.x");
 
         let status = build_cmd.status().expect("Failed to compile test binary");
         if !status.success() { exit(status.code().unwrap_or(1)); }
 
         // Locate the compiled test binary under .app_test_build/target/
+        // Pick the most recently modified match to avoid stale hashes from prior builds.
         let test_bin_dir = format!(".app_test_build/target/{}/debug/deps", target_arch);
         let test_binary = fs::read_dir(&test_bin_dir)
             .unwrap_or_else(|_| panic!("\u{274c} Could not read {}", test_bin_dir))
             .filter_map(|e| e.ok())
-            .find(|e| {
+            .filter(|e| {
                 let name = e.file_name();
                 let s = name.to_string_lossy();
                 s.starts_with("app_test_build") && !s.contains('.')
             })
+            .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
             .unwrap_or_else(|| panic!("\u{274c} Could not find test binary in {}", test_bin_dir))
             .path();
 
         println!("🔌 Flashing and running tests via probe-rs: {}", test_binary.display());
-        let run_status = Command::new("probe-rs")
-            .arg("test")
+        // probe-rs needs raw USB access; in the dev container the USB device is
+        // owned by root:root so we use `sudo` (passwordless in devcontainer) when
+        // the direct open fails due to permissions.  Resolve the full path so sudo
+        // can find the binary even if /usr/local/cargo/bin isn't in root's PATH.
+        let probe_rs_bin = std::process::Command::new("sh")
+            .args(["-c", "which probe-rs"])
+            .output()
+            .ok()
+            .and_then(|o| if o.status.success() { Some(o.stdout) } else { None })
+            .map(|b| String::from_utf8_lossy(&b).trim().to_string())
+            .unwrap_or_else(|| "probe-rs".to_string());
+        let run_status = Command::new("sudo")
+            .arg("--preserve-env")
+            .arg(&probe_rs_bin)
+            .arg("run")
             .arg(&test_binary)
             .arg("--chip").arg(mcu)
             .status()

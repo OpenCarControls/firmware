@@ -1,0 +1,60 @@
+{
+    "name": "Open Car — ESP (Xtensa, ESP32-S3)",
+    "build": {
+        "dockerfile": "../Dockerfile",
+        "target": "esp-xtensa"
+    },
+    "runArgs": ["--privileged"],
+    "mounts": [
+        "source=/dev,target=/dev,type=bind"
+    ],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "streetsidesoftware.code-spell-checker",
+                "vivaxy.vscode-conventional-commits",
+                "dotenv.dotenv-vscode",
+                "EditorConfig.EditorConfig",
+                "chneau.resource-monitor",
+                "Gruntfuggly.todo-tree",
+                "mk12.better-git-line-blame",
+                "bufbuild.vscode-buf",
+                "probe-rs.probe-rs-debugger",
+                "ms-vscode.vscode-serial-monitor"
+            ],
+            "settings": {
+                "rust-analyzer.cargo.features": ["dev-esp32s3"],
+                "rust-analyzer.cargo.target": "xtensa-esp32s3-none-elf",
+                "rust-analyzer.server.extraEnv": {
+                    "RUSTUP_TOOLCHAIN": "esp"
+                },
+                "serialmonitor.defaultPort": "/dev/ttyACM0",
+                "serialmonitor.defaultBaudRate": 115200,
+                "launch": {
+                    "version": "0.2.0",
+                    "configurations": [
+                        {
+                            "type": "probe-rs-debug",
+                            "request": "launch",
+                            "name": "Debug: ESP32-S3 (probe-rs)",
+                            "preLaunchTask": "Fix: ESP JTAG USB permissions",
+                            "chip": "esp32s3",
+                            "flashingConfig": {
+                                "flashingEnabled": true,
+                                "resetAfterFlashing": true,
+                                "haltAfterReset": true
+                            },
+                            "coreConfigs": [
+                                {
+                                    "coreIndex": 0,
+                                    "programBinary": "${workspaceFolder}/.app_build/target/xtensa-esp32s3-none-elf/debug/app-build"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+    },
+    "remoteUser": "vscode"
+}

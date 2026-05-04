@@ -3,17 +3,35 @@ name = "board-pc"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Enables all PC-native dependencies.
+# Required for firmware builds; omit when running host-side unit tests
+# or when analyzed by rust-analyzer on a non-PC target.
+hardware = [
+    "dep:embassy-executor",
+    "dep:embassy-time",
+    "dep:critical-section",
+    "dep:socketcan",
+    "dep:rust-mqtt",
+    "dep:embedded-io-async",
+    "dep:prost",
+    "dep:log",
+]
+
+# Development feature — enable hardware for rust-analyzer IDE support on the PC config.
+dev-pc = ["hardware"]
+
 [dependencies]
 core-interface    = { workspace = true }
 embedded-can      = { workspace = true }
-embassy-executor  = { workspace = true }
-embassy-time      = { workspace = true }
-critical-section  = { workspace = true }
-socketcan         = { version = "3.5.0", default-features = false }
-rust-mqtt         = { workspace = true, features = ["log"] }
-embedded-io-async = { workspace = true, features = ["std"] }
-prost             = { workspace = true }
-log               = { workspace = true }
+embassy-executor  = { workspace = true,                                          optional = true }
+embassy-time      = { workspace = true,                                          optional = true }
+critical-section  = { workspace = true,                                          optional = true }
+socketcan         = { version = "3.5.0", default-features = false,               optional = true }
+rust-mqtt         = { workspace = true, features = ["log"],                      optional = true }
+embedded-io-async = { workspace = true, features = ["std"],                      optional = true }
+prost             = { workspace = true,                                          optional = true }
+log               = { workspace = true,                                          optional = true }
 
 [dev-dependencies]
 embassy-futures   = { workspace = true }

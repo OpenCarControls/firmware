@@ -8,11 +8,13 @@ mod network;
 
 #[cfg(feature = "hardware")]
 pub use ble::{ble_lifecycle_task, ble_transport_task};
+
 #[cfg(feature = "hardware")]
 pub use can::{
     CanIntPin, CanSpeed, Mcp2515Driver, McpSpeed, TwaiDriver, init_mcp2515, init_twai,
     run_mcp2515_loop, run_twai_loop,
 };
+
 #[cfg(feature = "hardware")]
 pub use network::{SharedRadioController, WifiStack, init_radio, init_wifi, mqtt_driver_task};
 
@@ -34,6 +36,7 @@ fn pairing_window_open_or_warn(op_name: &str) -> bool {
 
 #[cfg(feature = "hardware")]
 async fn persist_pairs_if(changed: bool) {
+    // TODO: This should be with BLE, not in the general board lib.
     if changed {
         ble::persist_paired_phones_to_store().await;
     }
@@ -50,16 +53,21 @@ pub fn start(spawner: &embassy_executor::Spawner) {
     spawner
         .spawn(core_interface::route_responses_task())
         .unwrap();
-    spawner.spawn(core_interface::publish_state_task()).unwrap();
+    spawner
+        .spawn(core_interface::publish_state_task())
+        .unwrap();
     spawner
         .spawn(core_interface::publish_can_debug_task())
         .unwrap();
-    spawner.spawn(system_command_task()).unwrap();
+    spawner
+        .spawn(system_command_task())
+        .unwrap();
 }
 
 #[cfg(feature = "hardware")]
 #[embassy_executor::task]
 pub async fn system_command_task() {
+    // TODO: This should be moved to core-interface and the ESP should just implement it as a trait.
     loop {
         let cmd = SYSTEM_COMMAND_CHANNEL.receiver().receive().await;
         match cmd.action {

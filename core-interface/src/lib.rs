@@ -14,6 +14,8 @@ mod pairing;
 mod routing;
 mod types;
 
+pub mod ble;
+
 use core::sync::atomic::{AtomicU32, Ordering};
 
 // ── Platform ID ───────────────────────────────────────────────────────────────
