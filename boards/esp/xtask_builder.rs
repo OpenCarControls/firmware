@@ -312,6 +312,12 @@ impl TargetBuilder for Builder {
         // App descriptor for the ESP-IDF 2nd stage bootloader (sets min_efuse_blk_rev_full to 0)
         cargo_toml.push_str(&format!("esp-bootloader-esp-idf = {{ version = \"{}\" }}\n", v("esp-bootloader-esp-idf")));
 
+        // Debug-profile: optimize for size while keeping debug symbols so probe-rs can still
+        // attach.  Without this, opt-level=0 leaves BLE/rand_chacha stack frames so large that
+        // the default Embassy task stack overflows, corrupting return addresses and producing the
+        // misleading infinite-recursion trace seen in the backtrace.
+        cargo_toml.push_str("\n[profile.dev]\nopt-level = \"s\"\ndebug = true\n");
+
         if config.network.mqtt.auth_mode == "mtls" {
             // certs are embedded via include_bytes! in main.rs, no extra deps needed
             let _ = (&config.network.mqtt.ca_cert_file, &config.network.mqtt.client_cert_file, &config.network.mqtt.client_key_file);
@@ -479,6 +485,51 @@ impl TargetBuilder for Builder {
         let profile = if release { "release" } else { "debug (unoptimized)" };
         println!("⚙️  Compiling the bare-metal firmware ({profile})...");
         self.execute_cargo_command(config, "build", release);
+    }
+
+    fn flash(&self, config: &Config, port: Option<&str>, monitor: bool, release: bool) {
+        let esp_hw = Self::get_esp_config(config);
+        let mcu = &esp_hw.mcu;
+
+        let target_arch = match mcu.as_str() {
+            "esp32"   => "xtensa-esp32-none-elf",
+            "esp32s3" => "xtensa-esp32s3-none-elf",
+            "esp32c3" => "riscv32imc-unknown-none-elf",
+            "esp32c6" => "riscv32imac-unknown-none-elf",
+            _ => unreachable!(),
+        };
+
+        let profile_dir = if release { "release" } else { "debug" };
+        let elf_path = format!(".app_build/target/{}/{}/app-build", target_arch, profile_dir);
+
+        println!(
+            "⚡ Flashing {} ({}) via {}...",
+            mcu,
+            elf_path,
+            port.unwrap_or("auto-detected port"),
+        );
+
+        let mut cmd = Command::new("espflash");
+        cmd.arg("flash");
+
+        if let Some(p) = port {
+            cmd.arg("--port").arg(p);
+        }
+
+        if monitor {
+            cmd.arg("--monitor");
+        }
+
+        cmd.arg(&elf_path);
+
+        let status = cmd.status().expect("❌ Failed to execute espflash — is it installed?");
+        if !status.success() {
+            exit(status.code().unwrap_or(1));
+        }
+
+        if !monitor {
+            println!("✅ Flash complete.");
+        }
     }
 
     fn run(&self, config: &Config) {

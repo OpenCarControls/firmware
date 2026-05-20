@@ -39,6 +39,7 @@
             "label": "Build: ESP32-S3 firmware (debug)",
             "type": "shell",
             "command": "cargo xtask build --board esp --debug",
+            "dependsOn": ["Fix: ESP JTAG USB permissions"],
             "group": "build",
             "presentation": {
                 "reveal": "always",

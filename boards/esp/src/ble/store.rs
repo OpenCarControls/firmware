@@ -148,14 +148,14 @@ pub(super) async fn restore_paired_phones_from_store() -> usize {
         return 0;
     };
 
-    let mut sector = [0xFFu8; FlashStorage::SECTOR_SIZE as usize];
+    let mut raw = [0xFFu8; core::mem::size_of::<BleBondStore>()];
     let offset = ble_store_flash_offset(flash.capacity());
-    if let Err(e) = ReadStorage::read(flash, offset, &mut sector) {
+    if let Err(e) = ReadStorage::read(flash, offset, &mut raw) {
         log::warn!("BLE store: read failed at 0x{:x}: {:?}", offset, e);
         return 0;
     }
 
-    let Some(store) = ble_store_read_bytes(&sector) else {
+    let Some(store) = ble_store_read_bytes(&raw) else {
         return 0;
     };
     if !ble_store_is_valid(&store) {
@@ -199,9 +199,9 @@ pub(crate) async fn persist_paired_phones_to_store() {
     };
 
     let offset = ble_store_flash_offset(flash.capacity());
-    let mut sector = [0xFFu8; FlashStorage::SECTOR_SIZE as usize];
-    ble_store_write_bytes(&store, &mut sector);
-    if let Err(e) = Storage::write(flash, offset, &sector) {
+    let mut raw = [0u8; core::mem::size_of::<BleBondStore>()];
+    ble_store_write_bytes(&store, &mut raw);
+    if let Err(e) = Storage::write(flash, offset, &raw) {
         log::warn!("BLE store: write failed at 0x{:x}: {:?}", offset, e);
     }
 }
@@ -235,7 +235,9 @@ struct BleSecurityStore {
     magic: u32,
     version: u8,
     count: u8,
-    reserved: [u8; 2],
+    // 4 bytes reserved so the struct size stays a multiple of 4, which is
+    // required by esp-storage's SPI flash write (uses ESP ROM word-aligned writes).
+    reserved: [u8; 4],
     entries: [[u8; BLE_SECURITY_ENTRY_SIZE]; BLE_SECURITY_STORE_MAX],
     checksum: u32,
 }
@@ -247,7 +249,7 @@ impl BleSecurityStore {
             magic: BLE_SECURITY_STORE_MAGIC,
             version: BLE_SECURITY_STORE_VERSION,
             count: 0,
-            reserved: [0; 2],
+            reserved: [0; 4],
             entries: [[0u8; BLE_SECURITY_ENTRY_SIZE]; BLE_SECURITY_STORE_MAX],
             checksum: 0,
         }
@@ -414,9 +416,9 @@ pub(super) async fn persist_security_store(bonds: &[BondInformation]) {
     };
 
     let offset = ble_security_store_flash_offset(flash.capacity());
-    let mut sector = [0xFFu8; FlashStorage::SECTOR_SIZE as usize];
-    ble_security_store_write_bytes(&store, &mut sector);
-    if let Err(e) = Storage::write(flash, offset, &sector) {
+    let mut raw = [0u8; core::mem::size_of::<BleSecurityStore>()];
+    ble_security_store_write_bytes(&store, &mut raw);
+    if let Err(e) = Storage::write(flash, offset, &raw) {
         log::warn!("BLE security store: write failed at 0x{:x}: {:?}", offset, e);
     }
 }
@@ -431,14 +433,14 @@ pub(super) async fn restore_security_store() -> heapless::Vec<BondInformation, B
         return heapless::Vec::new();
     };
 
-    let mut sector = [0xFFu8; FlashStorage::SECTOR_SIZE as usize];
+    let mut raw = [0xFFu8; core::mem::size_of::<BleSecurityStore>()];
     let offset = ble_security_store_flash_offset(flash.capacity());
-    if let Err(e) = ReadStorage::read(flash, offset, &mut sector) {
+    if let Err(e) = ReadStorage::read(flash, offset, &mut raw) {
         log::warn!("BLE security store: read failed at 0x{:x}: {:?}", offset, e);
         return heapless::Vec::new();
     }
 
-    let Some(store) = ble_security_store_read_bytes(&sector) else {
+    let Some(store) = ble_security_store_read_bytes(&raw) else {
         return heapless::Vec::new();
     };
     if !ble_security_store_is_valid(&store) {

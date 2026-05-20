@@ -266,10 +266,10 @@ fn main() {
 
     let command = args.get(1).map(|s| s.as_str()).unwrap_or("");
     match command {
-        "build" | "run" | "clippy" | "test" => {}
+        "build" | "run" | "clippy" | "test" | "flash" => {}
         _ => {
             eprintln!(
-                "Usage: cargo xtask <build|run|clippy|test> [config_file.toml] [--board <board>] [--platform <platform>] [--on-hardware] [--debug]"
+                "Usage: cargo xtask <build|run|clippy|test|flash> [config_file.toml] [--board <board>] [--platform <platform>] [--on-hardware] [--debug] [--port <port>] [--monitor]"
             );
             exit(1);
         }
@@ -281,6 +281,8 @@ fn main() {
     let mut override_platform: Option<String> = None;
     let mut on_hardware = false;
     let mut release = true;
+    let mut flash_port: Option<String> = None;
+    let mut flash_monitor = false;
 
     let mut remaining = args[2..].iter();
     while let Some(arg) = remaining.next() {
@@ -296,6 +298,12 @@ fn main() {
             }
             "--debug" => {
                 release = false;
+            }
+            "--port" => {
+                flash_port = remaining.next().cloned();
+            }
+            "--monitor" => {
+                flash_monitor = true;
             }
             other if !other.starts_with("--") => {
                 config_path = other;
@@ -360,6 +368,10 @@ fn main() {
                 "run" => builder.run(&config),
                 "clippy" => builder.clippy(&config),
                 "build" => builder.compile(&config, release),
+                "flash" => {
+                    builder.compile(&config, release);
+                    builder.flash(&config, flash_port.as_deref(), flash_monitor, release);
+                }
                 _ => unreachable!(),
             }
         }
@@ -444,6 +456,12 @@ pub trait TargetBuilder {
         if !status.success() {
             exit(status.code().unwrap_or(1));
         }
+    }
+
+    // Flash the compiled firmware to a connected device (opt-in per board)
+    fn flash(&self, _config: &Config, _port: Option<&str>, _monitor: bool, _release: bool) {
+        eprintln!("❌ Flash is not supported for this board.");
+        exit(1);
     }
 
     // On-hardware test support (opt-in per board)

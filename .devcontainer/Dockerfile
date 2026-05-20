@@ -39,15 +39,13 @@ RUN cargo binstall -y espup espflash
 
 RUN cargo binstall -y probe-rs-tools
 
-# ── esp-riscv ─────────────────────────────────────────────────────────────────
-# ESP32-C3 / ESP32-C6: RISC-V bare-metal targets, no Xtensa toolchain needed.
-FROM esp-base AS esp-riscv
+# ── esp ──────────────────────────────────────────────────────────────────────
+# All ESP targets: RISC-V (C3/C6) + Xtensa (S2/S3/classic) in one container.
+# rust-analyzer uses the stable toolchain with the RISC-V target for IDE support;
+# xtask invokes `+esp -Zbuild-std` explicitly for Xtensa firmware builds.
+FROM esp-base AS esp
 
 RUN rustup target add riscv32imc-unknown-none-elf riscv32imac-unknown-none-elf
-
-# ── esp-xtensa ────────────────────────────────────────────────────────────────
-# ESP32-S3 / ESP32-S2 / ESP32: full Xtensa toolchain via espup.
-FROM esp-base AS esp-xtensa
 
 RUN espup install --export-file /home/vscode/export-esp.sh
 

@@ -1,8 +1,8 @@
 {
-    "name": "Open Car — ESP (RISC-V, ESP32-C3)",
+    "name": "Open Car — ESP",
     "build": {
         "dockerfile": "../Dockerfile",
-        "target": "esp-riscv"
+        "target": "esp"
     },
     "runArgs": ["--privileged"],
     "mounts": [
@@ -18,11 +18,15 @@
                 "chneau.resource-monitor",
                 "Gruntfuggly.todo-tree",
                 "mk12.better-git-line-blame",
-                "bufbuild.vscode-buf"
+                "bufbuild.vscode-buf",
+                "probe-rs.probe-rs-debugger",
+                "ms-vscode.vscode-serial-monitor"
             ],
             "settings": {
                 "rust-analyzer.cargo.features": ["dev-esp32c3"],
-                "rust-analyzer.cargo.target": "riscv32imc-unknown-none-elf"
+                "rust-analyzer.cargo.target": "riscv32imc-unknown-none-elf",
+                "serialmonitor.defaultPort": "/dev/ttyACM0",
+                "serialmonitor.defaultBaudRate": 115200
             }
         }
     },

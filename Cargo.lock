@@ -97,6 +97,7 @@ dependencies = [
 name = "board-esp"
 version = "0.1.0"
 dependencies = [
+ "bt-hci",
  "core-interface",
  "embassy-executor",
  "embassy-futures",
@@ -941,6 +942,7 @@ dependencies = [
  "esp-metadata-generated",
  "esp-sync",
  "log",
+ "portable-atomic",
 ]
 
 [[package]]
