@@ -286,7 +286,7 @@ async fn advertise_and_accept<'values, 'server, C: Controller>(
     } else {
         AdvFilterPolicy::FilterConn
     };
-    log::info!(
+    log::debug!(
         "BLE advertise: mode={} filter_policy={:?} (pairing_open={} can_hw_filter={})",
         if pairing_window_open { "A" } else { "B" },
         filter_policy,
@@ -408,7 +408,7 @@ where
     for bond in bonds {
         let addr = bond.identity.bd_addr;
         let addr_kind = infer_addr_kind(&addr);
-        log::info!(
+        log::debug!(
             "BLE: FAL += {:?} {:02X?} (irk={})",
             addr_kind,
             addr.raw(),
@@ -428,7 +428,7 @@ where
     // disabled, peer_identity.bd_addr = RPA → f6 correct. LTK lookups still work:
     // trouble-host's Identity::match_address() calls irk.resolve_address() in
     // software to match a stored bond's IRK against the incoming RPA.
-    log::info!(
+    log::debug!(
         "BLE: controller lists updated — {} bond(s) in FAL (RL disabled for LESC compat)",
         bonds.len(),
     );
@@ -776,7 +776,7 @@ async fn ble_tx_notify_task<P: PacketPool>(
         // waits until that gate opens.
         if !tx_auth.load(core::sync::atomic::Ordering::Relaxed) {
             if !tx_held_logged {
-                log::info!("BLE TX: holding message — awaiting PairingComplete (tx_auth not yet set)");
+                log::debug!("BLE TX: holding message — awaiting PairingComplete (tx_auth not yet set)");
                 tx_held_logged = true;
             }
             pending_msg = Some(msg);

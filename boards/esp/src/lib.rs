@@ -76,7 +76,7 @@ pub async fn system_command_task() {
             }
             Some(core_interface::proto::system_command::Action::ListPairedPhones(_)) => {
                 let phones = core_interface::list_paired_phones().await;
-                log::info!(
+                log::debug!(
                     "SYSTEM: list paired phones requested, count={} (ESP runtime)",
                     phones.len()
                 );
@@ -87,7 +87,7 @@ pub async fn system_command_task() {
                 }
                 let removed = core_interface::remove_paired_phone(&req.device_id).await;
                 persist_pairs_if(removed).await;
-                log::info!(
+                log::debug!(
                     "SYSTEM: remove paired phone requested, removed={}, device_id_len={}",
                     removed,
                     req.device_id.len(),
@@ -99,7 +99,7 @@ pub async fn system_command_task() {
                 }
                 let removed = core_interface::clear_paired_phones().await;
                 persist_pairs_if(removed > 0).await;
-                log::warn!(
+                log::info!(
                     "SYSTEM: clear paired phones requested, removed={} (ESP runtime)",
                     removed
                 );
@@ -110,7 +110,7 @@ pub async fn system_command_task() {
                 }
                 let added = core_interface::add_paired_phone(&req.device_id).await;
                 persist_pairs_if(added).await;
-                log::info!(
+                log::debug!(
                     "SYSTEM: upsert paired phone requested, accepted={}, device_id_len={}",
                     added,
                     req.device_id.len(),

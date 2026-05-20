@@ -208,7 +208,7 @@ pub async fn mqtt_driver_task(
         .await
         .is_err()
         {
-            log::warn!("MQTT: session ended, reconnecting in 5s");
+            log::info!("MQTT: session ended, reconnecting in 5s");
         }
         Timer::after(Duration::from_secs(5)).await;
     }
