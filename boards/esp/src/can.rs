@@ -31,7 +31,6 @@ pub use mcp2515::{CanSpeed, McpSpeed};
 #[cfg(feature = "hardware")]
 use mcp2515::{
     MCP2515,
-    error::Error as McpError,
     filter::{RxFilter, RxMask},
     frame::CanFrame as McpFrame,
     regs::OpMode,

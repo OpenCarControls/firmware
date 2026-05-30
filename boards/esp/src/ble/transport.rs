@@ -207,7 +207,6 @@ pub async fn ble_transport_task(
             }
         },
         async {
-            let mut can_hardware_filter = false;
             loop {
                 let pairing_open = core_interface::is_pairing_window_open();
 
@@ -216,7 +215,7 @@ pub async fn ble_transport_task(
                 let bonds = stack.get_bond_information();
                 let (bond_count, has_irk) =
                     update_controller_filter_lists(&stack, bonds.as_slice()).await;
-                can_hardware_filter = bond_count > 0 && has_irk;
+                let can_hardware_filter = bond_count > 0 && has_irk;
 
                 match advertise_and_accept(
                     name,
