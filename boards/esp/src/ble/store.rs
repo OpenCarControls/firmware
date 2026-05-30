@@ -1,3 +1,13 @@
+//! Flash-backed BLE bond store.
+//!
+//! Persists `BondInformation` records (LTK, identity address, IRK) to a dedicated
+//! flash range using `sequential-storage`. On startup, bonds are restored and fed
+//! back to the `trouble-host` stack so paired phones can re-encrypt without
+//! triggering a full re-pairing procedure.
+//!
+//! Storage layout: the store occupies the last two NOR flash sectors (fixed end-of-
+//! flash regions — see AGENTS.md for the planned migration to named partitions).
+
 #[cfg(feature = "hardware")]
 use core::ops::Range;
 #[cfg(feature = "hardware")]

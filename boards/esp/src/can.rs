@@ -1,3 +1,13 @@
+//! CAN bus drivers for the ESP32 board.
+//!
+//! Two driver implementations are provided:
+//! - **TWAI** – the ESP32's built-in CAN peripheral, polled with `nb` non-blocking reads.
+//! - **MCP2515** – external SPI CAN controller, interrupt-driven via a falling-edge INT pin.
+//!
+//! Both share the same channel contract: `CAN_RX_CHANNEL` (board → vehicle) and
+//! `CAN_TX_CHANNEL` (vehicle → board). All frame filtering against the vehicle's
+//! `CanFilter` list is done in software after the hardware delivers the frame.
+
 use core_interface::CanFilter;
 
 #[cfg(feature = "hardware")]
@@ -110,18 +120,20 @@ pub async fn run_twai_loop(driver: TwaiDriver, bus_id: u8, filters: &'static [Ca
         loop {
             match rx.receive() {
                 Ok(frame) => {
-                    let core_frame = twai_to_core_frame(frame, bus_id);
+                    let core_frame = to_core_frame(frame, bus_id);
                     try_send_can_debug_capture(bus_id, &core_frame);
                     if core_interface::passes_filter(&core_frame, filters) {
                         CAN_RX_CHANNEL.sender().send(core_frame).await;
                     }
                 }
-                Err(nb::Error::WouldBlock) => break,
-                Err(_) => break, // bus error; keep going
+                Err(_) => break, // WouldBlock (no frame) or bus error; either way keep going
             }
         }
 
         // Drain outbound TX channel for this bus
+        // Frames for other buses are put back on the shared channel so their
+        // respective bus loops can pick them up. try_send is intentional — if the
+        // channel is momentarily full the frame is dropped rather than stalling.
         while let Ok(outbound) = CAN_TX_CHANNEL.receiver().try_receive() {
             if outbound.bus_id == bus_id {
                 // Drop silently when in read-only mode; do not transmit on the bus.
@@ -145,21 +157,6 @@ pub async fn run_twai_loop(driver: TwaiDriver, bus_id: u8, filters: &'static [Ca
 
         // Yield 1 ms before next poll
         Timer::after(Duration::from_millis(1)).await;
-    }
-}
-
-#[cfg(feature = "hardware")]
-fn twai_to_core_frame(frame: twai::EspTwaiFrame, bus_id: u8) -> CanFrame {
-    let id = EmbeddedFrame::id(&frame);
-    let dlc = EmbeddedFrame::dlc(&frame) as u8;
-    let raw = EmbeddedFrame::data(&frame);
-    let mut data = [0u8; 8];
-    data[..raw.len()].copy_from_slice(raw);
-    CanFrame {
-        bus_id,
-        id,
-        data,
-        dlc,
     }
 }
 
@@ -207,24 +204,16 @@ pub fn init_mcp2515(
 
     // Collect up to 6 filter IDs for this bus on the stack.
     let mut ids: [Option<Id>; 6] = [None; 6];
-    let mut count = 0usize;
-    for f in filters.iter().filter(|f| f.bus_id == bus_id).take(6) {
-        ids[count] = Some(f.id);
-        count += 1;
+    for (slot, f) in filters.iter().filter(|f| f.bus_id == bus_id).take(6).enumerate() {
+        ids[slot] = Some(f.id);
     }
 
-    // Combined mask for RXB0 (slots 0..2) and RXB1 (slots 2..6).
-    let (mask0, mask1) = compute_mcp_masks(filters, bus_id);
-
-    if let Some(sid) = StandardId::new((mask0 & 0x7FF) as u16) {
-        mcp.set_mask(RxMask::Mask0, Id::Standard(sid)).ok();
-    }
-    if let Some(sid) = StandardId::new((mask1 & 0x7FF) as u16) {
-        mcp.set_mask(RxMask::Mask1, Id::Standard(sid)).ok();
-    }
-    for i in 0..count {
-        if let Some(id) = ids[i] {
-            mcp.set_filter(RX_FILTERS[i], id).ok();
+    // Program hardware RX masks (reuse the same logic used during debug-mode transitions)
+    // then program the individual filter slots.
+    set_mcp_vehicle_masks(&mut mcp, filters, bus_id);
+    for (slot, id) in ids.iter().enumerate() {
+        if let Some(id) = id {
+            mcp.set_filter(RX_FILTERS[slot], *id).ok();
         }
     }
 
@@ -232,7 +221,13 @@ pub fn init_mcp2515(
 }
 
 #[cfg(feature = "hardware")]
-/// Bidirectional MCP2515 loop - runs forever on core 1.
+/// Bidirectional MCP2515 loop — runs forever on core 1.
+///
+/// Waits for the INT pin to fall (MCP2515 asserts it on any RX or TX event), then
+/// drains all available received frames and the outbound TX channel.
+///
+/// Hardware RX masks are swapped to accept-all when CAN debug mode is active so the
+/// debug tap can observe every frame on the bus, and restored when debug is disabled.
 pub async fn run_mcp2515_loop(
     mut driver: Mcp2515Driver,
     mut int_pin: CanIntPin,
@@ -257,13 +252,13 @@ pub async fn run_mcp2515_loop(
         loop {
             match driver.read_message() {
                 Ok(frame) => {
-                    let core_frame = mcp_to_core_frame(frame, bus_id);
+                    let core_frame = to_core_frame(frame, bus_id);
                     try_send_can_debug_capture(bus_id, &core_frame);
                     if core_interface::passes_filter(&core_frame, filters) {
                         CAN_RX_CHANNEL.sender().send(core_frame).await;
                     }
                 }
-                Err(McpError::NoMessage) | Err(_) => break,
+                Err(_) => break, // NoMessage (FIFO empty) or hardware error; either way done
             }
         }
 
@@ -283,41 +278,36 @@ pub async fn run_mcp2515_loop(
 }
 
 #[cfg(feature = "hardware")]
-fn mcp_to_core_frame(frame: McpFrame, bus_id: u8) -> CanFrame {
-    let id = EmbeddedFrame::id(&frame);
-    let dlc = EmbeddedFrame::dlc(&frame) as u8;
-    let raw = EmbeddedFrame::data(&frame);
-    let mut data = [0u8; 8];
-    data[..raw.len()].copy_from_slice(raw);
-    CanFrame {
-        bus_id,
-        id,
-        data,
-        dlc,
-    }
-}
-
-#[cfg(feature = "hardware")]
 fn core_to_mcp_frame(frame: &CanFrame) -> Option<McpFrame> {
     McpFrame::new(frame.id, &frame.data[..frame.dlc as usize])
 }
 
+/// Converts any [`EmbeddedFrame`]-implementing hardware frame into the
+/// crate-shared [`CanFrame`] type. Used by both the TWAI and MCP2515 drivers.
 #[cfg(feature = "hardware")]
-fn set_mcp_accept_all_masks(driver: &mut Mcp2515Driver) {
-    driver
-        .set_mask(
-            RxMask::Mask0,
-            Id::Standard(unsafe { StandardId::new_unchecked(0) }),
-        )
-        .ok();
-    driver
-        .set_mask(
-            RxMask::Mask1,
-            Id::Standard(unsafe { StandardId::new_unchecked(0) }),
-        )
-        .ok();
+fn to_core_frame<F: EmbeddedFrame>(frame: F, bus_id: u8) -> CanFrame {
+    let id = frame.id();
+    let dlc = frame.dlc() as u8;
+    let raw = frame.data();
+    let mut data = [0u8; 8];
+    data[..raw.len()].copy_from_slice(raw);
+    CanFrame { bus_id, id, data, dlc }
 }
 
+/// Switches both MCP2515 RX buffer masks to accept-all (mask bits = 0).
+/// Called when CAN debug mode is enabled so the debug tap can observe every
+/// frame on the bus before the software filter runs.
+#[cfg(feature = "hardware")]
+fn set_mcp_accept_all_masks(driver: &mut Mcp2515Driver) {
+    // StandardId 0 is always valid (fits in 11 bits); no unsafe needed.
+    let id_zero = Id::Standard(StandardId::new(0).unwrap());
+    driver.set_mask(RxMask::Mask0, id_zero).ok();
+    driver.set_mask(RxMask::Mask1, id_zero).ok();
+}
+
+/// Restores the MCP2515 RX buffer masks derived from the vehicle's `CanFilter` list.
+/// Called when CAN debug mode is disabled to return the hardware to selective
+/// filtering and reduce CPU load from unwanted frames reaching the software path.
 #[cfg(feature = "hardware")]
 fn set_mcp_vehicle_masks(driver: &mut Mcp2515Driver, filters: &[CanFilter], bus_id: u8) {
     let (mask0, mask1) = compute_mcp_masks(filters, bus_id);
@@ -329,6 +319,10 @@ fn set_mcp_vehicle_masks(driver: &mut Mcp2515Driver, filters: &[CanFilter], bus_
     }
 }
 
+/// Forwards `frame` to the CAN debug channel if the debug tap is currently
+/// watching `bus_id`. Uses `try_send` (non-blocking) so the CAN driver is never
+/// stalled by a slow debug consumer; dropped frames are counted so the app can
+/// report the loss.
 #[cfg(feature = "hardware")]
 fn try_send_can_debug_capture(bus_id: u8, frame: &CanFrame) {
     if !core_interface::can_debug_wants_bus(bus_id) {

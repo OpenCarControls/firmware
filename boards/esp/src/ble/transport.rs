@@ -1,3 +1,19 @@
+//! BLE GATT transport task.
+//!
+//! Implements the full advertise → connect → service loop on top of `trouble-host`.
+//!
+//! **Advertising modes**
+//! - Mode A (pairing window open): general-discoverable, full name and service UUID
+//!   in scan response. New phones can find and pair with the device.
+//! - Mode B (pairing window closed): non-discoverable flags only. Bonded phones that
+//!   already know the device address can still reconnect; strangers cannot see it.
+//!
+//! **Security model**
+//! - RX writes require link encryption (enforced by `trouble-host` via `permissions(encrypted)`).
+//! - TX notifications are withheld until `gatt_event_task` confirms encryption via `tx_auth`.
+//! - `source_device_id` in every accepted message is overwritten with the firmware-verified
+//!   BLE address so the vehicle layer always has a trustworthy caller identity.
+
 #[cfg(feature = "hardware")]
 use alloc::vec::Vec;
 #[cfg(feature = "hardware")]

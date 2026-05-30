@@ -54,12 +54,6 @@ struct PcHardwareConfig {
     can_buses: Vec<PcCanBus>,
 }
 
-#[derive(Deserialize)]
-struct PlatformMeta {
-    platform_id: String,
-    can_bus_count: usize,
-}
-
 pub struct Builder;
 
 impl Builder {
@@ -98,41 +92,22 @@ impl TargetBuilder for Builder {
 
         let pc_hw = Self::get_pc_hw(config);
         let vehicle_platform = &config.target.platform;
-        let platform_underscore = vehicle_platform.replace('-', "_");
 
-        // Read platform meta (platform_id + can_bus_count)
-        let meta_path = format!("contracts/opencar/cars/{}/v1/meta.toml", platform_underscore);
-        let meta_str = fs::read_to_string(&meta_path)
-            .unwrap_or_else(|_| panic!("\u{274c} Could not read platform meta: {}", meta_path));
-        let meta: PlatformMeta = toml::from_str(&meta_str)
-            .expect("\u{274c} Invalid platform meta.toml format");
-        let hex = meta.platform_id.trim_start_matches("0x").trim_start_matches("0X");
-        let platform_id: u32 = u32::from_str_radix(hex, 16)
-            .expect("\u{274c} Invalid platform_id hex in meta.toml");
+        let (platform_id, can_bus_count) = crate::load_platform_meta(vehicle_platform);
+        let (vehicle_crate_name, vehicle_crate_ident) = crate::load_vehicle_crate_info(vehicle_platform);
 
         // Validate CAN bus count
-        if pc_hw.can_buses.len() < meta.can_bus_count {
+        if pc_hw.can_buses.len() < can_bus_count {
             eprintln!(
-                "\u{274c} Vehicle '{}' requires {} CAN bus(es) but [hardware.pc] only defines {} [[hardware.pc.can_buses]] entries.",
-                vehicle_platform, meta.can_bus_count, pc_hw.can_buses.len()
+                "❌ Vehicle '{}' requires {} CAN bus(es) but [hardware.pc] only defines {} [[hardware.pc.can_buses]] entries.",
+                vehicle_platform, can_bus_count, pc_hw.can_buses.len()
             );
             exit(1);
         }
 
-        // Read vehicle crate name from its Cargo.toml
-        let vehicle_cargo_path = format!("cars/{}/Cargo.toml", vehicle_platform);
-        let vehicle_cargo_str = fs::read_to_string(&vehicle_cargo_path)
-            .unwrap_or_else(|_| panic!("\u{274c} Could not read vehicle Cargo.toml: {}", vehicle_cargo_path));
-        let vehicle_cargo: toml::Value = toml::from_str(&vehicle_cargo_str)
-            .expect("\u{274c} Invalid vehicle Cargo.toml");
-        let vehicle_crate_name = vehicle_cargo["package"]["name"].as_str()
-            .expect("\u{274c} Missing [package.name] in vehicle Cargo.toml")
-            .to_string();
-        let vehicle_crate_ident = vehicle_crate_name.replace('-', "_");
-
         // Generate one socket_can_task spawn per bus.
         // Only the first `can_bus_count` buses are used by the vehicle; extras are ignored.
-        let can_spawns: String = pc_hw.can_buses.iter().take(meta.can_bus_count).enumerate()
+        let can_spawns: String = pc_hw.can_buses.iter().take(can_bus_count).enumerate()
             .map(|(bus_id, bus)| format!(
                 "    spawner.spawn(board_pc::socket_can_task(\"{}\", {}, {}::CAN_FILTERS).unwrap());\n",
                 bus.interface, bus_id, vehicle_crate_ident
@@ -155,23 +130,8 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str(&format!("critical-section = {{ version = \"{}\", features = [\"std\"] }}\n", v("critical-section")));
         cargo_toml.push_str("env_logger = \"0.11\"\n");
 
-        if config.network.mqtt.auth_mode == "mtls" {
-            // certs are embedded via include_bytes! in main.rs, no extra deps needed
-            let _ = (&config.network.mqtt.ca_cert_file, &config.network.mqtt.client_cert_file, &config.network.mqtt.client_key_file);
-        }
-
         // Build .app_build/src/main.rs from template
-        let mtls_certs = if config.network.mqtt.auth_mode == "mtls" {
-            let ca = config.network.mqtt.ca_cert_file.as_ref().unwrap();
-            let cert = config.network.mqtt.client_cert_file.as_ref().unwrap();
-            let key = config.network.mqtt.client_key_file.as_ref().unwrap();
-            format!(
-                "const CA_CERT: &[u8] = include_bytes!(\"../../{}\");\nconst CLIENT_CERT: &[u8] = include_bytes!(\"../../{}\");\nconst CLIENT_KEY: &[u8] = include_bytes!(\"../../{}\");",
-                ca, cert, key
-            )
-        } else {
-            String::new()
-        };
+        let mtls_certs = crate::generate_mtls_certs(config);
 
         // Generate network constants and MQTT driver spawn
         let (broker_host, broker_port) = parse_broker_url(&config.network.mqtt.broker_url);

@@ -6,6 +6,40 @@ use serde::Deserialize;
 use std::fs;
 use std::process::{Command, exit};
 
+/// Load `boards/esp/Cargo.toml` as a raw TOML value for version lookups.
+fn load_esp_board_toml() -> toml::Value {
+    let toml_str = fs::read_to_string("boards/esp/Cargo.toml")
+        .expect("❌ Could not read boards/esp/Cargo.toml");
+    toml::from_str(&toml_str).expect("❌ Failed to parse boards/esp/Cargo.toml")
+}
+
+/// Look up a crate version from `boards/esp/Cargo.toml`.
+/// Checks `[dependencies]` first, then `[package.metadata.xtask-only-deps]`.
+fn esp_dep_version(board_toml: &toml::Value, name: &str) -> String {
+    if let Some(dep) = board_toml.get("dependencies").and_then(|d| d.get(name)) {
+        if let Some(s) = dep.as_str() {
+            return s.to_string();
+        }
+        if let Some(v) = dep.get("version").and_then(|v| v.as_str()) {
+            return v.to_string();
+        }
+    }
+    if let Some(v) = board_toml
+        .get("package")
+        .and_then(|p| p.get("metadata"))
+        .and_then(|m| m.get("xtask-only-deps"))
+        .and_then(|x| x.get(name))
+        .and_then(|v| v.as_str())
+    {
+        return v.to_string();
+    }
+    panic!(
+        "❌ Missing ESP dependency '{}'. Add it to [dependencies] or \
+         [package.metadata.xtask-only-deps] in boards/esp/Cargo.toml.",
+        name
+    );
+}
+
 #[derive(Deserialize)]
 struct EspBleConfig {
     #[serde(default)]
@@ -48,6 +82,17 @@ fn default_controller_lease_ttl_s() -> u32 {
     15
 }
 
+/// Maps an MCU name from `config.toml` to its Rust no_std target triple.
+fn mcu_to_target_arch(mcu: &str) -> &'static str {
+    match mcu {
+        "esp32"   => "xtensa-esp32-none-elf",
+        "esp32s3" => "xtensa-esp32s3-none-elf",
+        "esp32c3" => "riscv32imc-unknown-none-elf",
+        "esp32c6" => "riscv32imac-unknown-none-elf",
+        _ => unreachable!("Unsupported MCU: {}", mcu),
+    }
+}
+
 #[derive(Deserialize)]
 struct EspConfig {
     mcu: String,
@@ -59,12 +104,6 @@ struct EspConfig {
     ble: EspBleConfig,
     #[serde(default)]
     can_buses: Vec<toml::Value>,
-}
-
-#[derive(Deserialize)]
-struct PlatformMeta {
-    platform_id: String,
-    can_bus_count: usize,
 }
 
 pub struct Builder;
@@ -82,13 +121,7 @@ impl Builder {
         let esp_hw = Self::get_esp_config(config);
         let mcu = &esp_hw.mcu;
 
-        let target_arch = match mcu.as_str() {
-            "esp32"  => "xtensa-esp32-none-elf",
-            "esp32s3" => "xtensa-esp32s3-none-elf",
-            "esp32c3" => "riscv32imc-unknown-none-elf",
-            "esp32c6" => "riscv32imac-unknown-none-elf",
-            _ => unreachable!(),
-        };
+        let target_arch = mcu_to_target_arch(mcu);
 
         let mut cmd = Command::new("cargo");
 
@@ -153,37 +186,18 @@ impl TargetBuilder for Builder {
 
         let esp_hw = Self::get_esp_config(config);
         let vehicle_platform = &config.target.platform;
-        let platform_underscore = vehicle_platform.replace('-', "_");
 
-        // Read platform meta (platform_id + can_bus_count)
-        let meta_path = format!("contracts/opencar/cars/{}/v1/meta.toml", platform_underscore);
-        let meta_str = fs::read_to_string(&meta_path)
-            .unwrap_or_else(|_| panic!("\u{274c} Could not read platform meta: {}", meta_path));
-        let meta: PlatformMeta = toml::from_str(&meta_str)
-            .expect("\u{274c} Invalid platform meta.toml format");
-        let hex = meta.platform_id.trim_start_matches("0x").trim_start_matches("0X");
-        let platform_id: u32 = u32::from_str_radix(hex, 16)
-            .expect("\u{274c} Invalid platform_id hex in meta.toml");
+        let (platform_id, can_bus_count) = crate::load_platform_meta(vehicle_platform);
+        let (vehicle_crate_name, vehicle_crate_ident) = crate::load_vehicle_crate_info(vehicle_platform);
 
         // Validate CAN bus count
-        if esp_hw.can_buses.len() < meta.can_bus_count {
+        if esp_hw.can_buses.len() < can_bus_count {
             eprintln!(
-                "\u{274c} Vehicle '{}' requires {} CAN bus(es) but [hardware.esp] only defines {} [[hardware.esp.can_buses]] entries.",
-                vehicle_platform, meta.can_bus_count, esp_hw.can_buses.len()
+                "❌ Vehicle '{}' requires {} CAN bus(es) but [hardware.esp] only defines {} [[hardware.esp.can_buses]] entries.",
+                vehicle_platform, can_bus_count, esp_hw.can_buses.len()
             );
             exit(1);
         }
-
-        // Read vehicle crate name from its Cargo.toml
-        let vehicle_cargo_path = format!("cars/{}/Cargo.toml", vehicle_platform);
-        let vehicle_cargo_str = fs::read_to_string(&vehicle_cargo_path)
-            .unwrap_or_else(|_| panic!("\u{274c} Could not read vehicle Cargo.toml: {}", vehicle_cargo_path));
-        let vehicle_cargo: toml::Value = toml::from_str(&vehicle_cargo_str)
-            .expect("\u{274c} Invalid vehicle Cargo.toml");
-        let vehicle_crate_name = vehicle_cargo["package"]["name"].as_str()
-            .expect("\u{274c} Missing [package.name] in vehicle Cargo.toml")
-            .to_string();
-        let vehicle_crate_ident = vehicle_crate_name.replace('-', "_");
 
         // Generate per-bus CAN hardware init expressions and task definitions.
         // FIXME: Only the first `can_bus_count` buses are wired up; extras in config are ignored.
@@ -193,7 +207,7 @@ impl TargetBuilder for Builder {
         let mut mcp_spi_idx: u8 = 2; // SPI0/SPI1 reserved for flash; MCP2515 buses start at SPI2
         let filters_expr = format!("{}::CAN_FILTERS", vehicle_crate_ident);
 
-        for (bus_id, bus) in esp_hw.can_buses.iter().take(meta.can_bus_count).enumerate() {
+        for (bus_id, bus) in esp_hw.can_buses.iter().take(can_bus_count).enumerate() {
             let interface = bus.get("interface")
                 .and_then(|v| v.as_str())
                 .unwrap_or_else(|| { eprintln!("\u{274c} can_buses entry {} is missing 'interface'", bus_id); exit(1); });
@@ -284,20 +298,22 @@ impl TargetBuilder for Builder {
             vehicle_crate_name, vehicle_platform
         ));
         let v = |name: &str| crate::ws_dep_version(&config.workspace_deps, name);
-        cargo_toml.push_str(&format!("esp-hal = {{ version = \"{}\", features = [\"unstable\"] }}\n", v("esp-hal")));
-        cargo_toml.push_str(&format!("esp-rtos = {{ version = \"{}\", features = [\"embassy\", \"esp-radio\", \"esp-alloc\"] }}\n", v("esp-rtos")));
-        cargo_toml.push_str(&format!("esp-backtrace = {{ version = \"{}\", features = [\"panic-handler\", \"println\"] }}\n", v("esp-backtrace")));
-        cargo_toml.push_str(&format!("esp-println = {{ version = \"{}\", features = [\"log-04\"] }}\n", v("esp-println")));
-        cargo_toml.push_str(&format!("esp-alloc = \"{}\"\n", v("esp-alloc")));
+        let board_toml = load_esp_board_toml();
+        let ev = |name: &str| esp_dep_version(&board_toml, name);
+        cargo_toml.push_str(&format!("esp-hal = {{ version = \"{}\", features = [\"unstable\"] }}\n", ev("esp-hal")));
+        cargo_toml.push_str(&format!("esp-rtos = {{ version = \"{}\", features = [\"embassy\", \"esp-radio\", \"esp-alloc\"] }}\n", ev("esp-rtos")));
+        cargo_toml.push_str(&format!("esp-backtrace = {{ version = \"{}\", features = [\"panic-handler\", \"println\"] }}\n", ev("esp-backtrace")));
+        cargo_toml.push_str(&format!("esp-println = {{ version = \"{}\", features = [\"log-04\"] }}\n", ev("esp-println")));
+        cargo_toml.push_str(&format!("esp-alloc = \"{}\"\n", ev("esp-alloc")));
         cargo_toml.push_str(&format!("embassy-executor = \"{}\"\n", v("embassy-executor")));
         cargo_toml.push_str(&format!("embassy-time = \"{}\"\n", v("embassy-time")));
-        cargo_toml.push_str(&format!("static_cell = \"{}\"\n", v("static_cell")));
+        cargo_toml.push_str(&format!("static_cell = \"{}\"\n", ev("static_cell")));
         // Direct dep so we can forward the MCU chip feature via --features esp-radio/<mcu>
-        cargo_toml.push_str(&format!("esp-radio = {{ version = \"{}\", features = [\"wifi\", \"ble\", \"unstable\"] }}\n", v("esp-radio")));
+        cargo_toml.push_str(&format!("esp-radio = {{ version = \"{}\", features = [\"wifi\", \"ble\", \"unstable\"] }}\n", ev("esp-radio")));
         // Direct dep so we can forward the MCU chip feature via --features esp-storage/<mcu>
-        cargo_toml.push_str(&format!("esp-storage = {{ version = \"{}\", features = [\"critical-section\"] }}\n", v("esp-storage")));
+        cargo_toml.push_str(&format!("esp-storage = {{ version = \"{}\", features = [\"critical-section\"] }}\n", ev("esp-storage")));
         // App descriptor for the ESP-IDF 2nd stage bootloader (sets min_efuse_blk_rev_full to 0)
-        cargo_toml.push_str(&format!("esp-bootloader-esp-idf = {{ version = \"{}\" }}\n", v("esp-bootloader-esp-idf")));
+        cargo_toml.push_str(&format!("esp-bootloader-esp-idf = {{ version = \"{}\" }}\n", ev("esp-bootloader-esp-idf")));
 
         // Debug-profile: optimize for size while keeping debug symbols so probe-rs can still
         // attach.  Without this, opt-level=0 leaves BLE/rand_chacha stack frames so large that
@@ -305,23 +321,8 @@ impl TargetBuilder for Builder {
         // misleading infinite-recursion trace seen in the backtrace.
         cargo_toml.push_str("\n[profile.dev]\nopt-level = \"s\"\ndebug = true\n");
 
-        if config.network.mqtt.auth_mode == "mtls" {
-            // certs are embedded via include_bytes! in main.rs, no extra deps needed
-            let _ = (&config.network.mqtt.ca_cert_file, &config.network.mqtt.client_cert_file, &config.network.mqtt.client_key_file);
-        }
-
         // Build .app_build/src/main.rs from template
-        let mtls_certs = if config.network.mqtt.auth_mode == "mtls" {
-            let ca = config.network.mqtt.ca_cert_file.as_ref().unwrap();
-            let cert = config.network.mqtt.client_cert_file.as_ref().unwrap();
-            let key = config.network.mqtt.client_key_file.as_ref().unwrap();
-            format!(
-                "const CA_CERT: &[u8] = include_bytes!(\"../../{}\");\nconst CLIENT_CERT: &[u8] = include_bytes!(\"../../{}\");\nconst CLIENT_KEY: &[u8] = include_bytes!(\"../../{}\");",
-                ca, cert, key
-            )
-        } else {
-            String::new()
-        };
+        let mtls_certs = crate::generate_mtls_certs(config);
 
         // Generate network constants and WiFi/MQTT driver spawn
         let (broker_host, broker_port) = parse_broker_url(&config.network.mqtt.broker_url);
@@ -471,13 +472,7 @@ impl TargetBuilder for Builder {
         let esp_hw = Self::get_esp_config(config);
         let mcu = &esp_hw.mcu;
 
-        let target_arch = match mcu.as_str() {
-            "esp32"   => "xtensa-esp32-none-elf",
-            "esp32s3" => "xtensa-esp32s3-none-elf",
-            "esp32c3" => "riscv32imc-unknown-none-elf",
-            "esp32c6" => "riscv32imac-unknown-none-elf",
-            _ => unreachable!(),
-        };
+        let target_arch = mcu_to_target_arch(mcu);
 
         let profile_dir = if release { "release" } else { "debug" };
         let elf_path = format!(".app_build/target/{}/{}/app-build", target_arch, profile_dir);
@@ -527,15 +522,7 @@ impl TargetBuilder for Builder {
         let mcu = &esp_hw.mcu;
 
         // Read platform meta for PLATFORM_ID
-        let platform_underscore = config.target.platform.replace('-', "_");
-        let meta_path = format!("contracts/opencar/cars/{}/v1/meta.toml", platform_underscore);
-        let meta_str = fs::read_to_string(&meta_path)
-            .unwrap_or_else(|_| panic!("\u{274c} Could not read platform meta: {}", meta_path));
-        let meta: PlatformMeta = toml::from_str(&meta_str)
-            .expect("\u{274c} Invalid platform meta.toml format");
-        let hex = meta.platform_id.trim_start_matches("0x").trim_start_matches("0X");
-        let platform_id: u32 = u32::from_str_radix(hex, 16)
-            .expect("\u{274c} Invalid platform_id hex in meta.toml");
+        let (platform_id, _) = crate::load_platform_meta(&config.target.platform);
 
         // Read any user-defined on-hardware tests from boards/esp/tests/hardware.rs
         let extra_tests = fs::read_to_string("boards/esp/tests/hardware.rs").unwrap_or_default();
@@ -547,15 +534,17 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str("core-interface = { path = \"../core-interface\" }\n");
         cargo_toml.push_str("board-esp = { path = \"../boards/esp\", features = [\"hardware\"] }\n");
         let v = |name: &str| crate::ws_dep_version(&config.workspace_deps, name);
-        cargo_toml.push_str(&format!("esp-hal = {{ version = \"{}\", features = [\"unstable\"] }}\n", v("esp-hal")));
-        cargo_toml.push_str(&format!("esp-rtos = {{ version = \"{}\", features = [\"embassy\", \"esp-alloc\"] }}\n", v("esp-rtos")));
-        cargo_toml.push_str(&format!("esp-radio = {{ version = \"{}\", features = [\"unstable\"] }}\n", v("esp-radio")));
-        cargo_toml.push_str(&format!("esp-storage = {{ version = \"{}\", features = [\"critical-section\"] }}\n", v("esp-storage")));
-        cargo_toml.push_str(&format!("esp-alloc = \"{}\"\n", v("esp-alloc")));
-        cargo_toml.push_str(&format!("esp-println = {{ version = \"{}\", features = [\"log-04\"] }}\n", v("esp-println")));
+        let board_toml = load_esp_board_toml();
+        let ev = |name: &str| esp_dep_version(&board_toml, name);
+        cargo_toml.push_str(&format!("esp-hal = {{ version = \"{}\", features = [\"unstable\"] }}\n", ev("esp-hal")));
+        cargo_toml.push_str(&format!("esp-rtos = {{ version = \"{}\", features = [\"embassy\", \"esp-alloc\"] }}\n", ev("esp-rtos")));
+        cargo_toml.push_str(&format!("esp-radio = {{ version = \"{}\", features = [\"unstable\"] }}\n", ev("esp-radio")));
+        cargo_toml.push_str(&format!("esp-storage = {{ version = \"{}\", features = [\"critical-section\"] }}\n", ev("esp-storage")));
+        cargo_toml.push_str(&format!("esp-alloc = \"{}\"\n", ev("esp-alloc")));
+        cargo_toml.push_str(&format!("esp-println = {{ version = \"{}\", features = [\"log-04\"] }}\n", ev("esp-println")));
         cargo_toml.push_str(&format!("embassy-executor = \"{}\"\n", v("embassy-executor")));
         cargo_toml.push_str(&format!("embassy-time = \"{}\"\n", v("embassy-time")));
-        cargo_toml.push_str(&format!("static_cell = \"{}\"\n", v("static_cell")));
+        cargo_toml.push_str(&format!("static_cell = \"{}\"\n", ev("static_cell")));
         // external-executor: pass esp_rtos::embassy::Executor to the tests macro.
         // embassy-09: also required by the macro even with external-executor.
         // xtensa-semihosting: required for Xtensa targets (openocd-semihosting interface).
@@ -568,11 +557,11 @@ impl TargetBuilder for Builder {
         } else {
             "\"external-executor\", \"embassy-09\", \"semihosting\", \"panic-handler\""
         };
-        cargo_toml.push_str(&format!("embedded-test = {{ version = \"{}\", features = [{embedded_test_features}] }}\n", v("embedded-test")));
+        cargo_toml.push_str(&format!("embedded-test = {{ version = \"{}\", features = [{embedded_test_features}] }}\n", ev("embedded-test")));
         // No defmt in test build: _defmt_timestamp and _defmt_panic are not wired for Xtensa
         // without panic-probe. Test pass/fail is communicated via semihosting, not defmt RTT.
         cargo_toml.push_str(&format!("embedded-can = \"{}\"\n", v("embedded-can")));
-        cargo_toml.push_str(&format!("esp-bootloader-esp-idf = {{ version = \"{}\" }}\n", v("esp-bootloader-esp-idf")));
+        cargo_toml.push_str(&format!("esp-bootloader-esp-idf = {{ version = \"{}\" }}\n", ev("esp-bootloader-esp-idf")));
 
         // Chip-specific feature string — must include esp-radio/{mcu}, esp-storage/{mcu},
         // and esp-backtrace/{mcu} to satisfy build scripts pulled in transitively by board-esp's hardware feature.
@@ -603,13 +592,7 @@ impl TargetBuilder for Builder {
         let esp_hw = Self::get_esp_config(config);
         let mcu = &esp_hw.mcu;
 
-        let target_arch = match mcu.as_str() {
-            "esp32"   => "xtensa-esp32-none-elf",
-            "esp32s3" => "xtensa-esp32s3-none-elf",
-            "esp32c3" => "riscv32imc-unknown-none-elf",
-            "esp32c6" => "riscv32imac-unknown-none-elf",
-            _ => unreachable!(),
-        };
+        let target_arch = mcu_to_target_arch(mcu);
 
         println!("⚙️  Compiling on-hardware tests for {} ({})...", mcu, target_arch);
 

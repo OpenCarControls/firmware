@@ -15,7 +15,7 @@ bytes = { workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true }
-toml = "1.1.0"
+toml = { workspace = true }
 
 [dev-dependencies]
 critical-section = { workspace = true }

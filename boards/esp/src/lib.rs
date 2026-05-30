@@ -1,3 +1,11 @@
+//! Board support crate for the ESP32 family.
+//!
+//! Wires the `core-interface` task set to ESP32-specific hardware drivers: BLE
+//! (trouble-host), WiFi/MQTT (esp-radio + embassy-net), and CAN buses (TWAI and/or
+//! MCP2515). The public API is kept minimal: [`start`] spawns the core protocol
+//! tasks, and hardware-init functions are re-exported for use by the generated
+//! `main.rs` entry point produced by `xtask`.
+
 #![cfg_attr(not(test), no_std)]
 #[cfg(not(test))]
 extern crate alloc;
@@ -23,17 +31,17 @@ use core_interface::SYSTEM_COMMAND_CHANNEL;
 
 #[cfg(feature = "hardware")]
 fn pairing_window_open_or_warn(op_name: &str) -> bool {
-    if core_interface::is_pairing_window_open() {
-        true
-    } else {
-        log::warn!(
-            "SYSTEM: {} denied, pairing window is closed",
-            op_name
-        );
-        false
+    let open = core_interface::is_pairing_window_open();
+    if !open {
+        log::warn!("SYSTEM: {} denied, pairing window is closed", op_name);
     }
+    open
 }
 
+/// Spawns all `core-interface` protocol tasks on the provided Embassy executor.
+/// Called once from the generated `main.rs` entry point running on Core 0.
+/// Hardware-specific tasks (BLE transport, CAN loops, MQTT driver) are spawned
+/// separately by `main.rs` after hardware peripherals have been initialised.
 #[cfg(feature = "hardware")]
 pub fn start(spawner: &embassy_executor::Spawner) {
     spawner.spawn(core_interface::process_ble_commands_task().unwrap());
@@ -93,9 +101,9 @@ pub async fn system_command_task() {
                     req.device_id.len(),
                 );
             }
-            Some(core_interface::proto::system_command::Action::SetCanDebugEnabled(_)) => {}
-            Some(core_interface::proto::system_command::Action::UpdateCanDebugFilters(_)) => {}
-            None => {}
+            Some(core_interface::proto::system_command::Action::SetCanDebugEnabled(_))
+            | Some(core_interface::proto::system_command::Action::UpdateCanDebugFilters(_))
+            | None => {}
         }
     }
 }

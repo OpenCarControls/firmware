@@ -1,3 +1,12 @@
+//! WiFi stack initialisation and MQTT driver for the ESP32 board.
+//!
+//! `init_wifi` brings up the ESP radio WiFi peripheral and creates the `embassy-net` stack,
+//! spawning an internal connection-management task that reconnects automatically.
+//!
+//! `mqtt_driver_task` connects to the MQTT broker over TCP, subscribes to the command
+//! topic, and bridges the `MQTT_RX_CHANNEL` / `MQTT_TX_CHANNEL` channel pair.
+//! It reconnects from scratch on any session failure.
+
 #[cfg(feature = "hardware")]
 use alloc::string::String;
 #[cfg(feature = "hardware")]
@@ -24,6 +33,7 @@ use rust_mqtt::{
     types::{MqttBinary, MqttString, TopicFilter, TopicName},
 };
 
+// 1 socket for the MQTT TCP connection + 2 for smoltcp internals (DHCP, ARP).
 #[cfg(feature = "hardware")]
 const NET_RESOURCES_SOCKETS: usize = 3;
 
@@ -65,13 +75,12 @@ async fn wifi_connection_task(
                 log::info!("WiFi: connected");
                 let _ = controller.wait_for_disconnect_async().await;
                 log::warn!("WiFi: disconnected, reconnecting in 5s");
-                Timer::after(Duration::from_millis(5_000)).await;
             }
             Err(e) => {
                 log::warn!("WiFi: connect failed: {:?}, retrying in 5s", e);
-                Timer::after(Duration::from_millis(5_000)).await;
             }
         }
+        Timer::after(Duration::from_millis(5_000)).await;
     }
 }
 
@@ -95,6 +104,8 @@ pub fn init_wifi(
             .expect("WiFi init failed");
 
     let net_config = embassy_net::Config::dhcpv4(Default::default());
+    // A fixed seed is acceptable here; embassy-net uses it only for its internal
+    // PRNG (TCP ephemeral port selection, etc.) — not for cryptographic purposes.
     let seed: u64 = 0xDEAD_BEEF_CAFE_F00D;
     let (stack, runner) = embassy_net::new(
         interfaces.station,

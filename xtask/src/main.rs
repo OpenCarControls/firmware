@@ -123,6 +123,74 @@ pub fn ws_dep_version(workspace_deps: &toml::Value, name: &str) -> String {
     }
 }
 
+/// Reads `contracts/opencar/cars/<platform>/v1/meta.toml` and returns `(platform_id, can_bus_count)`.
+/// `platform` is the hyphenated name from `config.toml` (e.g. `"virtual-car"`).
+pub fn load_platform_meta(platform: &str) -> (u32, usize) {
+    #[derive(Deserialize)]
+    struct PlatformMeta {
+        platform_id: String,
+        can_bus_count: usize,
+    }
+    let platform_underscore = platform.replace('-', "_");
+    let meta_path = format!("contracts/opencar/cars/{}/v1/meta.toml", platform_underscore);
+    let meta_str = fs::read_to_string(&meta_path)
+        .unwrap_or_else(|_| panic!("❌ Could not read platform meta: {}", meta_path));
+    let meta: PlatformMeta =
+        toml::from_str(&meta_str).expect("❌ Invalid platform meta.toml format");
+    let hex = meta.platform_id.trim_start_matches("0x").trim_start_matches("0X");
+    let platform_id =
+        u32::from_str_radix(hex, 16).expect("❌ Invalid platform_id hex in meta.toml");
+    (platform_id, meta.can_bus_count)
+}
+
+/// Reads `cars/<platform>/Cargo.toml` and returns `(crate_name, crate_ident)`.
+/// `crate_ident` has hyphens replaced by underscores so it is valid in generated Rust code.
+pub fn load_vehicle_crate_info(platform: &str) -> (String, String) {
+    let path = format!("cars/{}/Cargo.toml", platform);
+    let cargo_str = fs::read_to_string(&path)
+        .unwrap_or_else(|_| panic!("❌ Could not read vehicle Cargo.toml: {}", path));
+    let cargo: toml::Value = toml::from_str(&cargo_str).expect("❌ Invalid vehicle Cargo.toml");
+    let name = cargo["package"]["name"]
+        .as_str()
+        .expect("❌ Missing [package.name] in vehicle Cargo.toml")
+        .to_string();
+    let ident = name.replace('-', "_");
+    (name, ident)
+}
+
+/// Generates `include_bytes!` constants for mTLS certs when `auth_mode = "mtls"`,
+/// or an empty string for other auth modes.
+/// The paths are relative to the generated `.app_build/src/main.rs` (hence `../../`).
+pub fn generate_mtls_certs(config: &Config) -> String {
+    if config.network.mqtt.auth_mode != "mtls" {
+        return String::new();
+    }
+    let ca = config
+        .network
+        .mqtt
+        .ca_cert_file
+        .as_ref()
+        .expect("❌ [network.mqtt].ca_cert_file is required when auth_mode = \"mtls\"");
+    let cert = config
+        .network
+        .mqtt
+        .client_cert_file
+        .as_ref()
+        .expect("❌ [network.mqtt].client_cert_file is required when auth_mode = \"mtls\"");
+    let key = config
+        .network
+        .mqtt
+        .client_key_file
+        .as_ref()
+        .expect("❌ [network.mqtt].client_key_file is required when auth_mode = \"mtls\"");
+    format!(
+        "const CA_CERT: &[u8] = include_bytes!(\"../../{}\");\n\
+         const CLIENT_CERT: &[u8] = include_bytes!(\"../../{}\");\n\
+         const CLIENT_KEY: &[u8] = include_bytes!(\"../../{}\");",
+        ca, cert, key
+    )
+}
+
 /// Strips the scheme from a broker URL and returns `(host, port)` as strings.
 /// Falls back to port 1883 for `mqtt://` and 8883 for `mqtts://`.
 pub fn parse_broker_url(url: &str) -> (String, u16) {
@@ -384,22 +452,7 @@ fn main() {
 
 fn run_host_tests(config: &Config) {
     // Discover the configured vehicle crate name
-    let vehicle_cargo_path = format!(
-        "cars/{}/Cargo.toml",
-        config.target.platform
-    );
-    let vehicle_cargo_str = fs::read_to_string(&vehicle_cargo_path).unwrap_or_else(|_| {
-        panic!(
-            "❌ Could not read vehicle Cargo.toml: {}",
-            vehicle_cargo_path
-        )
-    });
-    let vehicle_cargo: toml::Value =
-        toml::from_str(&vehicle_cargo_str).expect("❌ Invalid vehicle Cargo.toml");
-    let vehicle_crate = vehicle_cargo["package"]["name"]
-        .as_str()
-        .expect("❌ Missing [package.name] in vehicle Cargo.toml")
-        .to_string();
+    let (vehicle_crate, _) = load_vehicle_crate_info(&config.target.platform);
 
     let packages = [
         "core-interface",
