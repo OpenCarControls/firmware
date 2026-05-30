@@ -146,7 +146,7 @@ jobs:
         uses: esp-rs/xtensa-toolchain@v1.6.0
         with:
           default: true
-          buildtargets: esp32
+          buildtargets: esp32s3
           ldproxy: true
         
       - uses: Swatinem/rust-cache@v2
