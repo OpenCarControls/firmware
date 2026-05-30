@@ -5,8 +5,6 @@ mod transport;
 #[cfg(feature = "hardware")]
 pub use lifecycle::ble_lifecycle_task;
 #[cfg(feature = "hardware")]
-pub(crate) use store::persist_paired_phones_to_store;
-#[cfg(feature = "hardware")]
 pub use transport::ble_transport_task;
 
 #[cfg(test)]

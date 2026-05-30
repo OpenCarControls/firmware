@@ -28,10 +28,13 @@ hardware = [
     "dep:nb",
     "dep:prost",
     "dep:rust-mqtt",
-    "dep:smoltcp",
     "dep:static_cell",
     "dep:bt-hci",
     "dep:trouble-host",
+    "dep:sequential-storage",
+    "dep:embassy-embedded-hal",
+    "dep:embedded-storage-async",
+    "dep:rand_core",
 ]
 
 # Development features — enable hardware + a specific chip for rust-analyzer IDE support.
@@ -83,7 +86,7 @@ embedded-io-async = { workspace = true, optional = true }
 embedded-storage = { version = "0.3.1", optional = true }
 esp-hal = { workspace = true, features = ["unstable"], optional = true }
 esp-println = { workspace = true, features = ["log-04"], optional = true }
-esp-radio = { workspace = true, features = ["wifi", "ble", "smoltcp", "unstable"], optional = true }
+esp-radio = { workspace = true, features = ["wifi", "ble", "unstable"], optional = true }
 esp-rtos = { workspace = true, features = ["embassy", "esp-radio", "esp-alloc"], optional = true }
 esp-storage = { workspace = true, features = ["critical-section"], optional = true }
 heapless = { version = "0.9.2", optional = true }
@@ -92,10 +95,13 @@ mcp2515 = { version = "0.3.0", optional = true }
 nb = { version = "1.1.0", optional = true }
 prost = { workspace = true, optional = true }
 rust-mqtt = { workspace = true, optional = true }
-smoltcp = { version = "0.12.0", default-features = false, features = ["socket-tcp", "proto-ipv4"], optional = true }
 static_cell = { workspace = true, optional = true }
-bt-hci = { version = "0.6", features = ["uuid"], optional = true }
-trouble-host = { version = "0.5.0", features = ["derive", "peripheral", "gatt", "security", "default-packet-pool-mtu-255"], optional = true }
+bt-hci = { version = "0.8.1", default-features = false, optional = true }
+trouble-host = { version = "0.6.0", features = ["derive", "security", "default-packet-pool-mtu-255"], optional = true }
+sequential-storage = { version = "4", optional = true }
+embassy-embedded-hal = { version = "0.6.0", optional = true }
+embedded-storage-async = { version = "0.4", optional = true }
+rand_core = { version = "0.6", default-features = false, optional = true }
 
 [dev-dependencies]
 prost = { workspace = true }

@@ -8,9 +8,9 @@ use core_interface::{MQTT_RX_CHANNEL, MQTT_TX_CHANNEL, proto};
 #[cfg(feature = "hardware")]
 use embassy_net::{Runner, Stack, StackResources, tcp::TcpSocket};
 #[cfg(feature = "hardware")]
-use esp_radio::wifi::{ClientConfig, ModeConfig, WifiController, WifiDevice, WifiEvent};
+use esp_radio::wifi::{Config as WifiModeConfig, ControllerConfig as WifiControllerConfig, WifiController, Interface as WifiInterface};
 #[cfg(feature = "hardware")]
-use esp_radio::Controller as RadioController;
+use esp_radio::wifi::sta::StationConfig;
 #[cfg(feature = "hardware")]
 use prost::Message as _;
 #[cfg(feature = "hardware")]
@@ -32,23 +32,9 @@ const NET_RESOURCES_SOCKETS: usize = 3;
 pub type WifiStack = Stack<'static>;
 
 #[cfg(feature = "hardware")]
-/// Shared radio controller used by WiFi and BLE HCI connector.
-pub type SharedRadioController = RadioController<'static>;
-
-#[cfg(feature = "hardware")]
-/// Initialises and returns the shared esp-radio controller used by BLE and WiFi.
-pub fn init_radio() -> &'static SharedRadioController {
-    use static_cell::StaticCell;
-
-    static RADIO_CTRL: StaticCell<esp_radio::Controller<'static>> = StaticCell::new();
-
-    RADIO_CTRL.init(esp_radio::init().expect("esp-radio init failed"))
-}
-
-#[cfg(feature = "hardware")]
 /// Internal task: drives the smoltcp network stack.
 #[embassy_executor::task]
-async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
+async fn net_task(mut runner: Runner<'static, WifiInterface<'static>>) {
     runner.run().await;
 }
 
@@ -63,22 +49,21 @@ async fn wifi_connection_task(
     use embassy_time::{Duration, Timer};
 
     controller
-        .set_config(&ModeConfig::Client(
-            ClientConfig::default()
+        .set_config(&WifiModeConfig::Station(
+            StationConfig::default()
                 .with_ssid(String::from(ssid))
-                .with_password(String::from(password)),
+                .with_password(String::from(password).into()),
         ))
         .unwrap();
 
-    controller.start_async().await.unwrap();
     log::info!("WiFi: started");
 
     loop {
         log::info!("WiFi: connecting to '{}'", ssid);
         match controller.connect_async().await {
-            Ok(()) => {
+            Ok(_) => {
                 log::info!("WiFi: connected");
-                controller.wait_for_event(WifiEvent::StaDisconnected).await;
+                let _ = controller.wait_for_disconnect_async().await;
                 log::warn!("WiFi: disconnected, reconnecting in 5s");
                 Timer::after(Duration::from_millis(5_000)).await;
             }
@@ -95,7 +80,6 @@ async fn wifi_connection_task(
 /// spawns the network runner and connection tasks. Returns a reference to
 /// the stack that can be passed to `mqtt_driver_task`.
 pub fn init_wifi(
-    radio: &'static SharedRadioController,
     spawner: &embassy_executor::Spawner,
     wifi_peri: esp_hal::peripherals::WIFI<'static>,
     ssid: &'static str,
@@ -107,23 +91,21 @@ pub fn init_wifi(
     static STACK: StaticCell<WifiStack> = StaticCell::new();
 
     let (controller, interfaces) =
-        esp_radio::wifi::new(radio, wifi_peri, esp_radio::wifi::Config::default())
+        esp_radio::wifi::new(wifi_peri, WifiControllerConfig::default())
             .expect("WiFi init failed");
 
     let net_config = embassy_net::Config::dhcpv4(Default::default());
     let seed: u64 = 0xDEAD_BEEF_CAFE_F00D;
     let (stack, runner) = embassy_net::new(
-        interfaces.sta,
+        interfaces.station,
         net_config,
         RESOURCES.init(StackResources::new()),
         seed,
     );
     let stack_ref = STACK.init(stack);
 
-    spawner.spawn(net_task(runner)).unwrap();
-    spawner
-        .spawn(wifi_connection_task(controller, ssid, password))
-        .unwrap();
+    spawner.spawn(net_task(runner).unwrap());
+    spawner.spawn(wifi_connection_task(controller, ssid, password).unwrap());
 
     stack_ref
 }

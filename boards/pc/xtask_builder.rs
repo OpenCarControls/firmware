@@ -134,7 +134,7 @@ impl TargetBuilder for Builder {
         // Only the first `can_bus_count` buses are used by the vehicle; extras are ignored.
         let can_spawns: String = pc_hw.can_buses.iter().take(meta.can_bus_count).enumerate()
             .map(|(bus_id, bus)| format!(
-                "    spawner.spawn(board_pc::socket_can_task(\"{}\", {}, {}::CAN_FILTERS)).unwrap();\n",
+                "    spawner.spawn(board_pc::socket_can_task(\"{}\", {}, {}::CAN_FILTERS).unwrap());\n",
                 bus.interface, bus_id, vehicle_crate_ident
             ))
             .collect();
@@ -150,7 +150,7 @@ impl TargetBuilder for Builder {
             vehicle_crate_name, vehicle_platform
         ));
         let v = |name: &str| crate::ws_dep_version(&config.workspace_deps, name);
-        cargo_toml.push_str(&format!("embassy-executor = {{ version = \"{}\", features = [\"arch-std\", \"executor-thread\"] }}\n", v("embassy-executor")));
+        cargo_toml.push_str(&format!("embassy-executor = {{ version = \"{}\", features = [\"platform-std\", \"executor-thread\"] }}\n", v("embassy-executor")));
         cargo_toml.push_str(&format!("embassy-time = {{ version = \"{}\", features = [\"std\"] }}\n", v("embassy-time")));
         cargo_toml.push_str(&format!("critical-section = {{ version = \"{}\", features = [\"std\"] }}\n", v("critical-section")));
         cargo_toml.push_str("env_logger = \"0.11\"\n");
@@ -233,8 +233,7 @@ impl TargetBuilder for Builder {
         );
 
         let ble_http_spawn = "    spawner\n\
-             .spawn(board_pc::ble_http_task(BLE_HTTP_PORT, BLE_DEVICE_NAME_BASE, BLE_PAIRING_WINDOW_S))\n\
-             .unwrap();\n"
+             .spawn(board_pc::ble_http_task(BLE_HTTP_PORT, BLE_DEVICE_NAME_BASE, BLE_PAIRING_WINDOW_S).unwrap());\n"
             .to_string();
 
         let mqtt_driver_spawn =
@@ -247,8 +246,7 @@ impl TargetBuilder for Builder {
              MQTT_DATA_TOPIC,\n\
              MQTT_USERNAME,\n\
              MQTT_PASSWORD,\n\
-             ))\n\
-             .unwrap();\n".to_string();
+             ).unwrap());\n".to_string();
 
         let template = fs::read_to_string("boards/pc/main.template.rs")
             .expect("\u{274c} Could not read boards/pc/main.template.rs");

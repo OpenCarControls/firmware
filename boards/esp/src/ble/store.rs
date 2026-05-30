@@ -1,458 +1,167 @@
 #[cfg(feature = "hardware")]
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use core::ops::Range;
 #[cfg(feature = "hardware")]
-use embassy_sync::mutex::Mutex;
+use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlash};
 #[cfg(feature = "hardware")]
-use embedded_storage::{ReadStorage, Storage};
-#[cfg(feature = "hardware")]
-use esp_hal::peripherals;
-#[cfg(feature = "hardware")]
-use esp_storage::FlashStorage;
-
-#[cfg(feature = "hardware")]
-const BLE_STORE_MAGIC: u32 = 0x4F43_424C; // "OCBL"
-#[cfg(feature = "hardware")]
-const BLE_STORE_VERSION: u8 = 1;
-#[cfg(feature = "hardware")]
-const BLE_STORE_MAX_PHONES: usize = 8;
-#[cfg(feature = "hardware")]
-const BLE_STORE_MAX_ID_LEN: usize = 32;
-#[cfg(feature = "hardware")]
-const BLE_STORE_FLASH_SECTORS: usize = 1;
-
-#[cfg(feature = "hardware")]
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct BleBondStore {
-    magic: u32,
-    version: u8,
-    count: u8,
-    reserved: [u8; 2],
-    lens: [u8; BLE_STORE_MAX_PHONES],
-    ids: [[u8; BLE_STORE_MAX_ID_LEN]; BLE_STORE_MAX_PHONES],
-    checksum: u32,
-}
-
-#[cfg(feature = "hardware")]
-impl BleBondStore {
-    const fn empty() -> Self {
-        Self {
-            magic: BLE_STORE_MAGIC,
-            version: BLE_STORE_VERSION,
-            count: 0,
-            reserved: [0; 2],
-            lens: [0; BLE_STORE_MAX_PHONES],
-            ids: [[0; BLE_STORE_MAX_ID_LEN]; BLE_STORE_MAX_PHONES],
-            checksum: 0,
-        }
-    }
-}
-
-#[cfg(feature = "hardware")]
-static BLE_BOND_STORE_LOCK: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
-#[cfg(feature = "hardware")]
-static BLE_FLASH_STORE: Mutex<CriticalSectionRawMutex, Option<FlashStorage<'static>>> =
-    Mutex::new(None);
-
-#[cfg(feature = "hardware")]
-fn ble_store_flash_offset(capacity: usize) -> u32 {
-    let reserve = (FlashStorage::SECTOR_SIZE as usize) * BLE_STORE_FLASH_SECTORS;
-    capacity.saturating_sub(reserve) as u32
-}
-
-#[cfg(feature = "hardware")]
-fn ble_store_write_bytes(store: &BleBondStore, out: &mut [u8]) {
-    let n = core::mem::size_of::<BleBondStore>();
-    if out.len() < n {
-        return;
-    }
-    let src = store as *const BleBondStore as *const u8;
-    // Safety: `store` is a valid repr(C) POD-like value and `out` has
-    // at least `size_of::<BleBondStore>()` bytes.
-    unsafe {
-        core::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n);
-    }
-}
-
-#[cfg(feature = "hardware")]
-fn ble_store_read_bytes(src: &[u8]) -> Option<BleBondStore> {
-    let n = core::mem::size_of::<BleBondStore>();
-    if src.len() < n {
-        return None;
-    }
-    if src[..n].iter().all(|b| *b == 0xFF) {
-        return None;
-    }
-    let mut out = core::mem::MaybeUninit::<BleBondStore>::uninit();
-    // Safety: destination is properly sized/aligned and source has at least n bytes.
-    unsafe {
-        core::ptr::copy_nonoverlapping(src.as_ptr(), out.as_mut_ptr() as *mut u8, n);
-        Some(out.assume_init())
-    }
-}
-
-#[cfg(feature = "hardware")]
-pub(super) async fn init_paired_phones_flash_store(flash_peri: peripherals::FLASH<'static>) {
-    let mut guard = BLE_FLASH_STORE.lock().await;
-    if guard.is_some() {
-        return;
-    }
-
-    let flash = FlashStorage::new(flash_peri);
-    #[cfg(target_arch = "xtensa")]
-    let flash = flash.multicore_auto_park();
-
-    *guard = Some(flash);
-}
-
-#[cfg(feature = "hardware")]
-fn ble_store_checksum(store: &BleBondStore) -> u32 {
-    let mut sum = store.magic
-        ^ ((store.version as u32) << 24)
-        ^ ((store.count as u32) << 16)
-        ^ ((store.reserved[0] as u32) << 8)
-        ^ (store.reserved[1] as u32);
-    for &len in &store.lens {
-        sum = sum.rotate_left(5) ^ (len as u32);
-    }
-    for row in &store.ids {
-        for &b in row {
-            sum = sum.rotate_left(5) ^ (b as u32);
-        }
-    }
-    sum
-}
-
-#[cfg(feature = "hardware")]
-fn ble_store_is_valid(store: &BleBondStore) -> bool {
-    if store.magic != BLE_STORE_MAGIC || store.version != BLE_STORE_VERSION {
-        return false;
-    }
-    if store.count as usize > BLE_STORE_MAX_PHONES {
-        return false;
-    }
-    for &len in store.lens.iter().take(store.count as usize) {
-        if len as usize > BLE_STORE_MAX_ID_LEN {
-            return false;
-        }
-    }
-    ble_store_checksum(store) == store.checksum
-}
-
-#[cfg(feature = "hardware")]
-pub(super) async fn restore_paired_phones_from_store() -> usize {
-    let _guard = BLE_BOND_STORE_LOCK.lock().await;
-    let mut flash_guard = BLE_FLASH_STORE.lock().await;
-    let Some(flash) = flash_guard.as_mut() else {
-        log::warn!("BLE store: flash store not initialized; skipping restore");
-        return 0;
-    };
-
-    let mut raw = [0xFFu8; core::mem::size_of::<BleBondStore>()];
-    let offset = ble_store_flash_offset(flash.capacity());
-    if let Err(e) = ReadStorage::read(flash, offset, &mut raw) {
-        log::warn!("BLE store: read failed at 0x{:x}: {:?}", offset, e);
-        return 0;
-    }
-
-    let Some(store) = ble_store_read_bytes(&raw) else {
-        return 0;
-    };
-    if !ble_store_is_valid(&store) {
-        log::warn!("BLE store: invalid on-flash payload, ignoring");
-        return 0;
-    }
-
-    let mut restored = 0usize;
-    for i in 0..(store.count as usize) {
-        let len = store.lens[i] as usize;
-        if len == 0 {
-            continue;
-        }
-        let id = &store.ids[i][..len];
-        if core_interface::add_paired_phone(id).await {
-            restored += 1;
-        }
-    }
-    restored
-}
-
-#[cfg(feature = "hardware")]
-pub(crate) async fn persist_paired_phones_to_store() {
-    let phones = core_interface::list_paired_phones().await;
-
-    let mut store = BleBondStore::empty();
-    let max = core::cmp::min(BLE_STORE_MAX_PHONES, phones.len());
-    store.count = max as u8;
-    for (i, id) in phones.iter().take(max).enumerate() {
-        let n = core::cmp::min(BLE_STORE_MAX_ID_LEN, id.len());
-        store.lens[i] = n as u8;
-        store.ids[i][..n].copy_from_slice(&id[..n]);
-    }
-    store.checksum = ble_store_checksum(&store);
-
-    let _guard = BLE_BOND_STORE_LOCK.lock().await;
-    let mut flash_guard = BLE_FLASH_STORE.lock().await;
-    let Some(flash) = flash_guard.as_mut() else {
-        log::warn!("BLE store: flash store not initialized; skipping persist");
-        return;
-    };
-
-    let offset = ble_store_flash_offset(flash.capacity());
-    let mut raw = [0u8; core::mem::size_of::<BleBondStore>()];
-    ble_store_write_bytes(&store, &mut raw);
-    if let Err(e) = Storage::write(flash, offset, &raw) {
-        log::warn!("BLE store: write failed at 0x{:x}: {:?}", offset, e);
-    }
-}
-
-// ── BLE Security Store (LTK / BondInformation persistence) ───────────────────
-
-#[cfg(feature = "hardware")]
-use trouble_host::{BondInformation, IdentityResolvingKey, LongTermKey};
+use sequential_storage::{
+    cache::NoCache,
+    map::{SerializationError, Value, fetch_all_items, remove_item, store_item},
+};
 #[cfg(feature = "hardware")]
 use trouble_host::connection::SecurityLevel;
+#[cfg(feature = "hardware")]
+use trouble_host::prelude::{BdAddr, BondInformation, Identity, IdentityResolvingKey, LongTermKey};
 
-/// Magic bytes for the security store sector: "OCSL"
+/// Wraps a flash NorFlash storage backend and a flash range, and provides
+/// async load / store / remove operations for `BondInformation` records.
+/// Each bond is keyed by the peer's 6-byte Bluetooth device address.
 #[cfg(feature = "hardware")]
-const BLE_SECURITY_STORE_MAGIC: u32 = 0x4F43_534C;
-#[cfg(feature = "hardware")]
-const BLE_SECURITY_STORE_VERSION: u8 = 1;
-/// Up to 10 bonds (matches `trouble-host`'s BI_COUNT).
-#[cfg(feature = "hardware")]
-const BLE_SECURITY_STORE_MAX: usize = 10;
-/// Serialised size of one BondInformation entry (bytes):
-///   bd_addr[6] + has_irk[1] + irk[16] + ltk[16] + is_bonded[1] + security_level[1] = 41
-#[cfg(feature = "hardware")]
-const BLE_SECURITY_ENTRY_SIZE: usize = 41;
-#[cfg(feature = "hardware")]
-const BLE_SECURITY_STORE_SECTORS: usize = 1;
-
-#[cfg(feature = "hardware")]
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct BleSecurityStore {
-    magic: u32,
-    version: u8,
-    count: u8,
-    // 4 bytes reserved so the struct size stays a multiple of 4, which is
-    // required by esp-storage's SPI flash write (uses ESP ROM word-aligned writes).
-    reserved: [u8; 4],
-    entries: [[u8; BLE_SECURITY_ENTRY_SIZE]; BLE_SECURITY_STORE_MAX],
-    checksum: u32,
+pub(super) struct BondStore<'a, S: NorFlash + MultiwriteNorFlash> {
+    storage: &'a mut S,
+    range: Range<u32>,
 }
 
-#[cfg(feature = "hardware")]
-impl BleSecurityStore {
-    const fn empty() -> Self {
-        Self {
-            magic: BLE_SECURITY_STORE_MAGIC,
-            version: BLE_SECURITY_STORE_VERSION,
-            count: 0,
-            reserved: [0; 4],
-            entries: [[0u8; BLE_SECURITY_ENTRY_SIZE]; BLE_SECURITY_STORE_MAX],
-            checksum: 0,
-        }
-    }
-}
-
-/// The security store lives one sector before the phone-ID store at flash end.
-#[cfg(feature = "hardware")]
-fn ble_security_store_flash_offset(capacity: usize) -> u32 {
-    let sector_size = FlashStorage::SECTOR_SIZE as usize;
-    let reserve = sector_size * (BLE_STORE_FLASH_SECTORS + BLE_SECURITY_STORE_SECTORS);
-    capacity.saturating_sub(reserve) as u32
-}
-
-#[cfg(feature = "hardware")]
-fn ble_security_store_checksum(store: &BleSecurityStore) -> u32 {
-    let mut sum = store.magic
-        ^ ((store.version as u32) << 24)
-        ^ ((store.count as u32) << 16)
-        ^ ((store.reserved[0] as u32) << 8)
-        ^ (store.reserved[1] as u32);
-    for entry in &store.entries {
-        for &b in entry {
-            sum = sum.rotate_left(5) ^ (b as u32);
-        }
-    }
-    sum
-}
-
-#[cfg(feature = "hardware")]
-fn ble_security_store_is_valid(store: &BleSecurityStore) -> bool {
-    if store.magic != BLE_SECURITY_STORE_MAGIC || store.version != BLE_SECURITY_STORE_VERSION {
-        return false;
-    }
-    if store.count as usize > BLE_SECURITY_STORE_MAX {
-        return false;
-    }
-    ble_security_store_checksum(store) == store.checksum
-}
-
-#[cfg(feature = "hardware")]
-fn ble_security_store_write_bytes(store: &BleSecurityStore, out: &mut [u8]) {
-    let n = core::mem::size_of::<BleSecurityStore>();
-    if out.len() < n {
-        return;
-    }
-    let src = store as *const BleSecurityStore as *const u8;
-    // Safety: `store` is a valid repr(C) value; `out` is at least `n` bytes.
-    unsafe {
-        core::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n);
-    }
-}
-
-#[cfg(feature = "hardware")]
-fn ble_security_store_read_bytes(src: &[u8]) -> Option<BleSecurityStore> {
-    let n = core::mem::size_of::<BleSecurityStore>();
-    if src.len() < n {
-        return None;
-    }
-    if src[..n].iter().all(|b| *b == 0xFF) {
-        return None;
-    }
-    let mut out = core::mem::MaybeUninit::<BleSecurityStore>::uninit();
-    // Safety: destination is properly sized/aligned; source has at least n bytes.
-    unsafe {
-        core::ptr::copy_nonoverlapping(src.as_ptr(), out.as_mut_ptr() as *mut u8, n);
-        Some(out.assume_init())
-    }
-}
-
-/// Encode `SecurityLevel` as a single byte.
-#[cfg(feature = "hardware")]
-fn security_level_to_u8(sl: SecurityLevel) -> u8 {
-    match sl {
-        SecurityLevel::NoEncryption => 0,
-        SecurityLevel::Encrypted => 1,
-        SecurityLevel::EncryptedAuthenticated => 2,
-    }
-}
-
-/// Decode a single byte back into `SecurityLevel`.
-#[cfg(feature = "hardware")]
-fn u8_to_security_level(v: u8) -> SecurityLevel {
-    match v {
-        2 => SecurityLevel::EncryptedAuthenticated,
-        _ => SecurityLevel::Encrypted,
-    }
-}
-
-/// Serialise one `BondInformation` into a 41-byte array.
+/// `BondInformation` wrapper that implements `sequential_storage::map::Value`
+/// so it can be written/read directly to/from flash.
 ///
-/// Layout:
-///   [0..6]   bd_addr (little-endian raw bytes)
-///   [6]      has_irk flag (0 or 1)
-///   [7..23]  IRK as little-endian u128 (zeros if no IRK)
-///   [23..39] LTK as little-endian u128
-///   [39]     is_bonded flag (0 or 1)
-///   [40]     SecurityLevel byte
+/// Byte layout (41 bytes total):
+/// - [ 0..16] Long Term Key (LTK), little-endian u128
+/// - [16..22] Bluetooth Device Address (6 bytes)
+/// - [22]     IRK present flag (1 = yes, 0 = no)
+/// - [23..39] Identity Resolving Key (IRK), little-endian u128
+/// - [39]     is_bonded flag (1 = yes)
+/// - [40]     SecurityLevel variant (0=NoEncryption, 1=Encrypted, 2=EncryptedAuthenticated)
 #[cfg(feature = "hardware")]
-fn bond_to_bytes(bond: &BondInformation) -> [u8; BLE_SECURITY_ENTRY_SIZE] {
-    let mut entry = [0u8; BLE_SECURITY_ENTRY_SIZE];
-    entry[0..6].copy_from_slice(bond.identity.bd_addr.raw());
-    if let Some(irk) = bond.identity.irk {
-        entry[6] = 1;
-        entry[7..23].copy_from_slice(&irk.0.to_le_bytes());
-    }
-    entry[23..39].copy_from_slice(&bond.ltk.to_le_bytes());
-    entry[39] = bond.is_bonded as u8;
-    entry[40] = security_level_to_u8(bond.security_level);
-    entry
-}
+pub(super) struct StoredBond(pub BondInformation);
 
-/// Deserialise a 41-byte entry back into a `BondInformation`.
-/// Returns `None` if the entry is all-zero (empty slot).
 #[cfg(feature = "hardware")]
-fn bytes_to_bond(entry: &[u8; BLE_SECURITY_ENTRY_SIZE]) -> Option<BondInformation> {
-    if entry.iter().all(|&b| b == 0) {
-        return None;
-    }
-    use trouble_host::prelude::BdAddr;
-    let mut addr_bytes = [0u8; 6];
-    addr_bytes.copy_from_slice(&entry[0..6]);
-    let bd_addr = BdAddr::new(addr_bytes);
-
-    let irk = if entry[6] != 0 {
-        let mut irk_bytes = [0u8; 16];
-        irk_bytes.copy_from_slice(&entry[7..23]);
-        Some(IdentityResolvingKey(u128::from_le_bytes(irk_bytes)))
-    } else {
-        None
-    };
-
-    let mut ltk_bytes = [0u8; 16];
-    ltk_bytes.copy_from_slice(&entry[23..39]);
-    let ltk = LongTermKey::from_le_bytes(ltk_bytes);
-
-    let is_bonded = entry[39] != 0;
-    let security_level = u8_to_security_level(entry[40]);
-
-    Some(BondInformation {
-        identity: trouble_host::Identity { bd_addr, irk },
-        ltk,
-        is_bonded,
-        security_level,
-    })
-}
-
-/// Persist all current bonds to the security store sector.
-#[cfg(feature = "hardware")]
-pub(super) async fn persist_security_store(bonds: &[BondInformation]) {
-    let mut store = BleSecurityStore::empty();
-    let count = core::cmp::min(BLE_SECURITY_STORE_MAX, bonds.len());
-    store.count = count as u8;
-    for (i, bond) in bonds.iter().take(count).enumerate() {
-        store.entries[i] = bond_to_bytes(bond);
-    }
-    store.checksum = ble_security_store_checksum(&store);
-
-    let _guard = BLE_BOND_STORE_LOCK.lock().await;
-    let mut flash_guard = BLE_FLASH_STORE.lock().await;
-    let Some(flash) = flash_guard.as_mut() else {
-        log::warn!("BLE security store: flash not initialized; skipping persist");
-        return;
-    };
-
-    let offset = ble_security_store_flash_offset(flash.capacity());
-    let mut raw = [0u8; core::mem::size_of::<BleSecurityStore>()];
-    ble_security_store_write_bytes(&store, &mut raw);
-    if let Err(e) = Storage::write(flash, offset, &raw) {
-        log::warn!("BLE security store: write failed at 0x{:x}: {:?}", offset, e);
-    }
-}
-
-/// Restore bonds from the security store sector.
-#[cfg(feature = "hardware")]
-pub(super) async fn restore_security_store() -> heapless::Vec<BondInformation, BLE_SECURITY_STORE_MAX> {
-    let _guard = BLE_BOND_STORE_LOCK.lock().await;
-    let mut flash_guard = BLE_FLASH_STORE.lock().await;
-    let Some(flash) = flash_guard.as_mut() else {
-        log::warn!("BLE security store: flash not initialized; skipping restore");
-        return heapless::Vec::new();
-    };
-
-    let mut raw = [0xFFu8; core::mem::size_of::<BleSecurityStore>()];
-    let offset = ble_security_store_flash_offset(flash.capacity());
-    if let Err(e) = ReadStorage::read(flash, offset, &mut raw) {
-        log::warn!("BLE security store: read failed at 0x{:x}: {:?}", offset, e);
-        return heapless::Vec::new();
-    }
-
-    let Some(store) = ble_security_store_read_bytes(&raw) else {
-        return heapless::Vec::new();
-    };
-    if !ble_security_store_is_valid(&store) {
-        log::warn!("BLE security store: invalid payload, ignoring");
-        return heapless::Vec::new();
-    }
-
-    let mut out = heapless::Vec::new();
-    for i in 0..(store.count as usize) {
-        if let Some(bond) = bytes_to_bond(&store.entries[i]) {
-            let _ = out.push(bond);
+impl<'a> Value<'a> for StoredBond {
+    fn serialize_into(&self, buffer: &mut [u8]) -> Result<usize, SerializationError> {
+        if buffer.len() < 41 {
+            return Err(SerializationError::BufferTooSmall);
         }
+        let bond = &self.0;
+        buffer[0..16].copy_from_slice(&bond.ltk.0.to_le_bytes());
+        buffer[16..22].copy_from_slice(&bond.identity.bd_addr.0);
+        if let Some(irk) = bond.identity.irk {
+            buffer[22] = 1;
+            buffer[23..39].copy_from_slice(&irk.0.to_le_bytes());
+        } else {
+            buffer[22] = 0;
+            buffer[23..39].fill(0);
+        }
+        buffer[39] = if bond.is_bonded { 1 } else { 0 };
+        buffer[40] = match bond.security_level {
+            SecurityLevel::NoEncryption => 0,
+            SecurityLevel::Encrypted => 1,
+            SecurityLevel::EncryptedAuthenticated => 2,
+        };
+        Ok(41)
     }
-    out
+
+    fn deserialize_from(buffer: &'a [u8]) -> Result<Self, SerializationError> {
+        if buffer.len() < 41 {
+            return Err(SerializationError::BufferTooSmall);
+        }
+        let ltk = LongTermKey::new(u128::from_le_bytes(buffer[0..16].try_into().unwrap()));
+        let mut bd_addr_bytes = [0u8; 6];
+        bd_addr_bytes.copy_from_slice(&buffer[16..22]);
+        let bd_addr = BdAddr::new(bd_addr_bytes);
+        let irk = if buffer[22] == 1 {
+            Some(IdentityResolvingKey::new(u128::from_le_bytes(
+                buffer[23..39].try_into().unwrap(),
+            )))
+        } else {
+            None
+        };
+        Ok(StoredBond(BondInformation {
+            ltk,
+            identity: Identity { bd_addr, irk },
+            is_bonded: buffer[39] != 0,
+            security_level: match buffer[40] {
+                0 => SecurityLevel::NoEncryption,
+                1 => SecurityLevel::Encrypted,
+                _ => SecurityLevel::EncryptedAuthenticated,
+            },
+        }))
+    }
+}
+
+#[cfg(feature = "hardware")]
+impl<'a, S: NorFlash + MultiwriteNorFlash> BondStore<'a, S> {
+    pub(super) fn new(storage: &'a mut S, range: Range<u32>) -> Self {
+        Self { storage, range }
+    }
+
+    /// Load all stored bonds from flash. Returns an empty vec on any flash error.
+    pub(super) async fn load_bonds(&mut self) -> heapless::Vec<BondInformation, 8> {
+        let mut bonds = heapless::Vec::new();
+        let mut data_buffer = [0u8; 128];
+        let mut cache = NoCache::new();
+
+        match fetch_all_items::<[u8; 6], _, _>(
+            self.storage,
+            self.range.clone(),
+            &mut cache,
+            &mut data_buffer,
+        )
+        .await
+        {
+            Ok(mut iter) => {
+                while let Ok(Some((_key, bond))) =
+                    iter.next::<[u8; 6], StoredBond>(&mut data_buffer).await
+                {
+                    if bonds.push(bond.0).is_err() {
+                        log::warn!("BLE store: too many bonds; ignoring the rest");
+                        break;
+                    }
+                }
+            }
+            Err(_) => {
+                log::warn!("BLE store: load_bonds failed (erased or corrupt) — starting fresh");
+            }
+        }
+
+        log::info!("BLE store: loaded {} bond(s)", bonds.len());
+        bonds
+    }
+
+    /// Persist a bond to flash (overwrites any existing entry with the same address).
+    pub(super) async fn store_bond(&mut self, bond: &BondInformation) -> Result<(), ()> {
+        let mut key = [0u8; 6];
+        key.copy_from_slice(&bond.identity.bd_addr.0);
+        let mut data_buffer = [0u8; 128];
+
+        store_item(
+            self.storage,
+            self.range.clone(),
+            &mut NoCache::new(),
+            &mut data_buffer,
+            &key,
+            &StoredBond(bond.clone()),
+        )
+        .await
+        .map_err(|e| {
+            log::error!("BLE store: store_bond failed: {:?}", e);
+        })
+    }
+
+    /// Remove the bond for `peer_addr` from flash (no-op if not found).
+    pub(super) async fn remove_bond(&mut self, peer_addr: &BdAddr) -> Result<(), ()> {
+        let mut key = [0u8; 6];
+        key.copy_from_slice(&peer_addr.0);
+        let mut data_buffer = [0u8; 128];
+
+        remove_item(
+            self.storage,
+            self.range.clone(),
+            &mut NoCache::new(),
+            &mut data_buffer,
+            &key,
+        )
+        .await
+        .map_err(|e| {
+            log::error!("BLE store: remove_bond failed: {:?}", e);
+        })
+    }
 }

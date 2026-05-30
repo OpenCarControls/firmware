@@ -7,7 +7,6 @@ use esp_backtrace as _;
 use embassy_executor::Spawner;
 use esp_hal::{
     clock::CpuClock,
-    interrupt::software::SoftwareInterruptControl,
     timer::timg::TimerGroup,
 };
 use static_cell::StaticCell;
@@ -30,8 +29,7 @@ async fn main(spawner: Spawner) -> ! {
     let peripherals = esp_hal::init(config);
     let timg0 = TimerGroup::new(peripherals.TIMG0);
 
-    let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0);
+    esp_rtos::start(timg0.timer0, unsafe { esp_hal::interrupt::software::SoftwareInterrupt::<0>::steal() });
 
     core_interface::init(PLATFORM_ID);
 
@@ -45,8 +43,7 @@ async fn main(spawner: Spawner) -> ! {
 
     esp_rtos::start_second_core(
         peripherals.CPU_CTRL,
-        sw_int.software_interrupt0,
-        sw_int.software_interrupt1,
+        unsafe { esp_hal::interrupt::software::SoftwareInterrupt::<1>::steal() },
         unsafe { &mut *&raw mut CORE1_STACK },
         move || {
             CORE1_EXECUTOR.init(esp_rtos::embassy::Executor::new()).run(|s: embassy_executor::Spawner| {
@@ -64,12 +61,11 @@ async fn main(spawner: Spawner) -> ! {
             BLE_PAIRING_WINDOW_S,
             BLE_MAX_BONDED_PHONES,
             BLE_CONTROLLER_LEASE_TTL_S,
-        ))
-        .unwrap();
-{MQTT_DRIVER_SPAWN}    spawner.spawn({VEHICLE_CRATE_IDENT}::handle_basic_commands_task()).unwrap();
-    spawner.spawn({VEHICLE_CRATE_IDENT}::handle_advanced_commands_task()).unwrap();
-    spawner.spawn({VEHICLE_CRATE_IDENT}::state_update_task()).unwrap();
-    spawner.spawn({VEHICLE_CRATE_IDENT}::can_rx_task()).unwrap();
+        ).unwrap());
+{MQTT_DRIVER_SPAWN}    spawner.spawn({VEHICLE_CRATE_IDENT}::handle_basic_commands_task().unwrap());
+    spawner.spawn({VEHICLE_CRATE_IDENT}::handle_advanced_commands_task().unwrap());
+    spawner.spawn({VEHICLE_CRATE_IDENT}::state_update_task().unwrap());
+    spawner.spawn({VEHICLE_CRATE_IDENT}::can_rx_task().unwrap());
 
     loop {
         embassy_time::Timer::after(embassy_time::Duration::from_secs(1)).await;

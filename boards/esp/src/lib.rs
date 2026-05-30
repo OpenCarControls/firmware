@@ -16,7 +16,7 @@ pub use can::{
 };
 
 #[cfg(feature = "hardware")]
-pub use network::{SharedRadioController, WifiStack, init_radio, init_wifi, mqtt_driver_task};
+pub use network::{WifiStack, init_wifi, mqtt_driver_task};
 
 #[cfg(feature = "hardware")]
 use core_interface::SYSTEM_COMMAND_CHANNEL;
@@ -35,33 +35,13 @@ fn pairing_window_open_or_warn(op_name: &str) -> bool {
 }
 
 #[cfg(feature = "hardware")]
-async fn persist_pairs_if(changed: bool) {
-    // TODO: This should be with BLE, not in the general board lib.
-    if changed {
-        ble::persist_paired_phones_to_store().await;
-    }
-}
-
-#[cfg(feature = "hardware")]
 pub fn start(spawner: &embassy_executor::Spawner) {
-    spawner
-        .spawn(core_interface::process_ble_commands_task())
-        .unwrap();
-    spawner
-        .spawn(core_interface::process_mqtt_commands_task())
-        .unwrap();
-    spawner
-        .spawn(core_interface::route_responses_task())
-        .unwrap();
-    spawner
-        .spawn(core_interface::publish_state_task())
-        .unwrap();
-    spawner
-        .spawn(core_interface::publish_can_debug_task())
-        .unwrap();
-    spawner
-        .spawn(system_command_task())
-        .unwrap();
+    spawner.spawn(core_interface::process_ble_commands_task().unwrap());
+    spawner.spawn(core_interface::process_mqtt_commands_task().unwrap());
+    spawner.spawn(core_interface::route_responses_task().unwrap());
+    spawner.spawn(core_interface::publish_state_task().unwrap());
+    spawner.spawn(core_interface::publish_can_debug_task().unwrap());
+    spawner.spawn(system_command_task().unwrap());
 }
 
 #[cfg(feature = "hardware")]
@@ -86,7 +66,6 @@ pub async fn system_command_task() {
                     continue;
                 }
                 let removed = core_interface::remove_paired_phone(&req.device_id).await;
-                persist_pairs_if(removed).await;
                 log::debug!(
                     "SYSTEM: remove paired phone requested, removed={}, device_id_len={}",
                     removed,
@@ -98,7 +77,6 @@ pub async fn system_command_task() {
                     continue;
                 }
                 let removed = core_interface::clear_paired_phones().await;
-                persist_pairs_if(removed > 0).await;
                 log::info!(
                     "SYSTEM: clear paired phones requested, removed={} (ESP runtime)",
                     removed
@@ -109,7 +87,6 @@ pub async fn system_command_task() {
                     continue;
                 }
                 let added = core_interface::add_paired_phone(&req.device_id).await;
-                persist_pairs_if(added).await;
                 log::debug!(
                     "SYSTEM: upsert paired phone requested, accepted={}, device_id_len={}",
                     added,

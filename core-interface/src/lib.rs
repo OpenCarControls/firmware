@@ -28,6 +28,13 @@ pub fn init(platform_id: u32) {
     PLATFORM_ID.store(platform_id, Ordering::Relaxed);
 }
 
+/// Returns the platform ID stored at boot. Useful for building outbound
+/// `DeviceToApp` messages outside of `core-interface` (e.g. board-level BLE
+/// transport tasks that need to emit system events).
+pub fn platform_id() -> u32 {
+    PLATFORM_ID.load(Ordering::Relaxed)
+}
+
 // ── Public re-exports ─────────────────────────────────────────────────────────
 
 // Types

@@ -145,19 +145,6 @@ impl TargetBuilder for Builder {
             );
             exit(1);
         }
-        // BLE_STORE_MAX_PHONES in boards/esp/src/ble/store.rs is the physical flash
-        // layout limit. max_bonded_phones is a runtime policy cap that must never
-        // exceed the store's capacity, because surplus entries would be silently
-        // dropped on every persist and never re-paired.
-        const BLE_STORE_MAX_PHONES: u8 = 8;
-        if esp.ble.max_bonded_phones > BLE_STORE_MAX_PHONES {
-            eprintln!(
-                "❌ Error: [hardware.esp.ble].max_bonded_phones={} exceeds the flash store capacity ({BLE_STORE_MAX_PHONES}). \
-                 Lower max_bonded_phones or increase BLE_STORE_MAX_PHONES in store.rs (requires a BLE_STORE_VERSION bump).",
-                esp.ble.max_bonded_phones
-            );
-            exit(1);
-        }
     }
 
     fn generate_app_build(&self, config: &Config) {
@@ -226,7 +213,7 @@ impl TargetBuilder for Builder {
                         bus_id, filters_expr
                     ));
                     can_task_spawns.push_str(&format!(
-                        "                s.spawn(can_bus_{0}_task(can_bus_{0})).unwrap();\n",
+                        "                s.spawn(can_bus_{0}_task(can_bus_{0}).unwrap());\n",
                         bus_id
                     ));
                 }
@@ -275,7 +262,7 @@ impl TargetBuilder for Builder {
                         bus_id, filters_expr
                     ));
                     can_task_spawns.push_str(&format!(
-                        "                s.spawn(can_bus_{0}_task(can_bus_{0}, can_bus_{0}_int)).unwrap();\n",
+                        "                s.spawn(can_bus_{0}_task(can_bus_{0}, can_bus_{0}_int).unwrap());\n",
                         bus_id
                     ));
                 }
@@ -306,7 +293,7 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str(&format!("embassy-time = \"{}\"\n", v("embassy-time")));
         cargo_toml.push_str(&format!("static_cell = \"{}\"\n", v("static_cell")));
         // Direct dep so we can forward the MCU chip feature via --features esp-radio/<mcu>
-        cargo_toml.push_str(&format!("esp-radio = {{ version = \"{}\", features = [\"wifi\", \"ble\", \"smoltcp\", \"unstable\"] }}\n", v("esp-radio")));
+        cargo_toml.push_str(&format!("esp-radio = {{ version = \"{}\", features = [\"wifi\", \"ble\", \"unstable\"] }}\n", v("esp-radio")));
         // Direct dep so we can forward the MCU chip feature via --features esp-storage/<mcu>
         cargo_toml.push_str(&format!("esp-storage = {{ version = \"{}\", features = [\"critical-section\"] }}\n", v("esp-storage")));
         // App descriptor for the ESP-IDF 2nd stage bootloader (sets min_efuse_blk_rev_full to 0)
@@ -417,9 +404,7 @@ impl TargetBuilder for Builder {
 
         let network_hardware_init = if wifi_enabled {
             concat!(
-                "    let ble_radio_controller = board_esp::init_radio();\n",
                 "    let wifi_stack = board_esp::init_wifi(\n",
-                "        ble_radio_controller,\n",
                 "        &spawner,\n",
                 "        peripherals.WIFI,\n",
                 "        WIFI_SSID,\n",
@@ -427,20 +412,16 @@ impl TargetBuilder for Builder {
                 "    );\n",
             ).to_string()
         } else {
-            "    let ble_radio_controller = board_esp::init_radio();\n".to_string()
+            String::new()
         };
 
         let ble_driver_spawn = concat!(
             "    spawner\n",
             "        .spawn(board_esp::ble_transport_task(\n",
-            "            ble_radio_controller,\n",
             "            peripherals.BT,\n",
             "            peripherals.FLASH,\n",
-            "            peripherals.RNG,\n",
-            "            peripherals.ADC1,\n",
             "            BLE_DEVICE_NAME_BASE,\n",
-            "        ))\n",
-            "        .unwrap();\n",
+            "        ).unwrap());\n",
         ).to_string();
 
         let mqtt_driver_spawn = if wifi_enabled {
@@ -455,8 +436,7 @@ impl TargetBuilder for Builder {
                 "            MQTT_DATA_TOPIC,\n",
                 "            MQTT_USERNAME,\n",
                 "            MQTT_PASSWORD,\n",
-                "        ))\n",
-                "        .unwrap();\n",
+                "        ).unwrap());\n",
             ).to_string()
         } else {
             "    // WiFi disabled: MQTT driver not spawned.\n".to_string()
