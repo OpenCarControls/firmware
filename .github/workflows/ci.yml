@@ -150,6 +150,9 @@ jobs:
           ldproxy: true
         
       - uses: Swatinem/rust-cache@v2
+
+      - name: Install protoc
+        run: sudo apt-get update -y && sudo apt-get install -y protobuf-compiler
       
       - name: Create config.toml from example
         run: cp config.toml.example config.toml
