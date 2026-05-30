@@ -143,11 +143,9 @@ jobs:
           
       - name: Install Rust toolchain (ESP Xtensa)
         if: matrix.board == 'esp'
-        uses: esp-rs/xtensa-toolchain@v1.7.0
+        uses: esp-rs/xtensa-toolchain@v1.6
         with:
-          default: true
           buildtargets: esp32s3
-          ldproxy: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
