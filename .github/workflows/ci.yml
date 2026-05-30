@@ -148,6 +148,10 @@ jobs:
           default: true
           buildtargets: esp32s3
           ldproxy: true
+
+      - name: Export ESP toolchain environment
+        if: matrix.board == 'esp'
+        run: cat "${HOME}/export-esp.sh" >> "$GITHUB_ENV"
         
       - uses: Swatinem/rust-cache@v2
 
