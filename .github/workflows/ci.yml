@@ -149,9 +149,9 @@ jobs:
           buildtargets: esp32s3
           ldproxy: true
 
-      - name: Export ESP toolchain environment
+      - name: Add rust-src for esp toolchain
         if: matrix.board == 'esp'
-        run: cat "${HOME}/export-esp.sh" >> "$GITHUB_ENV"
+        run: rustup component add rust-src --toolchain esp
         
       - uses: Swatinem/rust-cache@v2
 
