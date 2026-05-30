@@ -127,12 +127,10 @@ impl Builder {
 
         if target_arch.starts_with("xtensa") {
             cmd.arg("+esp");
-            cmd.arg("-Zbuild-std=core,alloc");
         }
 
         cmd.arg(cargo_cmd)
-            .arg("--manifest-path").arg(".app_build/Cargo.toml")
-            .arg("--target").arg(target_arch);
+            .current_dir(".app_build");
 
         if release {
             cmd.arg("--release");
@@ -140,8 +138,6 @@ impl Builder {
 
         let features = format!("esp-hal/{mcu},esp-rtos/{mcu},esp-backtrace/{mcu},esp-println/{mcu},esp-radio/{mcu},esp-storage/{mcu},esp-bootloader-esp-idf/{mcu}");
         cmd.arg("--features").arg(features);
-
-        cmd.env("RUSTFLAGS", "-C link-arg=-Tlinkall.x");
 
         let status = cmd.status().expect("Failed to execute cargo command");
         if !status.success() {
@@ -457,8 +453,26 @@ impl TargetBuilder for Builder {
             .replace("{BLE_DRIVER_SPAWN}", &ble_driver_spawn)
             .replace("{MQTT_DRIVER_SPAWN}", &mqtt_driver_spawn);
 
+        let target_arch = mcu_to_target_arch(&esp_hw.mcu);
+        let cargo_config = if target_arch.starts_with("xtensa") {
+            format!(
+                "[unstable]\nbuild-std = [\"core\", \"alloc\"]\n\n\
+                 [build]\ntarget = \"{target}\"\n\n\
+                 [target.{target}]\nrustflags = [\"-C\", \"link-arg=-Tlinkall.x\"]\n",
+                target = target_arch
+            )
+        } else {
+            format!(
+                "[build]\ntarget = \"{target}\"\n\n\
+                 [target.{target}]\nrustflags = [\"-C\", \"link-arg=-Tlinkall.x\"]\n",
+                target = target_arch
+            )
+        };
+
         fs::create_dir_all(".app_build/src").expect("Failed to create .app_build/src");
+        fs::create_dir_all(".app_build/.cargo").expect("Failed to create .app_build/.cargo");
         fs::write(".app_build/Cargo.toml", cargo_toml).expect("Failed to write .app_build/Cargo.toml");
+        fs::write(".app_build/.cargo/config.toml", cargo_config).expect("Failed to write .app_build/.cargo/config.toml");
         fs::write(".app_build/src/main.rs", main_rs).expect("Failed to write .app_build/src/main.rs");
     }
 
