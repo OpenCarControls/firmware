@@ -98,7 +98,9 @@ fn parse_content_length(headers: &str) -> usize {
     0
 }
 
-async fn read_http_request(stream: &mut std::net::TcpStream) -> Result<(String, String, Vec<u8>), ()> {
+async fn read_http_request(
+    stream: &mut std::net::TcpStream,
+) -> Result<(String, String, Vec<u8>), ()> {
     use std::io::Read;
 
     let mut buf: Vec<u8> = Vec::new();
@@ -246,7 +248,13 @@ async fn handle_request(
             let mut msg = match core_interface::proto::AppToDevice::decode(body) {
                 Ok(v) => v,
                 Err(_) => {
-                    return write_http_response(stream, "400 Bad Request", "text/plain", b"invalid AppToDevice payload").await;
+                    return write_http_response(
+                        stream,
+                        "400 Bad Request",
+                        "text/plain",
+                        b"invalid AppToDevice payload",
+                    )
+                    .await;
                 }
             };
 
@@ -258,7 +266,13 @@ async fn handle_request(
             Ok(msg) => {
                 let mut encoded = Vec::new();
                 if msg.encode(&mut encoded).is_err() {
-                    return write_http_response(stream, "500 Internal Server Error", "text/plain", b"encode failed").await;
+                    return write_http_response(
+                        stream,
+                        "500 Internal Server Error",
+                        "text/plain",
+                        b"encode failed",
+                    )
+                    .await;
                 }
                 write_http_response(stream, "200 OK", "application/octet-stream", &encoded).await
             }
@@ -272,14 +286,21 @@ async fn handle_request(
             let pairing_window_open = core_interface::is_pairing_window_open();
             match pair_phone_for_http(&peer_device_id(stream), pairing_window_open).await {
                 PairHttpResult::WindowClosed => {
-                    write_http_response(stream, "403 Forbidden", "text/plain", b"pairing window is closed").await
+                    write_http_response(
+                        stream,
+                        "403 Forbidden",
+                        "text/plain",
+                        b"pairing window is closed",
+                    )
+                    .await
                 }
                 PairHttpResult::Paired => {
                     persist_paired_phones().await;
                     write_http_response(stream, "200 OK", "text/plain", b"paired").await
                 }
                 PairHttpResult::ListFull => {
-                    write_http_response(stream, "409 Conflict", "text/plain", b"bond list is full").await
+                    write_http_response(stream, "409 Conflict", "text/plain", b"bond list is full")
+                        .await
                 }
             }
         }
@@ -327,7 +348,9 @@ pub async fn ble_http_task(port: u16, device_name: &'static str, pairing_window_
                 let request = read_http_request(&mut stream).await;
                 match request {
                     Ok((method, path, body)) => {
-                        let _ = handle_request(&mut stream, &method, &path, &body, pairing_window_s).await;
+                        let _ =
+                            handle_request(&mut stream, &method, &path, &body, pairing_window_s)
+                                .await;
                     }
                     Err(()) => {
                         let _ = write_http_response(

@@ -78,7 +78,10 @@ pub async fn ble_lifecycle_task(
 
         let pairing_open = core_interface::is_pairing_window_open();
         if pairing_open != pairing_was_open {
-            log::info!("BLE pairing window is now {}", if pairing_open { "OPEN" } else { "CLOSED" });
+            log::info!(
+                "BLE pairing window is now {}",
+                if pairing_open { "OPEN" } else { "CLOSED" }
+            );
             pairing_was_open = pairing_open;
         }
 

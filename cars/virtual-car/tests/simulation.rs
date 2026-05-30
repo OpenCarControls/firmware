@@ -1,7 +1,6 @@
 use prost::Message;
 use virtual_car_controller::{
-    VirtualCarState,
-    encode_state,
+    VirtualCarState, encode_state,
     proto::{AdvancedState, BasicState},
     tick_simulation,
 };

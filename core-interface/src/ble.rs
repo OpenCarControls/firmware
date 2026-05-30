@@ -51,8 +51,11 @@ mod tests {
         // Values must stay in sync with contracts/opencar/core/v1/transport.toml.
         // If this fails, the transport.toml UUID was changed without a rebuild — or the
         // build.rs codegen is broken.
-        assert_eq!(GATT_SERVICE_UUID, 0x1acff001_229b_4d38_a5d2_9af1d9b11f00_u128);
-        assert_eq!(GATT_RX_UUID,      0x1acff002_229b_4d38_a5d2_9af1d9b11f00_u128);
-        assert_eq!(GATT_TX_UUID,      0x1acff003_229b_4d38_a5d2_9af1d9b11f00_u128);
+        assert_eq!(
+            GATT_SERVICE_UUID,
+            0x1acff001_229b_4d38_a5d2_9af1d9b11f00_u128
+        );
+        assert_eq!(GATT_RX_UUID, 0x1acff002_229b_4d38_a5d2_9af1d9b11f00_u128);
+        assert_eq!(GATT_TX_UUID, 0x1acff003_229b_4d38_a5d2_9af1d9b11f00_u128);
     }
 }

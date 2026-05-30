@@ -132,12 +132,18 @@ pub fn load_platform_meta(platform: &str) -> (u32, usize) {
         can_bus_count: usize,
     }
     let platform_underscore = platform.replace('-', "_");
-    let meta_path = format!("contracts/opencar/cars/{}/v1/meta.toml", platform_underscore);
+    let meta_path = format!(
+        "contracts/opencar/cars/{}/v1/meta.toml",
+        platform_underscore
+    );
     let meta_str = fs::read_to_string(&meta_path)
         .unwrap_or_else(|_| panic!("❌ Could not read platform meta: {}", meta_path));
     let meta: PlatformMeta =
         toml::from_str(&meta_str).expect("❌ Invalid platform meta.toml format");
-    let hex = meta.platform_id.trim_start_matches("0x").trim_start_matches("0X");
+    let hex = meta
+        .platform_id
+        .trim_start_matches("0x")
+        .trim_start_matches("0X");
     let platform_id =
         u32::from_str_radix(hex, 16).expect("❌ Invalid platform_id hex in meta.toml");
     (platform_id, meta.can_bus_count)
@@ -388,7 +394,9 @@ fn main() {
         if std::path::Path::new("config.toml.example").exists() {
             fs::copy("config.toml.example", "config.toml")
                 .expect("❌ Failed to copy config.toml.example → config.toml");
-            println!("📋 Created config.toml from config.toml.example — edit it to match your setup.");
+            println!(
+                "📋 Created config.toml from config.toml.example — edit it to match your setup."
+            );
         }
     }
 

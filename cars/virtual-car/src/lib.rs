@@ -241,10 +241,11 @@ pub async fn process_basic_command(bytes: &[u8]) -> Result<(), &'static str> {
 pub async fn handle_advanced_commands_task() {
     loop {
         let inbound = ADVANCED_CMD_CHANNEL.receiver().receive().await;
-        let (success, error_message) = match process_advanced_command(inbound.bytes.as_slice()).await {
-            Ok(()) => (true, String::new()),
-            Err(e) => (false, String::from(e)),
-        };
+        let (success, error_message) =
+            match process_advanced_command(inbound.bytes.as_slice()).await {
+                Ok(()) => (true, String::new()),
+                Err(e) => (false, String::from(e)),
+            };
         let response = core_interface::proto::CommandResponse {
             message_id: inbound.message_id,
             success,
@@ -260,7 +261,8 @@ pub async fn handle_advanced_commands_task() {
 }
 
 pub async fn process_advanced_command(bytes: &[u8]) -> Result<(), &'static str> {
-    let cmd = proto::AdvancedCommand::decode(bytes).map_err(|_| "Failed to decode AdvancedCommand")?;
+    let cmd =
+        proto::AdvancedCommand::decode(bytes).map_err(|_| "Failed to decode AdvancedCommand")?;
     match cmd.action {
         Some(proto::advanced_command::Action::ToggleCustomState1(_)) => {
             let payload = {

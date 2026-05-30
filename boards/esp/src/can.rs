@@ -11,7 +11,9 @@
 use core_interface::CanFilter;
 
 #[cfg(feature = "hardware")]
-use core_interface::{CAN_DEBUG_RX_CHANNEL, CAN_RX_CHANNEL, CAN_TX_CHANNEL, CanFrame, CanRawCapture};
+use core_interface::{
+    CAN_DEBUG_RX_CHANNEL, CAN_RX_CHANNEL, CAN_TX_CHANNEL, CanFrame, CanRawCapture,
+};
 #[cfg(feature = "hardware")]
 use embedded_can::Frame as EmbeddedFrame;
 #[cfg(feature = "hardware")]
@@ -203,7 +205,12 @@ pub fn init_mcp2515(
 
     // Collect up to 6 filter IDs for this bus on the stack.
     let mut ids: [Option<Id>; 6] = [None; 6];
-    for (slot, f) in filters.iter().filter(|f| f.bus_id == bus_id).take(6).enumerate() {
+    for (slot, f) in filters
+        .iter()
+        .filter(|f| f.bus_id == bus_id)
+        .take(6)
+        .enumerate()
+    {
         ids[slot] = Some(f.id);
     }
 
@@ -290,7 +297,12 @@ fn to_core_frame<F: EmbeddedFrame>(frame: F, bus_id: u8) -> CanFrame {
     let raw = frame.data();
     let mut data = [0u8; 8];
     data[..raw.len()].copy_from_slice(raw);
-    CanFrame { bus_id, id, data, dlc }
+    CanFrame {
+        bus_id,
+        id,
+        data,
+        dlc,
+    }
 }
 
 /// Switches both MCP2515 RX buffer masks to accept-all (mask bits = 0).
@@ -390,10 +402,7 @@ mod tests {
 
     #[test]
     fn filters_for_other_bus_excluded() {
-        let filters = [
-            filter(0, 0x100, 0x7FF),
-            filter(1, 0x200, 0x7FF),
-        ];
+        let filters = [filter(0, 0x100, 0x7FF), filter(1, 0x200, 0x7FF)];
         let (m0, m1) = compute_mcp_masks(&filters, 0);
         assert_eq!(m0, 0x7FF);
         assert_eq!(m1, 0);

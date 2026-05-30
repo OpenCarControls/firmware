@@ -91,7 +91,8 @@ pub async fn publish_single_state(payload: VehicleStatePayload, timestamp_ms: u6
             },
         )),
     };
-    if let Err(embassy_sync::channel::TrySendError::Full(msg)) = MQTT_TX_CHANNEL.try_send(mqtt_msg) {
+    if let Err(embassy_sync::channel::TrySendError::Full(msg)) = MQTT_TX_CHANNEL.try_send(mqtt_msg)
+    {
         // Channel full — evict the oldest stale state and replace with latest.
         let _ = MQTT_TX_CHANNEL.try_receive();
         let _ = MQTT_TX_CHANNEL.try_send(msg);

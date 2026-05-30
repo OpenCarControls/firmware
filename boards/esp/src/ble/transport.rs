@@ -26,7 +26,7 @@ use embassy_embedded_hal::adapter::BlockingAsync;
 #[cfg(feature = "hardware")]
 use embassy_futures::{
     join::join,
-    select::{select, Either},
+    select::{Either, select},
 };
 #[cfg(feature = "hardware")]
 use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlash, ReadNorFlash};
@@ -150,14 +150,13 @@ pub async fn ble_transport_task(
     let loaded_bonds = bond_store.load_bonds().await;
 
     // ── BLE host setup ──────────────────────────────────────────────────────
-    let connector =
-        match ble::controller::BleConnector::new(bt_peri, ble::Config::default()) {
-            Ok(c) => c,
-            Err(_) => {
-                log::error!("BLE transport: failed to initialize BLE connector");
-                return;
-            }
-        };
+    let connector = match ble::controller::BleConnector::new(bt_peri, ble::Config::default()) {
+        Ok(c) => c,
+        Err(_) => {
+            log::error!("BLE transport: failed to initialize BLE connector");
+            return;
+        }
+    };
 
     let controller: ExternalController<_, 20> = ExternalController::new(connector);
     static HOST_RESOURCES: StaticCell<
@@ -292,10 +291,8 @@ async fn advertise_and_accept<'values, 'server, C: Controller>(
         (adv_len, scan_len)
     } else {
         // Mode B: non-discoverable — bonded phones can still reconnect.
-        let adv_len = AdStructure::encode_slice(
-            &[AdStructure::Flags(BR_EDR_NOT_SUPPORTED)],
-            &mut adv_data,
-        )?;
+        let adv_len =
+            AdStructure::encode_slice(&[AdStructure::Flags(BR_EDR_NOT_SUPPORTED)], &mut adv_data)?;
         (adv_len, 0)
     };
 
@@ -470,7 +467,11 @@ where
     log::debug!(
         "BLE: controller lists updated — {} bond(s) in FAL, RL {}",
         bonds.len(),
-        if has_irk { "enabled" } else { "disabled (no IRKs)" },
+        if has_irk {
+            "enabled"
+        } else {
+            "disabled (no IRKs)"
+        },
     );
     (bonds.len(), has_irk)
 }
@@ -520,7 +521,11 @@ async fn gatt_event_task<C, P, S>(
     }
 
     if let Err(e) = conn.raw().set_bondable(pairing_open_at_connect) {
-        log::warn!("BLE set_bondable({}) failed: {:?}", pairing_open_at_connect, e);
+        log::warn!(
+            "BLE set_bondable({}) failed: {:?}",
+            pairing_open_at_connect,
+            e
+        );
     }
 
     loop {
@@ -539,9 +544,8 @@ async fn gatt_event_task<C, P, S>(
                 );
                 if is_security_disconnect && core_interface::is_pairing_window_open() {
                     let bonds = stack.get_bond_information();
-                    if let Some(known_bond) = bonds
-                        .iter()
-                        .find(|b| b.identity.bd_addr == peer_bd_addr)
+                    if let Some(known_bond) =
+                        bonds.iter().find(|b| b.identity.bd_addr == peer_bd_addr)
                     {
                         let _ = stack.remove_bond_information(known_bond.identity);
                         let _ = bond_store.remove_bond(&peer_bd_addr).await;
@@ -554,7 +558,10 @@ async fn gatt_event_task<C, P, S>(
                 }
                 break;
             }
-            GattConnectionEvent::PairingComplete { security_level, bond } => {
+            GattConnectionEvent::PairingComplete {
+                security_level,
+                bond,
+            } => {
                 if let Some(bond_info) = bond {
                     // New bond: persist inline (async, non-blocking; BlockingAsync
                     // wraps synchronous writes so BLE events continue processing).

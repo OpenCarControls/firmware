@@ -17,9 +17,12 @@ use core_interface::{MQTT_RX_CHANNEL, MQTT_TX_CHANNEL, proto};
 #[cfg(feature = "hardware")]
 use embassy_net::{Runner, Stack, StackResources, tcp::TcpSocket};
 #[cfg(feature = "hardware")]
-use esp_radio::wifi::{Config as WifiModeConfig, ControllerConfig as WifiControllerConfig, WifiController, Interface as WifiInterface};
-#[cfg(feature = "hardware")]
 use esp_radio::wifi::sta::StationConfig;
+#[cfg(feature = "hardware")]
+use esp_radio::wifi::{
+    Config as WifiModeConfig, ControllerConfig as WifiControllerConfig, Interface as WifiInterface,
+    WifiController,
+};
 #[cfg(feature = "hardware")]
 use prost::Message as _;
 #[cfg(feature = "hardware")]
@@ -100,8 +103,7 @@ pub fn init_wifi(
     static STACK: StaticCell<WifiStack> = StaticCell::new();
 
     let (controller, interfaces) =
-        esp_radio::wifi::new(wifi_peri, WifiControllerConfig::default())
-            .expect("WiFi init failed");
+        esp_radio::wifi::new(wifi_peri, WifiControllerConfig::default()).expect("WiFi init failed");
 
     let net_config = embassy_net::Config::dhcpv4(Default::default());
     // A fixed seed is acceptable here; embassy-net uses it only for its internal
