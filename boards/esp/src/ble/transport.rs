@@ -71,7 +71,7 @@ struct OpenCarGattServer {
 struct OpenCarGattService {
     #[characteristic(uuid = GATT_RX_UUID, write, write_without_response, permissions(encrypted))]
     rx: heapless::Vec<u8, 244>,
-    #[characteristic(uuid = GATT_TX_UUID, notify)]
+    #[characteristic(uuid = GATT_TX_UUID, notify, permissions(encrypted))]
     tx: heapless::Vec<u8, 244>,
 }
 
