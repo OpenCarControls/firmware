@@ -143,17 +143,13 @@ jobs:
           
       - name: Install Rust toolchain (ESP Xtensa)
         if: matrix.board == 'esp'
-        uses: esp-rs/xtensa-toolchain@v1.6.0
+        uses: esp-rs/xtensa-toolchain@v1.7.0
         with:
           default: true
           buildtargets: esp32s3
           ldproxy: true
-
-      - name: Add rust-src for esp toolchain
-        if: matrix.board == 'esp'
-        run: rustup component add rust-src --toolchain esp
-        
-      - uses: Swatinem/rust-cache@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install protoc
         run: sudo apt-get update -y && sudo apt-get install -y protobuf-compiler
