@@ -240,7 +240,6 @@ pub async fn ble_transport_task(
                                 &stack,
                                 &mut bond_store,
                                 pairing_open_at_connect,
-                                &tx_auth,
                             ),
                             ble_tx_notify_task(&server, &conn, &tx_auth),
                         )
@@ -485,7 +484,6 @@ async fn gatt_event_task<C, P, S>(
     stack: &Stack<'_, C, P>,
     bond_store: &mut BondStore<'_, S>,
     pairing_open_at_connect: bool,
-    tx_auth: &AtomicBool,
 ) where
     C: Controller
         + ControllerCmdSync<LeAddDeviceToFilterAcceptList>
@@ -573,12 +571,8 @@ async fn gatt_event_task<C, P, S>(
                         bond_info.identity.bd_addr.raw()
                     );
                 }
-                // Grant TX access once the link is encrypted.
-                if security_level.encrypted() {
-                    tx_auth.store(true, Ordering::Relaxed);
-                    log::info!("BLE: PairingComplete — tx_auth granted (encrypted=true)");
-                } else {
-                    log::warn!("BLE: PairingComplete with encrypted=false — tx_auth withheld");
+                if !security_level.encrypted() {
+                    log::warn!("BLE: PairingComplete with encrypted=false");
                 }
             }
             GattConnectionEvent::PairingFailed(e) => {
@@ -638,18 +632,29 @@ async fn ble_tx_notify_task<P: PacketPool>(
             BLE_TX_CHANNEL.receive().await
         };
 
-        // Hold notifications until gatt_event_task confirms the link is encrypted
-        // and the peer is authorised (tx_auth=true set on PairingComplete).
+        // Hold notifications until the link is confirmed encrypted.
+        // tx_auth is a per-connection cache: once set it avoids calling security_level() on
+        // every message. Checking security_level() here covers both the first-pair path
+        // (encryption established during PairingComplete) and the reconnect path (re-encryption
+        // via stored LTK, which never fires PairingComplete on iOS).
         if !tx_auth.load(Ordering::Relaxed) {
-            if !tx_held_logged {
-                log::debug!(
-                    "BLE TX: holding message — awaiting PairingComplete (tx_auth not yet set)"
-                );
-                tx_held_logged = true;
+            let encrypted = conn
+                .raw()
+                .security_level()
+                .map(|l| l.encrypted())
+                .unwrap_or(false);
+            if encrypted {
+                tx_auth.store(true, Ordering::Relaxed);
+                log::info!("BLE TX: link encrypted — tx_auth granted");
+            } else {
+                if !tx_held_logged {
+                    log::debug!("BLE TX: holding message — link not yet encrypted");
+                    tx_held_logged = true;
+                }
+                pending_msg = Some(msg);
+                embassy_time::Timer::after(embassy_time::Duration::from_millis(50)).await;
+                continue;
             }
-            pending_msg = Some(msg);
-            embassy_time::Timer::after(embassy_time::Duration::from_millis(50)).await;
-            continue;
         }
         tx_held_logged = false;
 

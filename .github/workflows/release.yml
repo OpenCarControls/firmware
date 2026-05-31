@@ -1,0 +1,203 @@
+name: Release
+
+on:
+  push:
+    tags: ['car-*-v[0-9]*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Parse the tag into reusable outputs ──────────────────────────────────────
+  parse-tag:
+    name: Parse tag
+    runs-on: ubuntu-latest
+    outputs:
+      platform: ${{ steps.parse.outputs.platform }}
+      version:  ${{ steps.parse.outputs.version }}
+      mcu:      ${{ steps.parse.outputs.mcu }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Parse tag components
+        id: parse
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          # TAG format: car-{platform}-v{version}
+          # Strip leading "car-" and trailing "-v{version}" to get the platform slug.
+          WITHOUT_PREFIX="${TAG#car-}"
+          VERSION="${WITHOUT_PREFIX##*-v}"
+          PLATFORM="${WITHOUT_PREFIX%-v${VERSION}}"
+
+          # Read the MCU from config.toml.example (single source of truth for board defaults).
+          MCU=$(grep -E '^\s*mcu\s*=' config.toml.example | head -n1 | sed 's/.*=\s*"\(.*\)"/\1/')
+
+          echo "Tag:      $TAG"
+          echo "Platform: $PLATFORM"
+          echo "Version:  $VERSION"
+          echo "MCU:      $MCU"
+
+          echo "platform=$PLATFORM" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION"   >> "$GITHUB_OUTPUT"
+          echo "mcu=$MCU"           >> "$GITHUB_OUTPUT"
+
+  # ── Build per-board (matrix) ─────────────────────────────────────────────────
+  build:
+    name: Build (${{ matrix.board }})
+    needs: parse-tag
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [esp, pc]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install Rust toolchain (stable / PC)
+        if: matrix.board == 'pc'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust toolchain (Xtensa / ESP)
+        if: matrix.board == 'esp'
+        uses: esp-rs/xtensa-toolchain@v1.6
+        with:
+          buildtargets: ${{ needs.parse-tag.outputs.mcu }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install protoc
+        run: sudo apt-get update -y && sudo apt-get install -y protobuf-compiler
+
+      - name: Install espflash (ESP only)
+        if: matrix.board == 'esp'
+        run: cargo install espflash --locked
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.board }}
+
+      - name: Create config.toml from example
+        run: cp config.toml.example config.toml
+
+      - name: Build firmware
+        run: |
+          cargo xtask build \
+            --board ${{ matrix.board }} \
+            --platform ${{ needs.parse-tag.outputs.platform }}
+
+      # ── ESP: produce merged flashable .bin via espflash ──────────────────────
+      - name: Produce merged .bin (ESP)
+        if: matrix.board == 'esp'
+        run: |
+          MCU="${{ needs.parse-tag.outputs.mcu }}"
+          PLATFORM="${{ needs.parse-tag.outputs.platform }}"
+          VERSION="${{ needs.parse-tag.outputs.version }}"
+
+          # Derive target triple from MCU name (matches xtask_builder.rs logic)
+          case "$MCU" in
+            esp32)   TRIPLE="xtensa-esp32-none-elf" ;;
+            esp32s3) TRIPLE="xtensa-esp32s3-none-elf" ;;
+            esp32c3) TRIPLE="riscv32imc-unknown-none-elf" ;;
+            esp32c6) TRIPLE="riscv32imac-unknown-none-elf" ;;
+            *)       echo "❌ Unknown MCU: $MCU"; exit 1 ;;
+          esac
+
+          ELF=".app_build/target/${TRIPLE}/release/app-build"
+          OUT="open-car-${PLATFORM}-${MCU}-v${VERSION}.bin"
+
+          espflash save-image --chip "$MCU" --merge "$ELF" "./$OUT"
+          echo "ESP_ASSET=$OUT" >> "$GITHUB_ENV"
+
+      # ── PC: copy and rename the native binary ────────────────────────────────
+      - name: Rename PC binary
+        if: matrix.board == 'pc'
+        run: |
+          PLATFORM="${{ needs.parse-tag.outputs.platform }}"
+          VERSION="${{ needs.parse-tag.outputs.version }}"
+          OUT="open-car-${PLATFORM}-pc-v${VERSION}"
+          cp .app_build/target/release/app-build "./$OUT"
+          echo "PC_ASSET=$OUT" >> "$GITHUB_ENV"
+
+      # ── Upload artifact for the checksum + release job ───────────────────────
+      - name: Upload build artifact (ESP)
+        if: matrix.board == 'esp'
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-esp
+          path: open-car-${{ needs.parse-tag.outputs.platform }}-${{ needs.parse-tag.outputs.mcu }}-v${{ needs.parse-tag.outputs.version }}.bin
+          if-no-files-found: error
+
+      - name: Upload build artifact (PC)
+        if: matrix.board == 'pc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-pc
+          path: open-car-${{ needs.parse-tag.outputs.platform }}-pc-v${{ needs.parse-tag.outputs.version }}
+          if-no-files-found: error
+
+  # ── Compute checksums and publish the GitHub Release ─────────────────────────
+  release:
+    name: Publish release
+    needs: [parse-tag, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Compute checksums
+        working-directory: dist
+        run: sha256sum * > checksums.sha256
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          PLATFORM="${{ needs.parse-tag.outputs.platform }}"
+          CURRENT_TAG="${GITHUB_REF_NAME}"
+
+          # Find the previous tag for this platform, if any
+          PREV_TAG=$(git tag --list "car-${PLATFORM}-v*" \
+            | sort -V | grep -v "^${CURRENT_TAG}$" | tail -n1 || true)
+
+          if [ -z "$PREV_TAG" ]; then
+            echo "First release for platform '${PLATFORM}'."
+            NOTES="Initial release."
+          else
+            echo "Generating notes from ${PREV_TAG}..${CURRENT_TAG}"
+            NOTES=$(git log "${PREV_TAG}..${CURRENT_TAG}" \
+              --pretty=format:"- %s" \
+              -- "cars/${PLATFORM}/" "core-interface/" "boards/" \
+              | head -100)
+            if [ -z "$NOTES" ]; then
+              NOTES="No conventional commit messages found — see full diff for details."
+            fi
+          fi
+
+          # Write to a file to avoid quoting issues with multiline strings
+          echo "$NOTES" > release_notes.txt
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PLATFORM="${{ needs.parse-tag.outputs.platform }}"
+          VERSION="${{ needs.parse-tag.outputs.version }}"
+          TAG="${GITHUB_REF_NAME}"
+
+          gh release create "$TAG" \
+            --title "${PLATFORM} v${VERSION}" \
+            --notes-file release_notes.txt \
+            dist/*
