@@ -588,6 +588,13 @@ async fn gatt_event_task<C, P, S>(
                         let _ = reply.send().await;
                     }
 
+                    // An empty write is the standard BLE pattern for triggering OS-level
+                    // pairing/encryption — the app writes zero bytes to provoke the
+                    // encrypted-characteristic handshake. Nothing to decode; skip silently.
+                    if payload.is_empty() {
+                        continue;
+                    }
+
                     match proto::AppToDevice::decode(payload.as_slice()) {
                         Ok(mut msg) => {
                             // Overwrite source_device_id with the firmware-verified peer
