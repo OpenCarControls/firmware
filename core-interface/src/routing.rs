@@ -1,11 +1,36 @@
 use alloc::vec;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use embassy_time::Instant;
 
 use crate::channels::{BLE_TX_CHANNEL, CMD_RESP_CHANNEL, MQTT_TX_CHANNEL, VEHICLE_STATE_CHANNEL};
 use crate::proto;
 use crate::types::{Transport, VehicleStatePayload};
+
+// ── MQTT Throttle ─────────────────────────────────────────────────────────────
+
+/// Seconds of silence from any MQTT client before entering idle rate.
+const MQTT_ACTIVITY_WINDOW_S: u32 = 35;
+/// Minimum gap between MQTT state sends while no client is active.
+const MQTT_IDLE_RATE_S: u32 = 30;
+
+/// Uptime seconds of the most recent inbound MQTT message (command or heartbeat).
+static LAST_MQTT_RX_SECS: AtomicU32 = AtomicU32::new(0);
+/// Uptime seconds of the most recent MQTT state message actually sent.
+static LAST_MQTT_STATE_SECS: AtomicU32 = AtomicU32::new(0);
+
+/// Called by `handle_mqtt_message` whenever any valid MQTT message arrives
+/// (command, heartbeat, or any other payload). Keeps the activity window alive
+/// so state updates continue to flow at full rate.
+pub fn record_mqtt_activity(secs: u32) {
+    LAST_MQTT_RX_SECS.store(secs, Ordering::Relaxed);
+}
+
+/// Resets MQTT throttle state to boot defaults. For use in tests only.
+pub fn reset_mqtt_throttle_for_tests() {
+    LAST_MQTT_RX_SECS.store(0, Ordering::Relaxed);
+    LAST_MQTT_STATE_SECS.store(0, Ordering::Relaxed);
+}
 
 // ── Response Router ───────────────────────────────────────────────────────────
 
@@ -77,25 +102,39 @@ pub async fn publish_single_state(payload: VehicleStatePayload, timestamp_ms: u6
         let _ = BLE_TX_CHANNEL.try_send(msg);
     }
 
-    // MQTT: basic only (advanced is BLE-exclusive)
-    let mqtt_msg = proto::DeviceToApp {
-        timestamp_ms,
-        platform_id: pid,
-        payload: Some(proto::device_to_app::Payload::StateUpdate(
-            proto::StateUpdate {
-                system_state: None,
-                vehicle_state: Some(proto::VehicleState {
-                    basic_state_bytes: payload.basic,
-                    advanced_state_bytes: vec![],
-                }),
-            },
-        )),
+    // MQTT: basic only (advanced is BLE-exclusive), throttled when no client is active.
+    let now_secs = (timestamp_ms / 1000) as u32;
+    let last_rx = LAST_MQTT_RX_SECS.load(Ordering::Relaxed);
+    let mqtt_active = now_secs.saturating_sub(last_rx) <= MQTT_ACTIVITY_WINDOW_S;
+    let should_send_mqtt = if mqtt_active {
+        true
+    } else {
+        let last_state = LAST_MQTT_STATE_SECS.load(Ordering::Relaxed);
+        now_secs.saturating_sub(last_state) >= MQTT_IDLE_RATE_S
     };
-    if let Err(embassy_sync::channel::TrySendError::Full(msg)) = MQTT_TX_CHANNEL.try_send(mqtt_msg)
-    {
-        // Channel full — evict the oldest stale state and replace with latest.
-        let _ = MQTT_TX_CHANNEL.try_receive();
-        let _ = MQTT_TX_CHANNEL.try_send(msg);
+
+    if should_send_mqtt {
+        let mqtt_msg = proto::DeviceToApp {
+            timestamp_ms,
+            platform_id: pid,
+            payload: Some(proto::device_to_app::Payload::StateUpdate(
+                proto::StateUpdate {
+                    system_state: None,
+                    vehicle_state: Some(proto::VehicleState {
+                        basic_state_bytes: payload.basic,
+                        advanced_state_bytes: vec![],
+                    }),
+                },
+            )),
+        };
+        if let Err(embassy_sync::channel::TrySendError::Full(msg)) =
+            MQTT_TX_CHANNEL.try_send(mqtt_msg)
+        {
+            // Channel full — evict the oldest stale state and replace with latest.
+            let _ = MQTT_TX_CHANNEL.try_receive();
+            let _ = MQTT_TX_CHANNEL.try_send(msg);
+        }
+        LAST_MQTT_STATE_SECS.store(now_secs, Ordering::Relaxed);
     }
 }
 

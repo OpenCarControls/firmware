@@ -191,6 +191,8 @@ pub async fn handle_ble_message(msg: proto::AppToDevice) {
                 })
                 .await;
         }
+        // Heartbeat is an MQTT-only concept — silently ignored on BLE.
+        Some(proto::app_to_device::Payload::Heartbeat(_)) => {}
         None => {}
     }
 }
@@ -210,10 +212,17 @@ pub async fn process_ble_commands_task() {
 /// `BASIC_CMD_CHANNEL` (Transport::Mqtt).
 /// `SystemCommand` and `advanced_command_bytes` are silently dropped — both
 /// are restricted to BLE only.
+/// `heartbeat` carries no payload and is not routed; its presence alone resets
+/// the MQTT activity window so state updates continue at full rate.
 pub async fn handle_mqtt_message(msg: proto::AppToDevice) {
     if msg.platform_id != crate::PLATFORM_ID.load(Ordering::Relaxed) {
         return;
     }
+    // Any valid inbound MQTT message (command or app heartbeat) keeps the
+    // activity window alive so state updates flow at full rate.
+    crate::routing::record_mqtt_activity(
+        (embassy_time::Instant::now().as_millis() / 1000) as u32,
+    );
     if let Some(proto::app_to_device::Payload::BasicCommandBytes(bytes)) = msg.payload {
         BASIC_CMD_CHANNEL
             .sender()
