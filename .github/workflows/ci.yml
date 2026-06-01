@@ -96,8 +96,6 @@ jobs:
                 [ -n "$name" ] && PKGS="$PKGS $name"
               fi
             done
-            # Also include core-interface if it was directly modified
-            echo "$CHANGED" | grep -q '^core-interface/' && PKGS="core-interface $PKGS"
             # Include board crates if their source changed
             echo "$CHANGED" | grep -q '^boards/pc/'  && PKGS="board-pc $PKGS"
             echo "$CHANGED" | grep -q '^boards/esp/' && PKGS="board-esp $PKGS"

@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ['car-*-v[0-9]*']
+    tags: ['car-*-v*']
 
 permissions:
   contents: write
@@ -19,10 +19,6 @@ jobs:
       platform: ${{ steps.parse.outputs.platform }}
       version:  ${{ steps.parse.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
-        with:
-          submodules: true
-
       - name: Parse tag components
         id: parse
         run: |
