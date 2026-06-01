@@ -397,7 +397,7 @@ fn main() {
         println!("📋 Created config.toml from config.toml.example — edit it to match your setup.");
     }
 
-    println!("🚀 Starting custom {} using: {}", command, config_path);
+    println!("Starting custom {} using: {}", command, config_path);
 
     // Read and parse the config file, then apply any CLI overrides
     let config_str = fs::read_to_string(config_path)

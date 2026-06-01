@@ -75,7 +75,7 @@ mod hardware {
                     log::warn!("WiFi: connect failed: {:?}, retrying in 5s", e);
                 }
             }
-            Timer::after(Duration::from_millis(5_000)).await;
+            Timer::after(Duration::from_secs(5)).await;
         }
     }
 

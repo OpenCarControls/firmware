@@ -82,7 +82,7 @@ impl Builder {
 impl TargetBuilder for Builder {
     fn validate(&self, _config: &Config) {
         if cfg!(windows) {
-            println!("⚠️ Warning: Running PC simulator on Windows. Native SocketCAN will not be available.");
+            println!("Warning: Running PC simulator on Windows. Native SocketCAN will not be available.");
         }
     }
 
@@ -226,17 +226,17 @@ impl TargetBuilder for Builder {
 
     fn compile(&self, _config: &Config, release: bool) {
         let profile = if release { "release" } else { "debug (unoptimized)" };
-        println!("⚙️  Compiling the PC simulator ({profile})...");
+        println!("Compiling the PC simulator ({profile})...");
         self.execute_cargo_command("build", release);
     }
 
     fn run(&self, _config: &Config) {
-        println!("🚀 Running the PC simulator natively...");
+        println!("Running the PC simulator natively...");
         self.execute_cargo_command("run", true);
     }
 
     fn clippy(&self, _config: &Config) {
-        println!("🔍 Running clippy on the PC simulator...");
+        println!("Running clippy on the PC simulator...");
         self.execute_cargo_command("clippy", true);
     }
 }

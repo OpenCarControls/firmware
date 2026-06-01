@@ -478,7 +478,7 @@ impl TargetBuilder for Builder {
 
     fn compile(&self, config: &Config, release: bool) {
         let profile = if release { "release" } else { "debug (unoptimized)" };
-        println!("⚙️  Compiling the bare-metal firmware ({profile})...");
+        println!("Compiling the bare-metal firmware ({profile})...");
         self.execute_cargo_command(config, "build", release);
     }
 
@@ -492,7 +492,7 @@ impl TargetBuilder for Builder {
         let elf_path = format!(".app_build/target/{}/{}/app-build", target_arch, profile_dir);
 
         println!(
-            "⚡ Flashing {} ({}) via {}...",
+            "Flashing {} ({}) via {}...",
             mcu,
             elf_path,
             port.unwrap_or("auto-detected port"),
@@ -522,12 +522,12 @@ impl TargetBuilder for Builder {
     }
 
     fn run(&self, config: &Config) {
-        println!("🚀 Running the firmware build pipeline...");
+        println!("Running the firmware build pipeline...");
         self.execute_cargo_command(config, "run", true);
     }
 
     fn clippy(&self, config: &Config) {
-        println!("🔍 Running clippy on the firmware build pipeline...");
+        println!("Running clippy on the firmware build pipeline...");
         self.execute_cargo_command(config, "clippy", true);
     }
 
@@ -608,7 +608,7 @@ impl TargetBuilder for Builder {
 
         let target_arch = mcu_to_target_arch(mcu);
 
-        println!("⚙️  Compiling on-hardware tests for {} ({})...", mcu, target_arch);
+        println!("Compiling on-hardware tests for {} ({})...", mcu, target_arch);
 
         let mut build_cmd = Command::new("cargo");
         if target_arch.starts_with("xtensa") {
@@ -639,7 +639,7 @@ impl TargetBuilder for Builder {
             .unwrap_or_else(|| panic!("\u{274c} Could not find test binary in {}", test_bin_dir))
             .path();
 
-        println!("🔌 Flashing and running tests via probe-rs: {}", test_binary.display());
+        println!("Flashing and running tests via probe-rs: {}", test_binary.display());
         // probe-rs needs raw USB access; in the dev container the USB device is
         // owned by root:root so we use `sudo` (passwordless in devcontainer) when
         // the direct open fails due to permissions.  Resolve the full path so sudo

@@ -10,7 +10,8 @@
 //!
 //! **Security model**
 //! - RX writes require link encryption (enforced by `trouble-host` via `permissions(encrypted)`).
-//! - TX notifications are withheld until `gatt_event_task` confirms encryption via `tx_auth`.
+//! - TX notifications are withheld until `ble_tx_notify_task` confirms encryption via
+//!   `conn.raw().security_level()` and sets per-connection `tx_auth`.
 //! - `source_device_id` in every accepted message is overwritten with the firmware-verified
 //!   BLE address so the vehicle layer always has a trustworthy caller identity.
 
