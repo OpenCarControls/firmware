@@ -220,9 +220,7 @@ pub async fn handle_mqtt_message(msg: proto::AppToDevice) {
     }
     // Any valid inbound MQTT message (command or app heartbeat) keeps the
     // activity window alive so state updates flow at full rate.
-    crate::routing::record_mqtt_activity(
-        (embassy_time::Instant::now().as_millis() / 1000) as u32,
-    );
+    crate::routing::record_mqtt_activity((embassy_time::Instant::now().as_millis() / 1000) as u32);
     if let Some(proto::app_to_device::Payload::BasicCommandBytes(bytes)) = msg.payload {
         BASIC_CMD_CHANNEL
             .sender()

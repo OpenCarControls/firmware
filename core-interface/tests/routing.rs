@@ -196,7 +196,10 @@ fn mqtt_idle_rate_resets_after_send() {
     drain_tx_channels();
     init(PLATFORM_ID);
     // First idle send at t = 100 s — sets LAST_MQTT_STATE_SECS = 100.
-    let p = || VehicleStatePayload { basic: vec![0x01], advanced: vec![] };
+    let p = || VehicleStatePayload {
+        basic: vec![0x01],
+        advanced: vec![],
+    };
     embassy_futures::block_on(publish_single_state(p(), 100_000));
     let _ = BLE_TX_CHANNEL.try_receive().unwrap();
     MQTT_TX_CHANNEL.try_receive().unwrap(); // first send allowed
@@ -225,7 +228,10 @@ fn mqtt_not_throttled_when_client_active() {
     // Simulate heartbeat at t = 50 s; publish state at t = 60 s.
     // elapsed since RX = 10 s < 35 s → active → all sends go through.
     record_mqtt_activity(50);
-    let p = || VehicleStatePayload { basic: vec![0x01], advanced: vec![] };
+    let p = || VehicleStatePayload {
+        basic: vec![0x01],
+        advanced: vec![],
+    };
     embassy_futures::block_on(publish_single_state(p(), 60_000));
     let _ = BLE_TX_CHANNEL.try_receive().unwrap();
     assert!(
@@ -247,7 +253,10 @@ fn ble_never_throttled_regardless_of_mqtt_activity() {
     drain_tx_channels();
     init(PLATFORM_ID);
     // No recent MQTT activity; publish many states — BLE always receives all of them.
-    let p = || VehicleStatePayload { basic: vec![0x01], advanced: vec![] };
+    let p = || VehicleStatePayload {
+        basic: vec![0x01],
+        advanced: vec![],
+    };
     for i in 0u64..5 {
         embassy_futures::block_on(publish_single_state(p(), 40_000 + i * 1_000));
         assert!(
