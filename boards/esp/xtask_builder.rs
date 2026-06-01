@@ -9,8 +9,8 @@ use std::process::{Command, exit};
 /// Load `boards/esp/Cargo.toml` as a raw TOML value for version lookups.
 fn load_esp_board_toml() -> toml::Value {
     let toml_str = fs::read_to_string("boards/esp/Cargo.toml")
-        .expect("❌ Could not read boards/esp/Cargo.toml");
-    toml::from_str(&toml_str).expect("❌ Failed to parse boards/esp/Cargo.toml")
+        .expect("Could not read boards/esp/Cargo.toml");
+    toml::from_str(&toml_str).expect("Failed to parse boards/esp/Cargo.toml")
 }
 
 /// Look up a crate version from `boards/esp/Cargo.toml`.
@@ -34,7 +34,7 @@ fn esp_dep_version(board_toml: &toml::Value, name: &str) -> String {
         return v.to_string();
     }
     panic!(
-        "❌ Missing ESP dependency '{}'. Add it to [dependencies] or \
+        "Missing ESP dependency '{}'. Add it to [dependencies] or \
          [package.metadata.xtask-only-deps] in boards/esp/Cargo.toml.",
         name
     );
@@ -111,10 +111,10 @@ pub struct Builder;
 impl Builder {
     fn get_esp_config(config: &Config) -> EspConfig {
         config.hardware.get("esp")
-            .expect("❌ Missing [hardware.esp] section in config")
+            .expect("Missing [hardware.esp] section in config")
             .clone()
             .try_into()
-            .expect("❌ Invalid [hardware.esp] config format")
+            .expect("Invalid [hardware.esp] config format")
     }
 
     fn execute_cargo_command(&self, config: &Config, cargo_cmd: &str, release: bool) {
@@ -150,17 +150,17 @@ impl TargetBuilder for Builder {
     fn validate(&self, config: &Config) {
         let esp = Self::get_esp_config(config);
         if esp.mcu == "esp32s2" {
-            eprintln!("❌ Error: The ESP32-S2 chip does not have Bluetooth/BLE capabilities. This project strictly requires BLE for phone app configuration and control.");
+            eprintln!("Error: The ESP32-S2 chip does not have Bluetooth/BLE capabilities. This project strictly requires BLE for phone app configuration and control.");
             exit(1);
         }
         let supported_mcus = ["esp32", "esp32s3", "esp32c3", "esp32c6"];
         if !supported_mcus.contains(&esp.mcu.as_str()) {
-            eprintln!("❌ Error: Unsupported ESP MCU '{}'. Supported MCUs are: {:?}", esp.mcu, supported_mcus);
+            eprintln!("Error: Unsupported ESP MCU '{}'. Supported MCUs are: {:?}", esp.mcu, supported_mcus);
             exit(1);
         }
         if esp.ble.pairing_button_pin > 48 {
             eprintln!(
-                "❌ Error: [hardware.esp.ble].pairing_button_pin={} is out of range.",
+                "Error: [hardware.esp.ble].pairing_button_pin={} is out of range.",
                 esp.ble.pairing_button_pin
             );
             exit(1);
@@ -170,7 +170,7 @@ impl TargetBuilder for Builder {
             || esp.ble.controller_lease_ttl_s == 0
         {
             eprintln!(
-                "❌ Error: BLE lifecycle values must be > 0 (pairing_button_hold_s, max_bonded_phones, controller_lease_ttl_s)."
+                "Error: BLE lifecycle values must be > 0 (pairing_button_hold_s, max_bonded_phones, controller_lease_ttl_s)."
             );
             exit(1);
         }
@@ -189,7 +189,7 @@ impl TargetBuilder for Builder {
         // Validate CAN bus count
         if esp_hw.can_buses.len() < can_bus_count {
             eprintln!(
-                "❌ Vehicle '{}' requires {} CAN bus(es) but [hardware.esp] only defines {} [[hardware.esp.can_buses]] entries.",
+                "Vehicle '{}' requires {} CAN bus(es) but [hardware.esp] only defines {} [[hardware.esp.can_buses]] entries.",
                 vehicle_platform, can_bus_count, esp_hw.can_buses.len()
             );
             exit(1);
@@ -511,13 +511,13 @@ impl TargetBuilder for Builder {
 
         cmd.arg(&elf_path);
 
-        let status = cmd.status().expect("❌ Failed to execute espflash — is it installed?");
+        let status = cmd.status().expect("Failed to execute espflash — is it installed?");
         if !status.success() {
             exit(status.code().unwrap_or(1));
         }
 
         if !monitor {
-            println!("✅ Flash complete.");
+            println!("Flash complete.");
         }
     }
 
@@ -599,7 +599,7 @@ impl TargetBuilder for Builder {
             .expect("Failed to write .app_test_build/Cargo.toml");
         fs::write(".app_test_build/src/main.rs", main_rs)
             .expect("Failed to write .app_test_build/src/main.rs");
-        println!("✅ .app_test_build/ generated for {} ({})", mcu, config.target.platform);
+        println!(".app_test_build/ generated for {} ({})", mcu, config.target.platform);
     }
 
     fn test_hardware(&self, config: &Config) {

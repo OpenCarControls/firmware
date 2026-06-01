@@ -99,7 +99,7 @@ impl TargetBuilder for Builder {
         // Validate CAN bus count
         if pc_hw.can_buses.len() < can_bus_count {
             eprintln!(
-                "❌ Vehicle '{}' requires {} CAN bus(es) but [hardware.pc] only defines {} [[hardware.pc.can_buses]] entries.",
+                "Vehicle '{}' requires {} CAN bus(es) but [hardware.pc] only defines {} [[hardware.pc.can_buses]] entries.",
                 vehicle_platform, can_bus_count, pc_hw.can_buses.len()
             );
             exit(1);
@@ -160,7 +160,7 @@ impl TargetBuilder for Builder {
 
         if pc_hw.ble.max_bonded_phones == 0 || pc_hw.ble.http_port == 0 {
             eprintln!(
-                "❌ [hardware.pc.ble].max_bonded_phones and http_port must be > 0"
+                "[hardware.pc.ble].max_bonded_phones and http_port must be > 0"
             );
             exit(1);
         }

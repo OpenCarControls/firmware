@@ -17,32 +17,32 @@ fn main() -> Result<()> {
 
 fn generate_ble_transport_constants() -> Result<()> {
     let toml_str = std::fs::read_to_string("../contracts/opencar/core/v1/transport.toml")
-        .expect("❌ Failed to read contracts/opencar/core/v1/transport.toml");
+        .expect("Failed to read contracts/opencar/core/v1/transport.toml");
 
     let transport: toml::Value =
-        toml::from_str(&toml_str).expect("❌ Failed to parse transport.toml");
+        toml::from_str(&toml_str).expect("Failed to parse transport.toml");
 
     let service_uuid = parse_uuid(
         transport["ble"]["service"]["uuid"]
             .as_str()
-            .expect("❌ ble.service.uuid must be a string"),
+            .expect("ble.service.uuid must be a string"),
         "ble.service.uuid",
     );
     let rx_uuid = parse_uuid(
         transport["ble"]["characteristics"]["app_to_device"]["uuid"]
             .as_str()
-            .expect("❌ ble.characteristics.app_to_device.uuid must be a string"),
+            .expect("ble.characteristics.app_to_device.uuid must be a string"),
         "ble.characteristics.app_to_device.uuid",
     );
     let tx_uuid = parse_uuid(
         transport["ble"]["characteristics"]["device_to_app"]["uuid"]
             .as_str()
-            .expect("❌ ble.characteristics.device_to_app.uuid must be a string"),
+            .expect("ble.characteristics.device_to_app.uuid must be a string"),
         "ble.characteristics.device_to_app.uuid",
     );
     let pairing_window_s = transport["ble"]["pairing"]["pairing_window_seconds"]
         .as_integer()
-        .expect("❌ ble.pairing.pairing_window_seconds must be an integer");
+        .expect("ble.pairing.pairing_window_seconds must be an integer");
 
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let out_path = std::path::Path::new(&out_dir).join("ble_transport.rs");
@@ -64,8 +64,8 @@ fn parse_uuid(uuid: &str, field: &str) -> u128 {
     let hex: String = uuid.chars().filter(|c| *c != '-').collect();
     assert!(
         hex.len() == 32,
-        "❌ transport.toml {field} must be a 128-bit UUID (32 hex digits), got: {uuid}"
+        "transport.toml {field} must be a 128-bit UUID (32 hex digits), got: {uuid}"
     );
     u128::from_str_radix(&hex, 16)
-        .unwrap_or_else(|_| panic!("❌ transport.toml {field} is not valid hex: {uuid}"))
+        .unwrap_or_else(|_| panic!("transport.toml {field} is not valid hex: {uuid}"))
 }

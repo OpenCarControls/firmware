@@ -110,7 +110,7 @@ pub struct TransportBleCharacteristic {
 pub fn ws_dep_version(workspace_deps: &toml::Value, name: &str) -> String {
     let dep = workspace_deps.get(name).unwrap_or_else(|| {
         panic!(
-            "❌ Missing workspace dependency '{}'. Add it to [workspace.dependencies] in Cargo.toml.",
+            "Missing workspace dependency '{}'. Add it to [workspace.dependencies] in Cargo.toml.",
             name
         )
     });
@@ -119,7 +119,7 @@ pub fn ws_dep_version(workspace_deps: &toml::Value, name: &str) -> String {
     } else if let Some(v) = dep.get("version").and_then(|v| v.as_str()) {
         v.to_string()
     } else {
-        panic!("❌ Workspace dependency '{}' has no 'version' field.", name)
+        panic!("Workspace dependency '{}' has no 'version' field.", name)
     }
 }
 
@@ -137,15 +137,15 @@ pub fn load_platform_meta(platform: &str) -> (u32, usize) {
         platform_underscore
     );
     let meta_str = fs::read_to_string(&meta_path)
-        .unwrap_or_else(|_| panic!("❌ Could not read platform meta: {}", meta_path));
+        .unwrap_or_else(|_| panic!("Could not read platform meta: {}", meta_path));
     let meta: PlatformMeta =
-        toml::from_str(&meta_str).expect("❌ Invalid platform meta.toml format");
+        toml::from_str(&meta_str).expect("Invalid platform meta.toml format");
     let hex = meta
         .platform_id
         .trim_start_matches("0x")
         .trim_start_matches("0X");
     let platform_id =
-        u32::from_str_radix(hex, 16).expect("❌ Invalid platform_id hex in meta.toml");
+        u32::from_str_radix(hex, 16).expect("Invalid platform_id hex in meta.toml");
     (platform_id, meta.can_bus_count)
 }
 
@@ -154,11 +154,11 @@ pub fn load_platform_meta(platform: &str) -> (u32, usize) {
 pub fn load_vehicle_crate_info(platform: &str) -> (String, String) {
     let path = format!("cars/{}/Cargo.toml", platform);
     let cargo_str = fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("❌ Could not read vehicle Cargo.toml: {}", path));
-    let cargo: toml::Value = toml::from_str(&cargo_str).expect("❌ Invalid vehicle Cargo.toml");
+        .unwrap_or_else(|_| panic!("Could not read vehicle Cargo.toml: {}", path));
+    let cargo: toml::Value = toml::from_str(&cargo_str).expect("Invalid vehicle Cargo.toml");
     let name = cargo["package"]["name"]
         .as_str()
-        .expect("❌ Missing [package.name] in vehicle Cargo.toml")
+        .expect("Missing [package.name] in vehicle Cargo.toml")
         .to_string();
     let ident = name.replace('-', "_");
     (name, ident)
@@ -176,19 +176,19 @@ pub fn generate_mtls_certs(config: &Config) -> String {
         .mqtt
         .ca_cert_file
         .as_ref()
-        .expect("❌ [network.mqtt].ca_cert_file is required when auth_mode = \"mtls\"");
+        .expect("[network.mqtt].ca_cert_file is required when auth_mode = \"mtls\"");
     let cert = config
         .network
         .mqtt
         .client_cert_file
         .as_ref()
-        .expect("❌ [network.mqtt].client_cert_file is required when auth_mode = \"mtls\"");
+        .expect("[network.mqtt].client_cert_file is required when auth_mode = \"mtls\"");
     let key = config
         .network
         .mqtt
         .client_key_file
         .as_ref()
-        .expect("❌ [network.mqtt].client_key_file is required when auth_mode = \"mtls\"");
+        .expect("[network.mqtt].client_key_file is required when auth_mode = \"mtls\"");
     format!(
         "const CA_CERT: &[u8] = include_bytes!(\"../../{}\");\n\
          const CLIENT_CERT: &[u8] = include_bytes!(\"../../{}\");\n\
@@ -206,7 +206,7 @@ pub fn parse_broker_url(url: &str) -> (String, u16) {
         ("mqtt", r)
     } else {
         eprintln!(
-            "❌ broker_url must start with mqtt:// or mqtts://, got: {}",
+            "broker_url must start with mqtt:// or mqtts://, got: {}",
             url
         );
         std::process::exit(1);
@@ -218,7 +218,7 @@ pub fn parse_broker_url(url: &str) -> (String, u16) {
         let host = &host_port[..colon];
         let port_str = &host_port[colon + 1..];
         let port = port_str.parse::<u16>().unwrap_or_else(|_| {
-            eprintln!("❌ Invalid port in broker_url: {}", port_str);
+            eprintln!("Invalid port in broker_url: {}", port_str);
             std::process::exit(1);
         });
         (host.to_string(), port)
@@ -230,14 +230,14 @@ pub fn parse_broker_url(url: &str) -> (String, u16) {
 pub fn load_transport_contract() -> TransportConfig {
     let path = "contracts/opencar/core/v1/transport.toml";
     let content = fs::read_to_string(path)
-        .unwrap_or_else(|_| panic!("❌ Failed to read transport contract: {}", path));
-    toml::from_str(&content).expect("❌ Failed to parse transport.toml")
+        .unwrap_or_else(|_| panic!("Failed to read transport contract: {}", path));
+    toml::from_str(&content).expect("Failed to parse transport.toml")
 }
 
 pub fn render_topic_from_template(template: &str, client_id: &str, field_name: &str) -> String {
     if !template.contains("{client_id}") {
         eprintln!(
-            "❌ transport.toml {} must include '{{client_id}}': {}",
+            "transport.toml {} must include '{{client_id}}': {}",
             field_name, template
         );
         exit(1);
@@ -253,14 +253,14 @@ pub fn parse_uuid_u128(uuid: &str, field_name: &str) -> u128 {
     let hex: String = uuid.chars().filter(|c| *c != '-').collect();
     if hex.len() != 32 {
         eprintln!(
-            "❌ transport.toml {} must be a 128-bit UUID, got: {}",
+            "transport.toml {} must be a 128-bit UUID, got: {}",
             field_name, uuid
         );
         exit(1);
     }
     u128::from_str_radix(&hex, 16).unwrap_or_else(|_| {
         eprintln!(
-            "❌ transport.toml {} is not valid hex UUID: {}",
+            "transport.toml {} is not valid hex UUID: {}",
             field_name, uuid
         );
         exit(1);
@@ -273,13 +273,13 @@ pub fn validate_ble_transport_contract(transport: &TransportConfig) {
 
     if app_to_device.payload != "opencar.core.v1.AppToDevice" {
         eprintln!(
-            "❌ transport.toml ble.characteristics.app_to_device.payload must be opencar.core.v1.AppToDevice"
+            "transport.toml ble.characteristics.app_to_device.payload must be opencar.core.v1.AppToDevice"
         );
         exit(1);
     }
     if app_to_device.direction != "app -> device" {
         eprintln!(
-            "❌ transport.toml ble.characteristics.app_to_device.direction must be 'app -> device'"
+            "transport.toml ble.characteristics.app_to_device.direction must be 'app -> device'"
         );
         exit(1);
     }
@@ -291,26 +291,26 @@ pub fn validate_ble_transport_contract(transport: &TransportConfig) {
             .any(|p| p == "write_without_response")
     {
         eprintln!(
-            "❌ transport.toml ble.characteristics.app_to_device.properties must be [\"write\", \"write_without_response\"]"
+            "transport.toml ble.characteristics.app_to_device.properties must be [\"write\", \"write_without_response\"]"
         );
         exit(1);
     }
 
     if device_to_app.payload != "opencar.core.v1.DeviceToApp" {
         eprintln!(
-            "❌ transport.toml ble.characteristics.device_to_app.payload must be opencar.core.v1.DeviceToApp"
+            "transport.toml ble.characteristics.device_to_app.payload must be opencar.core.v1.DeviceToApp"
         );
         exit(1);
     }
     if device_to_app.direction != "device -> app" {
         eprintln!(
-            "❌ transport.toml ble.characteristics.device_to_app.direction must be 'device -> app'"
+            "transport.toml ble.characteristics.device_to_app.direction must be 'device -> app'"
         );
         exit(1);
     }
     if device_to_app.properties.len() != 1 || device_to_app.properties[0] != "notify" {
         eprintln!(
-            "❌ transport.toml ble.characteristics.device_to_app.properties must be [\"notify\"]"
+            "transport.toml ble.characteristics.device_to_app.properties must be [\"notify\"]"
         );
         exit(1);
     }
@@ -326,7 +326,7 @@ pub fn validate_ble_transport_contract(transport: &TransportConfig) {
     );
 
     if transport.ble.pairing.pairing_window_seconds == 0 {
-        eprintln!("❌ transport.toml ble.pairing.pairing_window_seconds must be > 0");
+        eprintln!("transport.toml ble.pairing.pairing_window_seconds must be > 0");
         exit(1);
     }
 }
@@ -395,7 +395,7 @@ fn main() {
         && std::path::Path::new("config.toml.example").exists()
     {
         fs::copy("config.toml.example", "config.toml")
-            .expect("❌ Failed to copy config.toml.example → config.toml");
+            .expect("Failed to copy config.toml.example → config.toml");
         println!("📋 Created config.toml from config.toml.example — edit it to match your setup.");
     }
 
@@ -409,9 +409,9 @@ fn main() {
 
     // Load workspace dependency versions from root Cargo.toml so builders don't hardcode them.
     let ws_toml_str =
-        fs::read_to_string("Cargo.toml").expect("❌ Could not read workspace Cargo.toml");
+        fs::read_to_string("Cargo.toml").expect("Could not read workspace Cargo.toml");
     let ws_toml: toml::Value =
-        toml::from_str(&ws_toml_str).expect("❌ Failed to parse workspace Cargo.toml");
+        toml::from_str(&ws_toml_str).expect("Failed to parse workspace Cargo.toml");
     config.workspace_deps = ws_toml["workspace"]["dependencies"].clone();
 
     if let Some(board) = override_board {
@@ -469,18 +469,18 @@ fn run_host_tests(config: &Config) {
     ];
 
     for pkg in packages {
-        println!("🧪 Testing {}...", pkg);
+        println!("Testing {}...", pkg);
         let status = Command::new("cargo")
             .args(["test", "-p", pkg, "--", "--test-threads=1"])
             .status()
-            .expect("❌ cargo test failed to spawn");
+            .expect("cargo test failed to spawn");
         if !status.success() {
-            eprintln!("❌ Tests failed for package '{}'", pkg);
+            eprintln!("Tests failed for package '{}'", pkg);
             exit(status.code().unwrap_or(1));
         }
     }
 
-    println!("✅ All host tests passed.");
+    println!("All host tests passed.");
 }
 
 // ==========================================
@@ -520,18 +520,18 @@ pub trait TargetBuilder {
 
     // Flash the compiled firmware to a connected device (opt-in per board)
     fn flash(&self, _config: &Config, _port: Option<&str>, _monitor: bool, _release: bool) {
-        eprintln!("❌ Flash is not supported for this board.");
+        eprintln!("Flash is not supported for this board.");
         exit(1);
     }
 
     // On-hardware test support (opt-in per board)
     fn generate_app_test_build(&self, _config: &Config) {
-        eprintln!("❌ On-hardware tests are not supported for this board.");
+        eprintln!("On-hardware tests are not supported for this board.");
         exit(1);
     }
 
     fn test_hardware(&self, _config: &Config) {
-        eprintln!("❌ On-hardware tests are not supported for this board.");
+        eprintln!("On-hardware tests are not supported for this board.");
         exit(1);
     }
 }

@@ -96,7 +96,7 @@ jobs:
             esp32s3) TRIPLE="xtensa-esp32s3-none-elf" ;;
             esp32c3) TRIPLE="riscv32imc-unknown-none-elf" ;;
             esp32c6) TRIPLE="riscv32imac-unknown-none-elf" ;;
-            *)       echo "❌ Unknown MCU: $MCU"; exit 1 ;;
+            *)       echo "Unknown MCU: $MCU"; exit 1 ;;
           esac
 
           ELF=".app_build/target/${TRIPLE}/release/app-build"
