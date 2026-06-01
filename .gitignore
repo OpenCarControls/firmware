@@ -33,6 +33,3 @@ config.toml
 
 # Build artifacts
 dist/*
-
-# TEMP
-trouble-trouble-host-v0.5.1
