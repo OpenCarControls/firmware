@@ -19,8 +19,7 @@ fn generate_ble_transport_constants() -> Result<()> {
     let toml_str = std::fs::read_to_string("../contracts/opencar/core/v1/transport.toml")
         .expect("Failed to read contracts/opencar/core/v1/transport.toml");
 
-    let transport: toml::Value =
-        toml::from_str(&toml_str).expect("Failed to parse transport.toml");
+    let transport: toml::Value = toml::from_str(&toml_str).expect("Failed to parse transport.toml");
 
     let service_uuid = parse_uuid(
         transport["ble"]["service"]["uuid"]

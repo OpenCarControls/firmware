@@ -138,14 +138,12 @@ pub fn load_platform_meta(platform: &str) -> (u32, usize) {
     );
     let meta_str = fs::read_to_string(&meta_path)
         .unwrap_or_else(|_| panic!("Could not read platform meta: {}", meta_path));
-    let meta: PlatformMeta =
-        toml::from_str(&meta_str).expect("Invalid platform meta.toml format");
+    let meta: PlatformMeta = toml::from_str(&meta_str).expect("Invalid platform meta.toml format");
     let hex = meta
         .platform_id
         .trim_start_matches("0x")
         .trim_start_matches("0X");
-    let platform_id =
-        u32::from_str_radix(hex, 16).expect("Invalid platform_id hex in meta.toml");
+    let platform_id = u32::from_str_radix(hex, 16).expect("Invalid platform_id hex in meta.toml");
     (platform_id, meta.can_bus_count)
 }
 
