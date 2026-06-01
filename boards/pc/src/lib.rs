@@ -9,11 +9,11 @@ mod hardware {
     use super::{ble, can, network};
 
     use core_interface::SYSTEM_COMMAND_CHANNEL;
-    
+
     pub use ble::{ble_http_task, set_ble_paired_store_path};
     pub use can::socket_can_task;
     pub use network::mqtt_driver_task;
-    
+
     pub fn start(spawner: &embassy_executor::Spawner) {
         spawner.spawn(core_interface::process_ble_commands_task().unwrap());
         spawner.spawn(core_interface::process_mqtt_commands_task().unwrap());
@@ -22,7 +22,7 @@ mod hardware {
         spawner.spawn(core_interface::publish_can_debug_task().unwrap());
         spawner.spawn(system_command_task().unwrap());
     }
-    
+
     #[embassy_executor::task]
     pub async fn system_command_task() {
         // Restore persisted bonded-phone registry on startup.
@@ -38,7 +38,7 @@ mod hardware {
                 path
             );
         }
-    
+
         loop {
             let cmd = SYSTEM_COMMAND_CHANNEL.receiver().receive().await;
             match cmd.action {
