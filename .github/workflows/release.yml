@@ -18,7 +18,6 @@ jobs:
     outputs:
       platform: ${{ steps.parse.outputs.platform }}
       version:  ${{ steps.parse.outputs.version }}
-      mcu:      ${{ steps.parse.outputs.mcu }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,17 +33,12 @@ jobs:
           VERSION="${WITHOUT_PREFIX##*-v}"
           PLATFORM="${WITHOUT_PREFIX%-v${VERSION}}"
 
-          # Read the MCU from config.toml.example (single source of truth for board defaults).
-          MCU=$(grep -E '^\s*mcu\s*=' config.toml.example | head -n1 | sed 's/.*=\s*"\(.*\)"/\1/')
-
           echo "Tag:      $TAG"
           echo "Platform: $PLATFORM"
           echo "Version:  $VERSION"
-          echo "MCU:      $MCU"
 
           echo "platform=$PLATFORM" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION"   >> "$GITHUB_OUTPUT"
-          echo "mcu=$MCU"           >> "$GITHUB_OUTPUT"
 
   # ── Build per-board (matrix) ─────────────────────────────────────────────────
   build:
@@ -68,7 +62,7 @@ jobs:
         if: matrix.board == 'esp'
         uses: esp-rs/xtensa-toolchain@v1.6
         with:
-          buildtargets: ${{ needs.parse-tag.outputs.mcu }}
+          buildtargets: esp32s3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -96,7 +90,7 @@ jobs:
       - name: Produce merged .bin (ESP)
         if: matrix.board == 'esp'
         run: |
-          MCU="${{ needs.parse-tag.outputs.mcu }}"
+          MCU=$(grep -E '^\s*mcu\s*=' config.toml.example | head -n1 | sed 's/.*=\s*"\(.*\)"/\1/')
           PLATFORM="${{ needs.parse-tag.outputs.platform }}"
           VERSION="${{ needs.parse-tag.outputs.version }}"
 
@@ -131,7 +125,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: artifact-esp
-          path: open-car-${{ needs.parse-tag.outputs.platform }}-${{ needs.parse-tag.outputs.mcu }}-v${{ needs.parse-tag.outputs.version }}.bin
+          path: open-car-${{ needs.parse-tag.outputs.platform }}-*-v${{ needs.parse-tag.outputs.version }}.bin
           if-no-files-found: error
 
       - name: Upload build artifact (PC)
@@ -168,36 +162,48 @@ jobs:
           PLATFORM="${{ needs.parse-tag.outputs.platform }}"
           CURRENT_TAG="${GITHUB_REF_NAME}"
 
+          # Pretty-print the platform slug: "virtual-car" → "Virtual Car"
+          PLATFORM_TITLE=$(echo "$PLATFORM" | sed 's/-/ /g; s/\b\(.\)/\u\1/g')
+
           # Find the previous tag for this platform, if any
           PREV_TAG=$(git tag --list "car-${PLATFORM}-v*" \
             | sort -V | grep -v "^${CURRENT_TAG}$" | tail -n1 || true)
 
-          if [ -z "$PREV_TAG" ]; then
-            echo "First release for platform '${PLATFORM}'."
-            NOTES="Initial release."
-          else
-            echo "Generating notes from ${PREV_TAG}..${CURRENT_TAG}"
-            NOTES=$(git log "${PREV_TAG}..${CURRENT_TAG}" \
-              --pretty=format:"- %s" \
-              -- "cars/${PLATFORM}/" "core-interface/" "boards/" \
-              | head -100)
-            if [ -z "$NOTES" ]; then
-              NOTES="No conventional commit messages found — see full diff for details."
-            fi
-          fi
+          {
+            if [ -z "$PREV_TAG" ]; then
+              echo "Initial release."
+            else
+              echo "Generating notes from ${PREV_TAG}..${CURRENT_TAG}" >&2
+              COMMITS=$(git log "${PREV_TAG}..${CURRENT_TAG}" \
+                --pretty=format:"%s" \
+                -- "cars/${PLATFORM}/" "core-interface/" "boards/" \
+                | head -100)
 
-          # Write to a file to avoid quoting issues with multiline strings
-          echo "$NOTES" > release_notes.txt
+              FEATURES=$(echo "$COMMITS" | grep -iE '^feat(\(.+\))?!?:' | sed 's/^/- /' || true)
+              FIXES=$(echo "$COMMITS"    | grep -iE '^fix(\(.+\))?!?:'  | sed 's/^/- /' || true)
+              OTHERS=$(echo "$COMMITS"   | grep -ivE '^(feat|fix)(\(.+\))?!?:' | sed 's/^/- /' || true)
+
+              if [ -z "$FEATURES$FIXES$OTHERS" ]; then
+                echo "No changes recorded — see full diff for details."
+              else
+                [ -n "$FEATURES" ] && printf "## What's New\n%s\n\n" "$FEATURES"
+                [ -n "$FIXES"    ] && printf "## Bug Fixes\n%s\n\n"  "$FIXES"
+                [ -n "$OTHERS"   ] && printf "## Other Changes\n%s\n" "$OTHERS"
+              fi
+            fi
+          } > release_notes.txt
+
+          echo "platform_title=$PLATFORM_TITLE" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PLATFORM="${{ needs.parse-tag.outputs.platform }}"
+          PLATFORM_TITLE="${{ steps.notes.outputs.platform_title }}"
           VERSION="${{ needs.parse-tag.outputs.version }}"
           TAG="${GITHUB_REF_NAME}"
 
           gh release create "$TAG" \
-            --title "${PLATFORM} v${VERSION}" \
+            --title "${PLATFORM_TITLE} v${VERSION}" \
             --notes-file release_notes.txt \
             dist/*
