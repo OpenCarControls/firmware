@@ -24,6 +24,12 @@ target
 certs/*
 !certs/.gitkeep
 
+# User-specific build configuration (use config.toml.example as a template)
+config.toml
+
 # xtask temporary files
 .app_build
-xtask/src/board_registry.rs
+.app_test_build
+
+# Build artifacts
+dist/*

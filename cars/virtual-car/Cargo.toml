@@ -1,23 +1,20 @@
 [package]
-name = "core-interface"
+name = "virtual-car-controller"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+core-interface = { workspace = true }
 embedded-can = { workspace = true }
-embedded-hal = { workspace = true }
-embedded-hal-async = "1.0.0"
-embassy-executor = { workspace = true }
-embassy-time = { workspace = true }
-embassy-sync = { workspace = true }
 prost = { workspace = true }
 bytes = { workspace = true }
+embassy-executor = { workspace = true }
+embassy-sync = { workspace = true }
+embassy-time = { workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true }
-toml = { workspace = true }
 
 [dev-dependencies]
 critical-section = { workspace = true }
 embassy-futures = { workspace = true }
-embassy-time = { workspace = true, features = ["std"] }

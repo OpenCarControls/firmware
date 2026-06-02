@@ -1,0 +1,89 @@
+# ==============================================
+#    OPEN CAR INTERFACE - BUILD CONFIGURATION
+# ==============================================
+
+[target]
+# Select which board family you want to use. See the available boards in `boards/`
+board = "esp"
+
+# Select which platform (vehicle crate) you want to use. See the available platforms in `cars/`
+platform = "virtual-car"
+
+# ===================================
+#    BOARD SPECIFIC CONFIGURATIONS
+# ===================================
+
+# Configuration for ESP family boards
+[hardware.esp]
+mcu = "esp32s3"
+modem_tx_pin = 17
+modem_rx_pin = 16
+
+[hardware.esp.ble]
+# Built-in BOOT button on most ESP devkits.
+device_name = "OpenCar"
+pairing_button_pin = 0
+pairing_button_hold_s = 3
+max_bonded_phones = 8
+controller_lease_ttl_s = 15
+
+# CAN bus definitions — order determines bus_id (0-based).
+# Bus 0: built-in TWAI peripheral.
+[[hardware.esp.can_buses]]
+interface = "twai"
+tx_pin = 5
+rx_pin = 4
+
+# Bus 1 (optional): MCP2515 SPI CAN controller. Uncomment to enable.
+# [[hardware.esp.can_buses]]
+# interface = "mcp2515"
+# cs_pin   = 10
+# clk_pin  = 11
+# mosi_pin = 12
+# miso_pin = 13
+# int_pin  = 14
+# can_speed = "500kbps"   # options: 100kbps, 125kbps, 250kbps, 500kbps, 1000kbps
+# mcp_speed = "16mhz"    # options: 8mhz, 16mhz
+
+# Configuration for PC board
+[hardware.pc]
+
+[hardware.pc.ble]
+# PC-only test hooks.
+device_name = "OpenCar"
+http_port = 4242
+max_bonded_phones = 8
+paired_phones_file = "/tmp/opencar-paired-phones.txt"
+
+# CAN bus definitions — order determines bus_id (0-based).
+# Each entry maps to a SocketCAN network interface (real or virtual).
+[[hardware.pc.can_buses]]
+interface = "vcan0"
+
+# ===========================
+#    NETWORK CONFIGURATION
+# ===========================
+
+[network.wifi]
+enabled = true
+ssid = "YourSSID"
+password = "YourPassword"
+
+[network.mqtt]
+# Use mqtt:// for basic auth (plain TCP). Use mqtts:// for mTLS.
+broker_url = "mqtt://192.168.0.100:1883"
+client_id = "dev-car"
+
+# Specify the type of authentication to the broker.
+# - `basic` is for username/password combo (no certs needed)
+# - `mtls` is for using mTLS with certificates
+auth_mode = "basic"
+
+# Basic authentication configuration
+username = "user"
+password = "password"
+
+# mTLS authentication configuration (only used when auth_mode = "mtls")
+ca_cert_file = "certs/ca.pem"
+client_cert_file = "certs/client_cert.pem"
+client_key_file = "certs/client_key.pem"

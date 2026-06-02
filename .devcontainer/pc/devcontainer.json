@@ -1,7 +1,16 @@
 {
+    "name": "Open Car — PC",
     "build": {
-        "dockerfile": "Dockerfile"
+        "dockerfile": "../Dockerfile",
+        "target": "pc"
     },
+    "runArgs": [
+        "-p",
+        "4242:4242"
+    ],
+    "forwardPorts": [
+        4242
+    ],
     "customizations": {
         "vscode": {
             "extensions": [
@@ -11,8 +20,12 @@
                 "EditorConfig.EditorConfig",
                 "chneau.resource-monitor",
                 "Gruntfuggly.todo-tree",
-                "mk12.better-git-line-blame"
-            ]
+                "mk12.better-git-line-blame",
+                "bufbuild.vscode-buf"
+            ],
+            "settings": {
+                "rust-analyzer.cargo.features": ["dev-pc"]
+            }
         }
     },
     "remoteUser": "vscode"

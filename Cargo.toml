@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "core-interface",
-    "cars/**/platforms/*",
+    "cars/*",
     "boards/*",
     "xtask"
 ]
@@ -10,5 +10,27 @@ exclude = [
 ]
 resolver = "3"
 
+default-members = [
+    "core-interface",
+    "cars/*"
+]
+
 [workspace.dependencies]
 core-interface = { path = "core-interface" }
+prost = { version = "0.14.3", default-features = false, features = [ "derive" ]}
+prost-build = "0.14.3"
+toml = "1.1.0"
+bytes = { version = "=1.11.1", default-features = false }
+
+embedded-can = "0.4.1"
+embedded-hal = "1.0.0"
+embedded-io-async = { version = "0.7", default-features = false }
+
+embassy-executor = { version = "0.10.0", default-features = false }
+embassy-time = { version = "0.5.1", default-features = false }
+embassy-sync = "0.7.0"
+embassy-futures = "0.1.2"
+
+critical-section = { version = "1.2.0", features = ["std"] }
+rust-mqtt = { version = "0.5.1", default-features = false, features = ["v5", "alloc"] }
+log = "0.4.29"

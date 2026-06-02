@@ -1,0 +1,119 @@
+name: Auto Tag
+
+on:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    name: Create release tags
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0   # full history needed for git log / git tag
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Compute and push tags
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Discover all platform slugs from the cars/ directory.
+          # Each sub-directory in cars/ is a platform folder whose name IS the slug
+          # (e.g. cars/virtual-car → virtual-car).
+          PLATFORMS=$(find cars -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+
+          if [ -z "$PLATFORMS" ]; then
+            echo "No platforms found under cars/ — nothing to tag."
+            exit 0
+          fi
+
+          for PLATFORM in $PLATFORMS; do
+            echo "──────────────────────────────────────"
+            echo "Platform: $PLATFORM"
+
+            # ── 1. Find the most recent tag for this platform ───────────────
+            LAST_TAG=$(git tag --list "car-${PLATFORM}-v*" \
+              | sort -V | tail -n 1 || true)
+
+            if [ -z "$LAST_TAG" ]; then
+              echo "  No existing tag — using repo root as base."
+              BASE_REF=$(git rev-list --max-parents=0 HEAD)
+              LAST_VERSION="0.0.0"
+            else
+              echo "  Last tag: $LAST_TAG"
+              BASE_REF="$LAST_TAG"
+              # Strip the prefix to get the bare semver (e.g. "0.1.2")
+              LAST_VERSION="${LAST_TAG#car-${PLATFORM}-v}"
+            fi
+
+            # ── 2. Check if any relevant paths changed since the last tag ───
+            CHANGED=$(git diff --name-only "$BASE_REF" HEAD -- \
+              "cars/${PLATFORM}/" \
+              "core-interface/" \
+              "boards/" \
+              || true)
+
+            if [ -z "$CHANGED" ]; then
+              echo "  No relevant changes — skipping."
+              continue
+            fi
+
+            echo "  Changed paths:"
+            echo "$CHANGED" | sed 's/^/    /'
+
+            # ── 3. Determine bump level from conventional commits ───────────
+            COMMITS=$(git log "${BASE_REF}..HEAD" --pretty=format:"%s" -- \
+              "cars/${PLATFORM}/" \
+              "core-interface/" \
+              "boards/" \
+              || true)
+
+            BUMP="patch"
+
+            while IFS= read -r MSG; do
+              # Breaking change: "BREAKING CHANGE:" in body, or "!:" in subject
+              if echo "$MSG" | grep -qiE '(BREAKING[[:space:]]CHANGE|!:)'; then
+                BUMP="major"
+                break
+              fi
+              # New feature: "feat:" or "feat(...):" prefix
+              if [ "$BUMP" != "major" ] && echo "$MSG" | grep -qiE '^feat(\(.+\))?!?:'; then
+                BUMP="minor"
+              fi
+            done <<< "$COMMITS"
+
+            echo "  Bump type: $BUMP"
+
+            # ── 4. Compute next version ──────────────────────────────────────
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$LAST_VERSION"
+            case "$BUMP" in
+              major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+              minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+              patch) PATCH=$((PATCH + 1)) ;;
+            esac
+            NEXT_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+            NEW_TAG="car-${PLATFORM}-v${NEXT_VERSION}"
+
+            # ── 5. Guard: skip if tag already exists ────────────────────────
+            if git tag --list "$NEW_TAG" | grep -q .; then
+              echo "  Tag $NEW_TAG already exists — skipping."
+              continue
+            fi
+
+            echo "  Creating tag: $NEW_TAG"
+            git tag "$NEW_TAG"
+            git push origin "$NEW_TAG"
+          done
+
+          echo "──────────────────────────────────────"
+          echo "Done."

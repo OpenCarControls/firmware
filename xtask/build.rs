@@ -7,13 +7,10 @@ fn main() {
     // if a new board folder is created or removed.
     println!("cargo:rerun-if-changed=../boards");
 
-    // By writing to src/, we make it easier for IDEs like rust-analyzer to find the
-    // generated file, removing annoying warnings.
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let dest_path = Path::new(&manifest_dir).join("src/board_registry.rs");
-
     let mut mods = String::new();
     let mut match_arms = String::new();
+
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
 
     let boards_dir = Path::new("../boards");
     if boards_dir.exists() {
@@ -28,10 +25,13 @@ fn main() {
                 if builder_file.exists() {
                     println!("cargo:rerun-if-changed={}", builder_file.display());
 
+                    let abs_path =
+                        format!("{manifest_dir}/../boards/{board_name}/xtask_builder.rs")
+                            .replace('\\', "/");
+
                     // Note: This path is evaluated relative to `xtask/src/main.rs` where the include! macro sits
                     mods.push_str(&format!(
-                        "#[path = \"../../boards/{}/xtask_builder.rs\"]\nmod board_{};\n",
-                        board_name, board_name
+                        "#[path = \"{abs_path}\"]\nmod board_{board_name};\n"
                     ));
 
                     match_arms.push_str(&format!(
@@ -51,12 +51,14 @@ fn main() {
 pub fn get_builder(board: &str) -> Box<dyn TargetBuilder> {{
     match board {{
 {match_arms}        _ => {{
-            eprintln!("❌ Error: Unsupported board '{{}}'. Did you create boards/{{}}/xtask_builder.rs?", board, board);
+            eprintln!("Error: Unsupported board '{{}}'. Did you create boards/{{}}/xtask_builder.rs?", board, board);
             std::process::exit(1);
         }}
     }}
 }}"#
     );
 
+    let out_dir = env::var_os("OUT_DIR").unwrap();
+    let dest_path = Path::new(&out_dir).join("board_registry.rs");
     fs::write(&dest_path, generated_code).unwrap();
 }
