@@ -1,7 +1,10 @@
 #![cfg_attr(not(feature = "hardware"), no_std)]
 
+#[cfg(feature = "hardware")]
 mod ble;
+#[cfg(feature = "hardware")]
 mod can;
+#[cfg(feature = "hardware")]
 mod network;
 
 #[cfg(feature = "hardware")]
