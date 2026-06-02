@@ -3,6 +3,18 @@ name: Tag And Release
 on:
   push:
     branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Optional comma-separated platform slugs (for example: virtual-car)"
+        required: false
+        type: string
+        default: ""
+      force_all:
+        description: "Create a new tag for selected platforms even without detected code changes"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -33,13 +45,49 @@ jobs:
 
           git fetch --tags --force
 
+          EVENT_NAME="${{ github.event_name }}"
+          REQUESTED_PLATFORMS_RAW="${{ github.event.inputs.platforms || '' }}"
+          FORCE_ALL="${{ github.event.inputs.force_all || false }}"
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "Manual run requested."
+            echo "  platforms input: ${REQUESTED_PLATFORMS_RAW:-<empty>}"
+            echo "  force_all: $FORCE_ALL"
+          fi
+
           # Discover all platform slugs from the cars/ directory.
           # Each sub-directory in cars/ is a platform folder whose name IS the slug
           # (e.g. cars/virtual-car → virtual-car).
-          PLATFORMS=$(find cars -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+          DISCOVERED_PLATFORMS=$(find cars -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+
+          if [ -z "$DISCOVERED_PLATFORMS" ]; then
+            echo "No platforms found under cars/ — nothing to tag."
+            echo 'releases=[]' >> "$GITHUB_OUTPUT"
+            echo 'has_releases=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Optional manual filter: comma-separated slugs in workflow_dispatch input.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "${REQUESTED_PLATFORMS_RAW// /}" ]; then
+            REQUESTED_PLATFORMS=$(echo "$REQUESTED_PLATFORMS_RAW" | tr ',' '\n' | sed 's/^\s*//; s/\s*$//' | grep -v '^$' | sort -u)
+            PLATFORMS=""
+
+            while IFS= read -r P; do
+              if echo "$DISCOVERED_PLATFORMS" | grep -qx "$P"; then
+                PLATFORMS="${PLATFORMS}${PLATFORMS:+$'\n'}${P}"
+              else
+                echo "Unknown platform requested: $P"
+                exit 1
+              fi
+            done <<< "$REQUESTED_PLATFORMS"
+          else
+            PLATFORMS="$DISCOVERED_PLATFORMS"
+          fi
 
           if [ -z "$PLATFORMS" ]; then
-            echo "No platforms found under cars/ — nothing to tag."
+            echo "No platforms selected — nothing to tag."
+            echo 'releases=[]' >> "$GITHUB_OUTPUT"
+            echo 'has_releases=false' >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -72,9 +120,13 @@ jobs:
               "boards/" \
               || true)
 
-            if [ -z "$CHANGED" ]; then
+            if [ "$FORCE_ALL" != "true" ] && [ -z "$CHANGED" ]; then
               echo "  No relevant changes — skipping."
               continue
+            fi
+
+            if [ "$FORCE_ALL" = "true" ] && [ -z "$CHANGED" ]; then
+              echo "  No relevant changes, but force_all=true so a release tag will still be created."
             fi
 
             echo "  Changed paths:"
