@@ -27,11 +27,13 @@ embedded-can      = { workspace = true }
 embassy-executor  = { workspace = true,                                          optional = true }
 embassy-time      = { workspace = true,                                          optional = true }
 critical-section  = { workspace = true,                                          optional = true }
-socketcan         = { version = "3.5.0", default-features = false,               optional = true }
 rust-mqtt         = { workspace = true, features = ["log"],                      optional = true }
 embedded-io-async = { workspace = true, features = ["std"],                      optional = true }
 prost             = { workspace = true,                                          optional = true }
 log               = { workspace = true,                                          optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+socketcan         = { version = "3.5.0", default-features = false,               optional = true }
 
 [dev-dependencies]
 embassy-futures   = { workspace = true }
