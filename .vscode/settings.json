@@ -1,0 +1,4 @@
+{
+  "rust-analyzer.cargo.features": ["dev-pc"],
+  "//": "To work on ESP firmware instead of PC, change rust-analyzer.cargo.features to ['dev-esp32c3'] and add 'rust-analyzer.cargo.target': 'riscv32imc-unknown-none-elf'."
+}

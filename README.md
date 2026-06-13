@@ -8,6 +8,8 @@ Embedded Rust firmware for an open-source car hardware controller. Runs on ESP32
 - **ESP target** (ESP32 only): the `esp` toolchain from [esp-rs](https://github.com/esp-rs/rust-build), installed via `espup`
 - **On-hardware tests / flashing** (ESP32 only): `probe-rs` and `espflash` — both pre-installed in the dev container
 
+> **Note for Windows Users:** If you prefer to work locally without dev containers, please see the [Native Windows Setup Guide](docs/windows-setup.md).
+
 ## 🔌 Flashing & Debugging Hardware
 
 The ESP dev containers (`esp-xtensa`, `esp-riscv`) run with `--privileged`, giving them direct access to any USB device that appears on the host. The setup depends on where Docker is running.

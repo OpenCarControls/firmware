@@ -1,0 +1,7 @@
+{
+  "recommendations": [
+    "bufbuild.vscode-buf",
+    "probe-rs.probe-rs-debugger",
+    "rust-lang.rust-analyzer"
+  ]
+}
