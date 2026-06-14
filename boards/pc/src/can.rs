@@ -55,7 +55,11 @@ mod linux_can {
     /// If the interface cannot be opened (e.g. it does not exist), the task logs a
     /// warning and retries every 5 seconds so the rest of the system keeps running.
     #[embassy_executor::task(pool_size = 4)]
-    pub async fn socket_can_task(interface: &'static str, bus_id: u8, filters: &'static [CanFilter]) {
+    pub async fn socket_can_task(
+        interface: &'static str,
+        bus_id: u8,
+        filters: &'static [CanFilter],
+    ) {
         let socket = loop {
             match CanSocket::open(interface) {
                 Ok(s) => break s,
@@ -260,7 +264,11 @@ mod dummy_can {
     use embassy_time::{Duration, Timer};
 
     #[embassy_executor::task(pool_size = 4)]
-    pub async fn socket_can_task(interface: &'static str, bus_id: u8, _filters: &'static [CanFilter]) {
+    pub async fn socket_can_task(
+        interface: &'static str,
+        bus_id: u8,
+        _filters: &'static [CanFilter],
+    ) {
         log::warn!(
             "CAN bus {}: Dummy CAN interface '{}' active (Windows/Mac). RX ignored, TX dropped.",
             bus_id,
