@@ -11,6 +11,13 @@
     "forwardPorts": [
         4242
     ],
+    "mounts": [
+        {
+            "source": "/workspaces/contracts",
+            "target": "/workspaces/contracts",
+            "type": "bind"
+        }
+    ],
     "customizations": {
         "vscode": {
             "extensions": [
@@ -19,7 +26,7 @@
                 "dotenv.dotenv-vscode",
                 "EditorConfig.EditorConfig",
                 "chneau.resource-monitor",
-                "Gruntfuggly.todo-tree",
+                "FanaticPythoner.better-todo-tree",
                 "mk12.better-git-line-blame",
                 "bufbuild.vscode-buf"
             ],
