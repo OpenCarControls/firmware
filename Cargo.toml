@@ -3,7 +3,8 @@ members = [
     "core-interface",
     "cars/*",
     "boards/*",
-    "xtask"
+    "xtask",
+    "build-utils"
 ]
 exclude = [
     ".app_build"

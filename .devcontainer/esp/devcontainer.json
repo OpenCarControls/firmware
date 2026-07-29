@@ -4,17 +4,14 @@
         "dockerfile": "../Dockerfile",
         "target": "esp"
     },
-    "runArgs": ["--privileged"],
+    "runArgs": [
+        "--privileged"
+    ],
     "mounts": [
         {
             "type": "bind",
             "source": "/dev",
             "target": "/dev"
-        },
-        {
-            "source": "/workspaces/contracts",
-            "target": "/workspaces/contracts",
-            "type": "bind"
         }
     ],
     "customizations": {
@@ -32,7 +29,9 @@
                 "ms-vscode.vscode-serial-monitor"
             ],
             "settings": {
-                "rust-analyzer.cargo.features": ["dev-esp32c3"],
+                "rust-analyzer.cargo.features": [
+                    "dev-esp32c3"
+                ],
                 "rust-analyzer.cargo.target": "riscv32imc-unknown-none-elf",
                 "serialmonitor.defaultPort": "/dev/ttyACM0",
                 "serialmonitor.defaultBaudRate": 115200

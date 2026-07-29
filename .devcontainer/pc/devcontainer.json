@@ -11,13 +11,6 @@
     "forwardPorts": [
         4242
     ],
-    "mounts": [
-        {
-            "source": "/workspaces/contracts",
-            "target": "/workspaces/contracts",
-            "type": "bind"
-        }
-    ],
     "customizations": {
         "vscode": {
             "extensions": [
@@ -31,7 +24,9 @@
                 "bufbuild.vscode-buf"
             ],
             "settings": {
-                "rust-analyzer.cargo.features": ["dev-pc"]
+                "rust-analyzer.cargo.features": [
+                    "dev-pc"
+                ]
             }
         }
     },
