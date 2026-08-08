@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicBool, Ordering};
+use portable_atomic::{AtomicBool, Ordering};
 
 use crate::types::{CanFilter, CanFrame};
 

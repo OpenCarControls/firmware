@@ -16,7 +16,7 @@ mod types;
 
 pub mod ble;
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use portable_atomic::{AtomicU32, Ordering};
 
 // ── Platform ID ───────────────────────────────────────────────────────────────
 

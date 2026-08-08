@@ -44,8 +44,8 @@ fn esp_dep_version(board_toml: &toml::Value, name: &str) -> String {
 struct EspBleConfig {
     #[serde(default)]
     device_name: Option<String>,
-    #[serde(default = "default_pairing_button_pin")]
-    pairing_button_pin: u8,
+    #[serde(default)]
+    pairing_button_pin: Option<u8>,
     #[serde(default = "default_pairing_button_hold_s")]
     pairing_button_hold_s: u32,
     #[serde(default = "default_max_bonded_phones")]
@@ -58,16 +58,12 @@ impl Default for EspBleConfig {
     fn default() -> Self {
         Self {
             device_name: None,
-            pairing_button_pin: default_pairing_button_pin(),
+            pairing_button_pin: None,
             pairing_button_hold_s: default_pairing_button_hold_s(),
             max_bonded_phones: default_max_bonded_phones(),
             controller_lease_ttl_s: default_controller_lease_ttl_s(),
         }
     }
-}
-
-fn default_pairing_button_pin() -> u8 {
-    0
 }
 
 fn default_pairing_button_hold_s() -> u32 {
@@ -97,9 +93,9 @@ fn mcu_to_target_arch(mcu: &str) -> &'static str {
 struct EspConfig {
     mcu: String,
     #[allow(dead_code)]
-    modem_tx_pin: u8,
+    modem_tx_pin: Option<u8>,
     #[allow(dead_code)]
-    modem_rx_pin: u8,
+    modem_rx_pin: Option<u8>,
     #[serde(default)]
     ble: EspBleConfig,
     #[serde(default)]
@@ -158,9 +154,9 @@ impl TargetBuilder for Builder {
             eprintln!("Error: Unsupported ESP MCU '{}'. Supported MCUs are: {:?}", esp.mcu, supported_mcus);
             exit(1);
         }
-        if esp.ble.pairing_button_pin > 48 {
+        if esp.ble.pairing_button_pin.unwrap_or(0) > 48 {
             eprintln!(
-                "Error: [hardware.esp.ble].pairing_button_pin={} is out of range.",
+                "Error: [hardware.esp.ble].pairing_button_pin={:?} is out of range.",
                 esp.ble.pairing_button_pin
             );
             exit(1);
@@ -214,9 +210,22 @@ impl TargetBuilder for Builder {
                         .unwrap_or_else(|| { eprintln!("\u{274c} TWAI bus {} missing 'tx_pin'", bus_id); exit(1); });
                     let rx = bus.get("rx_pin").and_then(|v| v.as_integer())
                         .unwrap_or_else(|| { eprintln!("\u{274c} TWAI bus {} missing 'rx_pin'", bus_id); exit(1); });
+                    let mut standby_init = String::new();
+                    if let Some(enable_pin) = bus.get("enable_pin").and_then(|v| v.as_integer()) {
+                        let enable_level = bus.get("enable_level").and_then(|v| v.as_str()).unwrap_or("high");
+                        let level_enum = if enable_level.eq_ignore_ascii_case("low") {
+                            "esp_hal::gpio::Level::Low"
+                        } else {
+                            "esp_hal::gpio::Level::High"
+                        };
+                        standby_init = format!(
+                            "    let _can_bus_{0}_enable = esp_hal::gpio::Output::new(peripherals.GPIO{1}, {2}, esp_hal::gpio::OutputConfig::default());\n",
+                            bus_id, enable_pin, level_enum
+                        );
+                    }
                     can_hardware_init.push_str(&format!(
-                        "    let can_bus_{0} = board_esp::init_twai(peripherals.TWAI0, peripherals.GPIO{2}, peripherals.GPIO{1}, {3});\n",
-                        bus_id, tx, rx, filters_expr
+                        "{4}    let can_bus_{0} = board_esp::init_twai(peripherals.TWAI0, peripherals.GPIO{2}, peripherals.GPIO{1}, {3});\n",
+                        bus_id, tx, rx, filters_expr, standby_init
                     ));
                     can_task_defs.push_str(&format!(
                         "#[embassy_executor::task]\nasync fn can_bus_{0}_task(driver: board_esp::TwaiDriver) {{\n    board_esp::run_twai_loop(driver, {0}, {1}).await;\n}}\n",
@@ -362,13 +371,13 @@ impl TargetBuilder for Builder {
 
         let ble_constants = format!(
             "const BLE_DEVICE_NAME_BASE: &str = \"{ble_name}\";\n\
-             const BLE_PAIRING_BUTTON_PIN: u8 = {pair_btn};\n\
+             const BLE_PAIRING_BUTTON_PIN: Option<u8> = {pair_btn};\n\
              const BLE_PAIRING_BUTTON_HOLD_S: u32 = {pair_hold};\n\
              const BLE_PAIRING_WINDOW_S: u32 = {pair_window};\n\
              const BLE_MAX_BONDED_PHONES: u8 = {max_bonds};\n\
              const BLE_CONTROLLER_LEASE_TTL_S: u32 = {lease_ttl};",
             ble_name = ble_device_name,
-            pair_btn = esp_hw.ble.pairing_button_pin,
+            pair_btn = match esp_hw.ble.pairing_button_pin { Some(p) => format!("Some({})", p), None => "None".to_string() },
             pair_hold = esp_hw.ble.pairing_button_hold_s,
             pair_window = transport.ble.pairing.pairing_window_seconds,
             max_bonds = esp_hw.ble.max_bonded_phones,
@@ -442,14 +451,38 @@ impl TargetBuilder for Builder {
             "    // WiFi disabled: MQTT driver not spawned.\n".to_string()
         };
 
+        let is_dual_core = esp_hw.mcu == "esp32" || esp_hw.mcu == "esp32s3";
+        let heap_size = if is_dual_core { "160 * 1024" } else { "72 * 1024" };
+
+        let can_driver_spawn = if is_dual_core {
+            format!(
+                "    static CORE1_STACK: static_cell::StaticCell<esp_hal::system::Stack<8192>> = static_cell::StaticCell::new();\n\
+                     static CORE1_EXECUTOR: static_cell::StaticCell<esp_rtos::embassy::Executor> = static_cell::StaticCell::new();\n\
+                 \n\
+                     esp_rtos::start_second_core(\n\
+                         peripherals.CPU_CTRL,\n\
+                         unsafe {{ esp_hal::interrupt::software::SoftwareInterrupt::<1>::steal() }},\n\
+                         CORE1_STACK.init(esp_hal::system::Stack::new()),\n\
+                         move || {{\n\
+                             CORE1_EXECUTOR.init(esp_rtos::embassy::Executor::new()).run(|s: embassy_executor::Spawner| {{\n\
+                 {0}            }});\n\
+                         }},\n\
+                     );\n",
+                can_task_spawns
+            )
+        } else {
+            can_task_spawns.replace("                s.spawn(", "    spawner.spawn(")
+        };
+
         let template = fs::read_to_string("boards/esp/main.template.rs")
             .expect("\u{274c} Could not read boards/esp/main.template.rs");
         let main_rs = template
             .replace("{PLATFORM_ID}", &format!("0x{:08X}", platform_id))
             .replace("{VEHICLE_CRATE_IDENT}", &vehicle_crate_ident)
+            .replace("{HEAP_SIZE}", heap_size)
             .replace("{CAN_HARDWARE_INIT}", &can_hardware_init)
-            .replace("{CORE1_CAN_TASK_DEFS}", &can_task_defs)
-            .replace("{CORE1_TASK_SPAWNS}", &can_task_spawns)
+            .replace("{CAN_TASK_DEFS}", &can_task_defs)
+            .replace("{CAN_DRIVER_SPAWN}", &can_driver_spawn)
             .replace("{MTLS_CERTS}", &mtls_certs)
             .replace("{NETWORK_CONSTANTS}", &network_constants)
             .replace("{NETWORK_HARDWARE_INIT}", &network_hardware_init)
@@ -465,10 +498,16 @@ impl TargetBuilder for Builder {
                 target = target_arch
             )
         } else {
+            let mut rustflags = vec!["\"-C\"", "\"link-arg=-Tlinkall.x\""];
+            if esp_hw.mcu == "esp32c3" {
+                rustflags.push("\"-C\"");
+                rustflags.push("\"target-feature=+a\"");
+            }
             format!(
                 "[build]\ntarget = \"{target}\"\n\n\
-                 [target.{target}]\nrustflags = [\"-C\", \"link-arg=-Tlinkall.x\"]\n",
-                target = target_arch
+                 [target.{target}]\nrustflags = [{flags}]\n",
+                target = target_arch,
+                flags = rustflags.join(", ")
             )
         };
 

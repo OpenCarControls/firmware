@@ -16,13 +16,13 @@ platform = "virtual-car"
 # Configuration for ESP family boards
 [hardware.esp]
 mcu = "esp32s3"
-modem_tx_pin = 17
-modem_rx_pin = 16
+# modem_tx_pin = 17 # Optional: TX pin for LTE modem
+# modem_rx_pin = 16 # Optional: RX pin for LTE modem
 
 [hardware.esp.ble]
 # Built-in BOOT button on most ESP devkits.
 device_name = "OpenCar"
-pairing_button_pin = 0
+# pairing_button_pin = 0
 pairing_button_hold_s = 3
 max_bonded_phones = 8
 controller_lease_ttl_s = 15
@@ -33,6 +33,8 @@ controller_lease_ttl_s = 15
 interface = "twai"
 tx_pin = 5
 rx_pin = 4
+# enable_pin = 6       # Optional: GPIO pin to enable the CAN transceiver out of standby
+# enable_level = "low" # Optional: "high" or "low" (default is "high")
 
 # Bus 1 (optional): MCP2515 SPI CAN controller. Uncomment to enable.
 # [[hardware.esp.can_buses]]

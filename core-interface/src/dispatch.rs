@@ -1,6 +1,6 @@
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::Ordering;
+use portable_atomic::Ordering;
 
 use crate::can_debug;
 use crate::channels::{
@@ -12,8 +12,8 @@ use crate::types::{CanDebugFilter, InboundCommand, Transport};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 
-static BLE_CONTROLLER_LEASE_TTL_S: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(15);
+static BLE_CONTROLLER_LEASE_TTL_S: portable_atomic::AtomicU32 =
+    portable_atomic::AtomicU32::new(15);
 
 #[derive(Default)]
 struct BleControllerLease {
