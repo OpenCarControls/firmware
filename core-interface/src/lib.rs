@@ -12,6 +12,8 @@ mod dispatch;
 mod lifecycle;
 mod pairing;
 mod routing;
+#[cfg(debug_assertions)]
+mod simulation;
 mod types;
 
 pub mod ble;
@@ -79,3 +81,7 @@ pub use routing::{
     publish_single_state, publish_state_task, record_mqtt_activity, reset_mqtt_throttle_for_tests,
     route_responses_task, route_single_response,
 };
+
+// Simulation
+#[cfg(debug_assertions)]
+pub use simulation::{is_simulation_enabled, set_simulation_enabled};

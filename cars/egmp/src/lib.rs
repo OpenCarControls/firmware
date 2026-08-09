@@ -246,14 +246,39 @@ pub async fn process_advanced_command(bytes: &[u8]) -> Result<(), &'static str> 
     }
 }
 
+/// Advances the simulated vehicle state by one 5-second tick.
+#[cfg(debug_assertions)]
+pub fn tick_simulation(state: &mut EgmpCarState, tick: u64) {
+    let phase = (tick % 20) as i32;
+    let speed = match phase {
+        0..=4 => phase * 16,
+        5..=9 => 80,
+        10..=14 => (14 - phase) * 16,
+        _ => 0,
+    };
+    state.speed = Some(speed);
+    state.is_driving = Some(speed > 0);
+    state.gear = Some(if speed > 0 { 2 } else { 0 });
+    if phase == 19 {
+        state.odometer = Some(state.odometer.unwrap_or(0).saturating_add(1));
+    }
+}
+
 #[embassy_executor::task]
 pub async fn state_update_task() {
+    let mut tick: u64 = 0;
     loop {
         Timer::after(Duration::from_secs(5)).await;
         let payload = {
-            let state = CAR_STATE.lock().await;
+            #[allow(unused_mut)]
+            let mut state = CAR_STATE.lock().await;
+            #[cfg(debug_assertions)]
+            if core_interface::is_simulation_enabled() {
+                tick_simulation(&mut state, tick);
+            }
             encode_state(&state)
         };
+        tick = tick.wrapping_add(1);
         VEHICLE_STATE_CHANNEL.sender().send(payload).await;
     }
 }

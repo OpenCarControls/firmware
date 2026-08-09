@@ -282,6 +282,13 @@ async fn handle_request(
             core_interface::open_pairing_window_for(pairing_window_s);
             write_http_response(stream, "200 OK", "text/plain", b"pairing window opened").await
         }
+        #[cfg(debug_assertions)]
+        ("POST", "/simulate") => {
+            let enabled = core_interface::is_simulation_enabled();
+            core_interface::set_simulation_enabled(!enabled);
+            let msg = if !enabled { b"simulation enabled" } else { b"simulation disabled" };
+            write_http_response(stream, "200 OK", "text/plain", msg).await
+        }
         ("POST", "/pair") => {
             let pairing_window_open = core_interface::is_pairing_window_open();
             match pair_phone_for_http(&peer_device_id(stream), pairing_window_open).await {

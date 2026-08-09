@@ -55,6 +55,7 @@ impl VirtualCarState {
 ///
 /// `odometer` increments by 1 km at tick 19 (end of each full cycle).
 /// `are_doors_locked` is intentionally untouched — it is command-controlled only.
+#[cfg(debug_assertions)]
 pub fn tick_simulation(state: &mut VirtualCarState, tick: u64) {
     let phase = (tick % 20) as i32;
     let speed = match phase {
@@ -288,8 +289,12 @@ pub async fn state_update_task() {
     loop {
         Timer::after(Duration::from_secs(5)).await;
         let payload = {
+            #[allow(unused_mut)]
             let mut state = CAR_STATE.lock().await;
-            tick_simulation(&mut state, tick);
+            #[cfg(debug_assertions)]
+            if core_interface::is_simulation_enabled() {
+                tick_simulation(&mut state, tick);
+            }
             encode_state(&state)
         };
         tick = tick.wrapping_add(1);
