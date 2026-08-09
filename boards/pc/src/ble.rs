@@ -286,7 +286,7 @@ async fn handle_request(
         ("POST", "/simulate") => {
             let enabled = core_interface::is_simulation_enabled();
             core_interface::set_simulation_enabled(!enabled);
-            let msg = if !enabled { b"simulation enabled" } else { b"simulation disabled" };
+            let msg = if !enabled { b"simulation enabled".as_slice() } else { b"simulation disabled".as_slice() };
             write_http_response(stream, "200 OK", "text/plain", msg).await
         }
         ("POST", "/pair") => {

@@ -129,6 +129,7 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str(&format!("embassy-time = {{ version = \"{}\", features = [\"std\"] }}\n", v("embassy-time")));
         cargo_toml.push_str(&format!("critical-section = {{ version = \"{}\", features = [\"std\"] }}\n", v("critical-section")));
         cargo_toml.push_str("env_logger = \"0.11\"\n");
+        cargo_toml.push_str(&format!("log = \"{}\"\n", v("log")));
 
         // Build .app_build/src/main.rs from template
         let mtls_certs = crate::generate_mtls_certs(config);

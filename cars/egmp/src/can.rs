@@ -60,7 +60,7 @@ pub async fn handle_can_frame(frame: CanFrame) {
                 updated = true;
             }
             m_can::Messages::ChargePortDoor(m) => {
-                state.charge_port_state = Some(if m.port_open() != 0 { 2 } else { 1 });
+                state.charge_port_state = Some(if m.port_open() != 0 { crate::proto::basic_state::ChargePortState::Open } else { crate::proto::basic_state::ChargePortState::Closed });
                 updated = true;
             }
             m_can::Messages::TrunkStatus(m) => {

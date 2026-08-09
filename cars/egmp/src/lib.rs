@@ -33,7 +33,7 @@ pub struct EgmpCarState {
     pub is_steering_wheel_heater_on: Option<bool>,
     pub battery_soc: Option<u32>,
     pub battery_range_km: Option<u32>,
-    pub charge_port_state: Option<i32>,
+    pub charge_port_state: Option<proto::basic_state::ChargePortState>,
     pub power_flow_watt: Option<i32>,
     pub time_remaining_minutes: Option<u32>,
     pub are_doors_locked: Option<bool>,
@@ -56,7 +56,7 @@ pub struct EgmpCarState {
     pub battery_minimum_temperature: Option<f32>,
     pub battery_maximum_temperature: Option<f32>,
     pub is_preconditioning_enabled: Option<bool>,
-    pub gear: Option<i32>,
+    pub gear: Option<proto::advanced_state::Gear>,
 }
 
 impl EgmpCarState {
@@ -74,7 +74,7 @@ impl EgmpCarState {
             is_steering_wheel_heater_on: Some(false),
             battery_soc: Some(100),
             battery_range_km: Some(400),
-            charge_port_state: Some(0),
+            charge_port_state: Some(proto::basic_state::ChargePortState::Unspecified),
             power_flow_watt: Some(0),
             time_remaining_minutes: Some(0),
             are_doors_locked: Some(false),
@@ -97,7 +97,7 @@ impl EgmpCarState {
             battery_minimum_temperature: Some(25.0),
             battery_maximum_temperature: Some(26.0),
             is_preconditioning_enabled: Some(false),
-            gear: Some(0),
+            gear: Some(proto::advanced_state::Gear::Unspecified),
         }
     }
 }
@@ -118,7 +118,7 @@ pub fn encode_state(state: &EgmpCarState) -> VehicleStatePayload {
         is_steering_wheel_heater_on: state.is_steering_wheel_heater_on,
         battery_soc: state.battery_soc,
         battery_range_km: state.battery_range_km,
-        charge_port_state: state.charge_port_state,
+        charge_port_state: state.charge_port_state.map(|s| s as i32),
         power_flow_watt: state.power_flow_watt,
         time_remaining_minutes: state.time_remaining_minutes,
         are_doors_locked: state.are_doors_locked,
@@ -142,7 +142,7 @@ pub fn encode_state(state: &EgmpCarState) -> VehicleStatePayload {
         battery_minimum_temperature: state.battery_minimum_temperature,
         battery_maximum_temperature: state.battery_maximum_temperature,
         is_preconditioning_enabled: state.is_preconditioning_enabled,
-        gear: state.gear,
+        gear: state.gear.map(|g| g as i32),
     };
     VehicleStatePayload {
         basic: basic.encode_to_vec(),
@@ -177,30 +177,20 @@ pub async fn handle_basic_commands_task() {
 pub async fn process_basic_command(bytes: &[u8]) -> Result<(), &'static str> {
     let cmd = proto::BasicCommand::decode(bytes).map_err(|_| "Failed to decode BasicCommand")?;
     match cmd.action {
-        Some(proto::basic_command::Action::DoorLockCommand(c)) => {
-            let payload = {
-                let mut state = CAR_STATE.lock().await;
-                state.are_doors_locked = Some(c.lock);
-                encode_state(&state)
-            };
-            VEHICLE_STATE_CHANNEL.sender().send(payload).await;
-            Ok(())
+        Some(proto::basic_command::Action::DoorLockCommand(_)) => {
+            Err("Not implemented")
         }
         Some(proto::basic_command::Action::ChargePortCommand(_)) => {
-            // Placeholder: Handle charge port command
-            Ok(())
+            Err("Not implemented")
         }
         Some(proto::basic_command::Action::FlashLightsCommand(_)) => {
-            // Placeholder: Handle flash lights command
-            Ok(())
+            Err("Not implemented")
         }
         Some(proto::basic_command::Action::ClimateControlCommand(_)) => {
-            // Placeholder: Handle climate control command
-            Ok(())
+            Err("Not implemented")
         }
         Some(proto::basic_command::Action::WindowCommand(_)) => {
-            // Placeholder: Handle window command
-            Ok(())
+            Err("Not implemented")
         }
         None => Err("No action in BasicCommand"),
     }
@@ -233,14 +223,8 @@ pub async fn process_advanced_command(bytes: &[u8]) -> Result<(), &'static str> 
     let cmd =
         proto::AdvancedCommand::decode(bytes).map_err(|_| "Failed to decode AdvancedCommand")?;
     match cmd.action {
-        Some(proto::advanced_command::Action::BatteryPreconditioningCommand(c)) => {
-            let payload = {
-                let mut state = CAR_STATE.lock().await;
-                state.is_preconditioning_enabled = Some(c.enable);
-                encode_state(&state)
-            };
-            VEHICLE_STATE_CHANNEL.sender().send(payload).await;
-            Ok(())
+        Some(proto::advanced_command::Action::BatteryPreconditioningCommand(_)) => {
+            Err("Not implemented")
         }
         None => Err("No action in AdvancedCommand"),
     }
@@ -249,18 +233,79 @@ pub async fn process_advanced_command(bytes: &[u8]) -> Result<(), &'static str> 
 /// Advances the simulated vehicle state by one 5-second tick.
 #[cfg(debug_assertions)]
 pub fn tick_simulation(state: &mut EgmpCarState, tick: u64) {
-    let phase = (tick % 20) as i32;
-    let speed = match phase {
-        0..=4 => phase * 16,
-        5..=9 => 80,
-        10..=14 => (14 - phase) * 16,
-        _ => 0,
-    };
-    state.speed = Some(speed);
-    state.is_driving = Some(speed > 0);
-    state.gear = Some(if speed > 0 { 2 } else { 0 });
-    if phase == 19 {
-        state.odometer = Some(state.odometer.unwrap_or(0).saturating_add(1));
+    let phase = (tick % 100) as i32;
+
+    // Base state for each tick
+    state.speed = Some(0);
+    state.is_driving = Some(false);
+    state.gear = Some(proto::advanced_state::Gear::Unspecified);
+    state.charge_port_state = Some(proto::basic_state::ChargePortState::Unspecified);
+    state.power_flow_watt = Some(0);
+    state.is_driver_door_open = Some(false);
+    state.is_passenger_door_open = Some(false);
+    state.is_rear_left_door_open = Some(false);
+    state.is_rear_right_door_open = Some(false);
+
+    if phase < 15 {
+        // 0-14: Parked, doors sequence
+        if phase > 1 && phase < 13 { state.is_driver_door_open = Some(true); }
+        if phase > 3 && phase < 11 { state.is_passenger_door_open = Some(true); }
+        if phase > 5 && phase < 9 { 
+            state.is_rear_left_door_open = Some(true); 
+            state.is_rear_right_door_open = Some(true);
+        }
+    } else if phase < 50 {
+        // 15-49: Driving
+        let drive_phase = phase - 15;
+        let speed = match drive_phase {
+            0..=4 => drive_phase * 16,
+            5..=25 => 80,
+            26..=30 => (30 - drive_phase) * 16,
+            _ => 0,
+        };
+        state.speed = Some(speed);
+        state.is_driving = Some(speed > 0);
+        state.gear = Some(if speed > 0 { proto::advanced_state::Gear::Drive } else { proto::advanced_state::Gear::Unspecified });
+        
+        if speed > 0 {
+            state.power_flow_watt = Some(-25000); // Discharging 25kW
+            if drive_phase % 4 == 0 {
+                let soc = state.battery_soc.unwrap_or(100);
+                if soc > 0 {
+                    state.battery_soc = Some(soc - 1);
+                }
+            }
+        }
+        
+        if drive_phase == 34 {
+            state.odometer = Some(state.odometer.unwrap_or(0).saturating_add(2));
+        }
+    } else if phase < 80 {
+        // 50-79: Charging
+        let charge_phase = phase - 50;
+        if charge_phase < 0 {
+            state.charge_port_state = Some(proto::basic_state::ChargePortState::Closed);
+        } else if charge_phase < 1 {
+            state.charge_port_state = Some(proto::basic_state::ChargePortState::Open);
+        } else if charge_phase < 2 {
+            state.charge_port_state = Some(proto::basic_state::ChargePortState::DcConnected);
+        } else if charge_phase < 28 {
+            state.charge_port_state = Some(proto::basic_state::ChargePortState::DcCharging);
+            state.power_flow_watt = Some(50000); // Charging at 50kW
+            if charge_phase % 2 == 0 {
+                let soc = state.battery_soc.unwrap_or(0);
+                if soc < 100 {
+                    state.battery_soc = Some(soc + 1);
+                }
+            }
+        } else if charge_phase < 29 {
+            state.charge_port_state = Some(proto::basic_state::ChargePortState::DcConnected);
+        } else {
+            state.charge_port_state = Some(proto::basic_state::ChargePortState::Open)
+        }
+    } else {
+        // 80-99: Idle
+        state.charge_port_state = Some(proto::basic_state::ChargePortState::Closed);
     }
 }
 

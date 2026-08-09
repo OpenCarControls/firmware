@@ -313,6 +313,7 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str(&format!("embassy-executor = \"{}\"\n", v("embassy-executor")));
         cargo_toml.push_str(&format!("embassy-time = \"{}\"\n", v("embassy-time")));
         cargo_toml.push_str(&format!("static_cell = \"{}\"\n", ev("static_cell")));
+        cargo_toml.push_str(&format!("log = \"{}\"\n", v("log")));
         // Direct dep so we can forward the MCU chip feature via --features esp-radio/<mcu>
         cargo_toml.push_str(&format!("esp-radio = {{ version = \"{}\", features = [\"wifi\", \"ble\", \"unstable\"] }}\n", ev("esp-radio")));
         // Direct dep so we can forward the MCU chip feature via --features esp-storage/<mcu>
