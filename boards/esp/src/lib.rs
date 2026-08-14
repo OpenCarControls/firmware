@@ -13,12 +13,15 @@ extern crate alloc;
 mod ble;
 mod can;
 mod network;
+pub mod status_leds;
 
 #[cfg(feature = "hardware")]
 mod hardware {
-    use super::{ble, can, network};
+    use super::{ble, can, network, status_leds};
 
     pub use ble::{ble_lifecycle_task, ble_transport_task};
+
+    pub use status_leds::*;
 
     pub use can::{
         CanIntPin, CanSpeed, Mcp2515Driver, McpSpeed, TwaiDriver, init_mcp2515, init_twai,
@@ -42,6 +45,7 @@ mod hardware {
     /// Hardware-specific tasks (BLE transport, CAN loops, MQTT driver) are spawned
     /// separately by `main.rs` after hardware peripherals have been initialised.
     pub fn start(spawner: &embassy_executor::Spawner) {
+        status_leds::set_flag(status_leds::FLAG_POWER, true);
         spawner.spawn(core_interface::process_ble_commands_task().unwrap());
         spawner.spawn(core_interface::process_mqtt_commands_task().unwrap());
         spawner.spawn(core_interface::route_responses_task().unwrap());

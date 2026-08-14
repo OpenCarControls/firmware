@@ -94,6 +94,7 @@ mod hardware {
             loop {
                 match rx.receive() {
                     Ok(frame) => {
+                        crate::status_leds::pulse_can();
                         let core_frame = to_core_frame(frame, bus_id);
                         try_send_can_debug_capture(bus_id, &core_frame);
                         if core_interface::passes_filter(&core_frame, filters) {
@@ -116,7 +117,11 @@ mod hardware {
                             // nb::block! would stall the executor; spin until TX buffer free
                             loop {
                                 match tx.transmit(&f) {
-                                    Ok(_) | Err(nb::Error::Other(_)) => break,
+                                    Ok(_) => {
+                                        crate::status_leds::pulse_can();
+                                        break;
+                                    }
+                                    Err(nb::Error::Other(_)) => break,
                                     Err(nb::Error::WouldBlock) => {
                                         Timer::after(Duration::from_micros(100)).await
                                     }
@@ -228,6 +233,7 @@ mod hardware {
             loop {
                 match driver.read_message() {
                     Ok(frame) => {
+                        crate::status_leds::pulse_can();
                         let core_frame = to_core_frame(frame, bus_id);
                         try_send_can_debug_capture(bus_id, &core_frame);
                         if core_interface::passes_filter(&core_frame, filters) {
@@ -243,7 +249,9 @@ mod hardware {
                     // Drop silently when in read-only mode; do not transmit on the bus.
                     if !core_interface::is_can_read_only() {
                         if let Some(f) = core_to_mcp_frame(&outbound) {
-                            let _ = driver.send_message(f);
+                            if driver.send_message(f).is_ok() {
+                                crate::status_leds::pulse_can();
+                            }
                         }
                     }
                 } else {

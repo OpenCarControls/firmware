@@ -68,10 +68,13 @@ mod hardware {
             match controller.connect_async().await {
                 Ok(_) => {
                     log::info!("WiFi: connected");
+                    crate::status_leds::set_flag(crate::status_leds::FLAG_WIRELESS, true);
                     let _ = controller.wait_for_disconnect_async().await;
+                    crate::status_leds::set_flag(crate::status_leds::FLAG_WIRELESS, false);
                     log::warn!("WiFi: disconnected, reconnecting in 5s");
                 }
                 Err(e) => {
+                    crate::status_leds::set_flag(crate::status_leds::FLAG_WIRELESS, false);
                     log::warn!("WiFi: connect failed: {:?}, retrying in 5s", e);
                 }
             }

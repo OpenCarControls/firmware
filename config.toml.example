@@ -3,8 +3,13 @@
 # ==============================================
 
 [target]
+# Optional: Inherit hardware configuration from a profile in `hardware-profiles/`
+# Any settings defined in the `[hardware]` section below will override the profile.
+hardware_profile = "meatpi-wican-esp32c3"
+
 # Select which board family you want to use. See the available boards in `boards/`
-board = "esp"
+# (This is automatically set by the hardware_profile if one is used)
+# board = "esp"
 
 # Select which platform (vehicle crate) you want to use. See the available platforms in `cars/`
 platform = "virtual-car"
@@ -12,55 +17,35 @@ platform = "virtual-car"
 # ===================================
 #    BOARD SPECIFIC CONFIGURATIONS
 # ===================================
+# When using a `hardware_profile` above, you can leave these sections commented out 
+# unless you specifically want to override a value from the profile.
 
-# Configuration for ESP family boards
-[hardware.esp]
-mcu = "esp32s3"
-# modem_tx_pin = 17 # Optional: TX pin for LTE modem
-# modem_rx_pin = 16 # Optional: RX pin for LTE modem
+# [hardware.esp]
+# mcu = "esp32c3"
 
 [hardware.esp.ble]
-# Built-in BOOT button on most ESP devkits.
 device_name = "OpenCar"
-# pairing_button_pin = 0
 pairing_button_hold_s = 3
 max_bonded_phones = 8
 controller_lease_ttl_s = 15
 
-# CAN bus definitions — order determines bus_id (0-based).
-# Bus 0: built-in TWAI peripheral.
-[[hardware.esp.can_buses]]
-interface = "twai"
-tx_pin = 5
-rx_pin = 4
-# enable_pin = 6       # Optional: GPIO pin to enable the CAN transceiver out of standby
-# enable_level = "low" # Optional: "high" or "low" (default is "high")
-
-# Bus 1 (optional): MCP2515 SPI CAN controller. Uncomment to enable.
 # [[hardware.esp.can_buses]]
-# interface = "mcp2515"
-# cs_pin   = 10
-# clk_pin  = 11
-# mosi_pin = 12
-# miso_pin = 13
-# int_pin  = 14
-# can_speed = "500kbps"   # options: 100kbps, 125kbps, 250kbps, 500kbps, 1000kbps
-# mcp_speed = "16mhz"    # options: 8mhz, 16mhz
+# interface = "twai"
+# tx_pin = 0
+# rx_pin = 3
+# enable_pin = 6
+# enable_level = "low"
 
-# Configuration for PC board
-[hardware.pc]
+# [hardware.pc]
 
 [hardware.pc.ble]
-# PC-only test hooks.
 device_name = "OpenCar"
 http_port = 4242
 max_bonded_phones = 8
 paired_phones_file = "/tmp/opencar-paired-phones.txt"
 
-# CAN bus definitions — order determines bus_id (0-based).
-# Each entry maps to a SocketCAN network interface (real or virtual).
-[[hardware.pc.can_buses]]
-interface = "vcan0"
+# [[hardware.pc.can_buses]]
+# interface = "vcan0"
 
 # ===========================
 #    NETWORK CONFIGURATION

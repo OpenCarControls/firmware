@@ -24,8 +24,27 @@ fn default_empty_toml_table() -> toml::Value {
 
 #[derive(Deserialize)]
 pub struct TargetConfig {
-    pub board: String, // e.g., "esp" or "pc"
+    #[serde(default)]
+    pub board: Option<String>, // e.g., "esp" or "pc"
     pub platform: String,
+    pub hardware_profile: Option<String>,
+}
+
+fn merge_toml(base: &mut toml::Value, override_val: &toml::Value) {
+    match (base, override_val) {
+        (toml::Value::Table(base_map), toml::Value::Table(override_map)) => {
+            for (k, v) in override_map {
+                if base_map.contains_key(k) {
+                    merge_toml(base_map.get_mut(k).unwrap(), v);
+                } else {
+                    base_map.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        (b, o) => {
+            *b = o.clone();
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -412,8 +431,26 @@ fn main() {
         toml::from_str(&ws_toml_str).expect("Failed to parse workspace Cargo.toml");
     config.workspace_deps = ws_toml["workspace"]["dependencies"].clone();
 
+    if let Some(profile) = &config.target.hardware_profile {
+        let profile_path = format!("hardware-profiles/{}.toml", profile);
+        let profile_str = fs::read_to_string(&profile_path)
+            .unwrap_or_else(|_| panic!("Failed to read hardware profile: {}", profile_path));
+        let profile_toml: toml::Value =
+            toml::from_str(&profile_str).expect("Failed to parse hardware profile TOML");
+        if let Some(hw) = profile_toml.get("hardware") {
+            let mut base_hw = hw.clone();
+            merge_toml(&mut base_hw, &config.hardware);
+            config.hardware = base_hw;
+        }
+        if let Some(tgt) = profile_toml.get("target") {
+            if let Some(board) = tgt.get("board").and_then(|v| v.as_str()) {
+                config.target.board = Some(board.to_string());
+            }
+        }
+    }
+
     if let Some(board) = override_board {
-        config.target.board = board;
+        config.target.board = Some(board);
     }
     if let Some(platform) = override_platform {
         config.target.platform = platform;
@@ -425,7 +462,11 @@ fn main() {
         return;
     }
 
-    let builder = get_builder(&config.target.board);
+    let board = config.target.board.as_deref().unwrap_or_else(|| {
+        eprintln!("Error: 'board' must be specified in the [target] section of config.toml or inherited from a hardware profile.");
+        exit(1);
+    });
+    let builder = get_builder(board);
 
     builder.validate(&config);
 

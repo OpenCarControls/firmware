@@ -204,6 +204,7 @@ mod hardware {
                                 pairing_open_at_connect
                             );
                             let tx_auth = AtomicBool::new(false);
+                            crate::status_leds::set_flag(crate::status_leds::FLAG_WIRELESS, true);
                             let _ = select(
                                 gatt_event_task(
                                     &server,
@@ -215,6 +216,7 @@ mod hardware {
                                 ble_tx_notify_task(&server, &conn, &tx_auth),
                             )
                             .await;
+                            crate::status_leds::set_flag(crate::status_leds::FLAG_WIRELESS, false);
                             log::info!("BLE transport: connection closed, returning to advertise");
                         }
                         Ok(None) => {

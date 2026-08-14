@@ -45,7 +45,7 @@ struct EspBleConfig {
     #[serde(default)]
     device_name: Option<String>,
     #[serde(default)]
-    pairing_button_pin: Option<u8>,
+    pairing_button_pin: Option<i32>,
     #[serde(default = "default_pairing_button_hold_s")]
     pairing_button_hold_s: u32,
     #[serde(default = "default_max_bonded_phones")]
@@ -100,6 +100,8 @@ struct EspConfig {
     ble: EspBleConfig,
     #[serde(default)]
     can_buses: Vec<toml::Value>,
+    #[serde(default)]
+    status_leds: Vec<toml::Value>,
 }
 
 pub struct Builder;
@@ -126,6 +128,7 @@ impl Builder {
         }
 
         cmd.arg(cargo_cmd)
+            .env("ESP_LOG", "info")
             .current_dir(".app_build");
 
         if release {
@@ -154,12 +157,13 @@ impl TargetBuilder for Builder {
             eprintln!("Error: Unsupported ESP MCU '{}'. Supported MCUs are: {:?}", esp.mcu, supported_mcus);
             exit(1);
         }
-        if esp.ble.pairing_button_pin.unwrap_or(0) > 48 {
+        let pairing_pin = esp.ble.pairing_button_pin.unwrap_or(0);
+        if pairing_pin > 48 {
             eprintln!(
                 "Error: [hardware.esp.ble].pairing_button_pin={:?} is out of range.",
                 esp.ble.pairing_button_pin
             );
-            exit(1);
+            std::process::exit(1);
         }
         if esp.ble.pairing_button_hold_s == 0
             || esp.ble.max_bonded_phones == 0
@@ -308,7 +312,7 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str(&format!("esp-hal = {{ version = \"{}\", features = [\"unstable\"] }}\n", ev("esp-hal")));
         cargo_toml.push_str(&format!("esp-rtos = {{ version = \"{}\", features = [\"embassy\", \"esp-radio\", \"esp-alloc\"] }}\n", ev("esp-rtos")));
         cargo_toml.push_str(&format!("esp-backtrace = {{ version = \"{}\", features = [\"panic-handler\", \"println\"] }}\n", ev("esp-backtrace")));
-        cargo_toml.push_str(&format!("esp-println = {{ version = \"{}\", features = [\"log-04\"] }}\n", ev("esp-println")));
+        cargo_toml.push_str(&format!("esp-println = {{ version = \"{}\", default-features = false, features = [\"log-04\", \"jtag-serial\"] }}\n", ev("esp-println")));
         cargo_toml.push_str(&format!("esp-alloc = \"{}\"\n", ev("esp-alloc")));
         cargo_toml.push_str(&format!("embassy-executor = \"{}\"\n", v("embassy-executor")));
         cargo_toml.push_str(&format!("embassy-time = \"{}\"\n", v("embassy-time")));
@@ -378,7 +382,10 @@ impl TargetBuilder for Builder {
              const BLE_MAX_BONDED_PHONES: u8 = {max_bonds};\n\
              const BLE_CONTROLLER_LEASE_TTL_S: u32 = {lease_ttl};",
             ble_name = ble_device_name,
-            pair_btn = match esp_hw.ble.pairing_button_pin { Some(p) => format!("Some({})", p), None => "None".to_string() },
+            pair_btn = match esp_hw.ble.pairing_button_pin {
+                Some(p) if p >= 0 => format!("Some({})", p),
+                _ => "None".to_string()
+            },
             pair_hold = esp_hw.ble.pairing_button_hold_s,
             pair_window = transport.ble.pairing.pairing_window_seconds,
             max_bonds = esp_hw.ble.max_bonded_phones,
@@ -453,7 +460,7 @@ impl TargetBuilder for Builder {
         };
 
         let is_dual_core = esp_hw.mcu == "esp32" || esp_hw.mcu == "esp32s3";
-        let heap_size = if is_dual_core { "160 * 1024" } else { "72 * 1024" };
+        let heap_size = if is_dual_core { "160 * 1024" } else { "83 * 1024" };
 
         let can_driver_spawn = if is_dual_core {
             format!(
@@ -475,6 +482,61 @@ impl TargetBuilder for Builder {
             can_task_spawns.replace("                s.spawn(", "    spawner.spawn(")
         };
 
+        let mut idle_loop = String::new();
+        if esp_hw.status_leds.is_empty() {
+            idle_loop.push_str("    loop {\n        embassy_time::Timer::after(embassy_time::Duration::from_secs(1)).await;\n    }");
+        } else {
+            let mut init_block = String::new();
+            let mut loop_block = String::new();
+            loop_block.push_str("        let flags = board_esp::status_leds::get_flags();\n");
+
+            for led in &esp_hw.status_leds {
+                let typ = led.get("type").and_then(|v| v.as_str()).unwrap_or("gpio");
+                if typ == "gpio" {
+                    let pin = led.get("pin").and_then(|v| v.as_integer()).unwrap_or_else(|| { eprintln!("Status LED missing 'pin'"); exit(1); });
+                    let role = led.get("role").and_then(|v| v.as_str()).unwrap_or("power");
+                    let role_ident = role.replace('-', "_");
+                    
+                    let active_low = led.get("active_low").and_then(|v| v.as_bool()).unwrap_or(true);
+                    let (on_level, off_level) = if active_low {
+                        ("set_low", "set_high")
+                    } else {
+                        ("set_high", "set_low")
+                    };
+                    
+                    let init_level = if active_low { "High" } else { "Low" };
+                    init_block.push_str(&format!(
+                        "    let mut led_{0} = esp_hal::gpio::Output::new(peripherals.GPIO{1}, esp_hal::gpio::Level::{2}, esp_hal::gpio::OutputConfig::default());\n",
+                        role_ident, pin, init_level
+                    ));
+                    
+                    let flag_const = match role {
+                        "power" => "FLAG_POWER",
+                        "wireless" => "FLAG_WIRELESS",
+                        "can" => "FLAG_CAN",
+                        _ => "FLAG_POWER", // fallback
+                    };
+
+                    loop_block.push_str(&format!(
+                        "        if (flags & board_esp::status_leds::{1}) != 0 {{\n\
+                                     led_{0}.{2}();\n\
+                                 }} else {{\n\
+                                     led_{0}.{3}();\n\
+                                 }}\n",
+                        role_ident, flag_const, on_level, off_level
+                    ));
+                    if role == "can" {
+                        loop_block.push_str("        board_esp::status_leds::set_flag(board_esp::status_leds::FLAG_CAN, false);\n");
+                    }
+                }
+            }
+            loop_block.push_str("        embassy_time::Timer::after(embassy_time::Duration::from_millis(50)).await;\n");
+            idle_loop.push_str(&init_block);
+            idle_loop.push_str("    loop {\n");
+            idle_loop.push_str(&loop_block);
+            idle_loop.push_str("    }");
+        }
+
         let template = fs::read_to_string("boards/esp/main.template.rs")
             .expect("\u{274c} Could not read boards/esp/main.template.rs");
         let main_rs = template
@@ -488,7 +550,8 @@ impl TargetBuilder for Builder {
             .replace("{NETWORK_CONSTANTS}", &network_constants)
             .replace("{NETWORK_HARDWARE_INIT}", &network_hardware_init)
             .replace("{BLE_DRIVER_SPAWN}", &ble_driver_spawn)
-            .replace("{MQTT_DRIVER_SPAWN}", &mqtt_driver_spawn);
+            .replace("{MQTT_DRIVER_SPAWN}", &mqtt_driver_spawn)
+            .replace("{IDLE_LOOP}", &idle_loop);
 
         let target_arch = mcu_to_target_arch(&esp_hw.mcu);
         let cargo_config = if target_arch.starts_with("xtensa") {
@@ -499,10 +562,9 @@ impl TargetBuilder for Builder {
                 target = target_arch
             )
         } else {
-            let mut rustflags = vec!["\"-C\"", "\"link-arg=-Tlinkall.x\""];
+            let rustflags = vec!["\"-C\"", "\"link-arg=-Tlinkall.x\""];
             if esp_hw.mcu == "esp32c3" {
-                rustflags.push("\"-C\"");
-                rustflags.push("\"target-feature=+a\"");
+                // Removed invalid target-feature=+a for ESP32-C3
             }
             format!(
                 "[build]\ntarget = \"{target}\"\n\n\

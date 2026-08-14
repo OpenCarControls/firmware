@@ -39,5 +39,5 @@ pub static CAN_RX_CHANNEL: Channel<CriticalSectionRawMutex, CanFrame, 16> = Chan
 /// task for transmission. Each frame carries the `bus_id` of the target bus.
 pub static CAN_TX_CHANNEL: Channel<CriticalSectionRawMutex, CanFrame, 16> = Channel::new();
 /// Raw CAN frames captured before vehicle filtering, consumed by `publish_can_debug_task`.
-pub static CAN_DEBUG_RX_CHANNEL: Channel<CriticalSectionRawMutex, CanRawCapture, 64> =
+pub static CAN_DEBUG_RX_CHANNEL: Channel<CriticalSectionRawMutex, CanRawCapture, 16> =
     Channel::new();

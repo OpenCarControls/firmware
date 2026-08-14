@@ -58,7 +58,7 @@ dev-esp32s3 = [
 dev-esp32c3 = [
     "hardware",
     "esp-hal/esp32c3",
-    "esp-println/esp32c3", "esp-println/auto",
+    "esp-println/esp32c3", "esp-println/jtag-serial",
     "esp-radio/esp32c3",
     "esp-rtos/esp32c3",
     "esp-storage/esp32c3",
