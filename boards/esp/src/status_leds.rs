@@ -8,7 +8,9 @@ use core::cell::Cell;
 pub static SYSTEM_STATUS_FLAGS: Mutex<CriticalSectionRawMutex, Cell<u32>> = Mutex::new(Cell::new(0));
 
 pub const FLAG_POWER: u32 = 1 << 0;
-pub const FLAG_WIRELESS: u32 = 1 << 1;
+pub const FLAG_WIFI: u32 = 1 << 1;
+pub const FLAG_BLE: u32 = 1 << 3;
+pub const FLAG_WIRELESS: u32 = FLAG_WIFI | FLAG_BLE;
 pub const FLAG_CAN: u32 = 1 << 2;
 
 pub fn set_flag(flag: u32, active: bool) {

@@ -204,7 +204,7 @@ mod hardware {
                                 pairing_open_at_connect
                             );
                             let tx_auth = AtomicBool::new(false);
-                            crate::status_leds::set_flag(crate::status_leds::FLAG_WIRELESS, true);
+                            crate::status_leds::set_flag(crate::status_leds::FLAG_BLE, true);
                             let _ = select(
                                 gatt_event_task(
                                     &server,
@@ -216,7 +216,7 @@ mod hardware {
                                 ble_tx_notify_task(&server, &conn, &tx_auth),
                             )
                             .await;
-                            crate::status_leds::set_flag(crate::status_leds::FLAG_WIRELESS, false);
+                            crate::status_leds::set_flag(crate::status_leds::FLAG_BLE, false);
                             log::info!("BLE transport: connection closed, returning to advertise");
                         }
                         Ok(None) => {
@@ -622,6 +622,8 @@ mod hardware {
                 if encrypted {
                     tx_auth.store(true, Ordering::Relaxed);
                     log::info!("BLE TX: link encrypted — tx_auth granted");
+                    // Wait for MTU exchange to complete before sending the first packet
+                    embassy_time::Timer::after(embassy_time::Duration::from_millis(500)).await;
                 } else {
                     if !tx_held_logged {
                         log::debug!("BLE TX: holding message — link not yet encrypted");
