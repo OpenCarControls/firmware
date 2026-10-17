@@ -1,12 +1,11 @@
 {
-    "name": "Open Car — ESP",
+    "name": "Open Car — Firmware",
     "build": {
-        "dockerfile": "../Dockerfile",
-        "target": "esp"
+        "dockerfile": "Dockerfile"
     },
-    "runArgs": [
-        "--privileged"
-    ],
+    // USB access for flashing, probe-rs and the serial monitor without
+    // --privileged: /dev is bind-mounted so hot-plugged devices appear, and only
+    // these device classes are allowed.
     "mounts": [
         {
             "type": "bind",
@@ -14,6 +13,18 @@
             "target": "/dev"
         }
     ],
+    "runArgs": [
+        "-p",
+        "4242:4242",
+        "--device-cgroup-rule=c 166:* rmw", // ttyACM: native USB-JTAG serial (C3/C6/S3)
+        "--device-cgroup-rule=c 188:* rmw", // ttyUSB: USB-UART bridges (classic ESP32)
+        "--device-cgroup-rule=c 189:* rmw" // raw USB: probe-rs, espflash over JTAG
+    ],
+    "forwardPorts": [
+        4242
+    ],
+    // Point rust-analyzer at the board selected in config.toml.
+    "postCreateCommand": "cargo xtask ide",
     "customizations": {
         "vscode": {
             "extensions": [
@@ -29,10 +40,6 @@
                 "ms-vscode.vscode-serial-monitor"
             ],
             "settings": {
-                "rust-analyzer.cargo.features": [
-                    "dev-esp32c3"
-                ],
-                "rust-analyzer.cargo.target": "riscv32imc-unknown-none-elf",
                 "serialmonitor.defaultPort": "/dev/ttyACM0",
                 "serialmonitor.defaultBaudRate": 115200
             }

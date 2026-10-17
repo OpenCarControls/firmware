@@ -8,7 +8,7 @@ Embedded Rust firmware for an open-source car hardware controller. Runs on ESP32
 - **ESP target** (ESP32 only): the `esp` toolchain from [esp-rs](https://github.com/esp-rs/rust-build), installed via `espup`
 - **On-hardware tests / flashing** (ESP32 only): `probe-rs` and `espflash` — both pre-installed in the dev container
 
-The recommended environment is the dev container (`.devcontainer/esp` or `.devcontainer/pc`). To work locally on Windows instead, see the [Native Windows Setup Guide](docs/windows-setup.md).
+The recommended environment is the dev container (`.devcontainer/`). It has the toolchains for every board, so the same container is used for PC and ESP work, including flashing. To work locally on Windows instead, see the [Native Windows Setup Guide](docs/windows-setup.md).
 
 ## 🚀 Getting Started
 

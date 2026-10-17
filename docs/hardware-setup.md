@@ -1,6 +1,6 @@
 # Flashing & debugging hardware
 
-The ESP dev container (`Open Car — ESP`, see `.devcontainer/esp/`) runs with `--privileged` and bind-mounts `/dev`, giving it direct access to any USB device that appears on the host. The setup depends on where Docker is running.
+The dev container (`Open Car — Firmware`, see `.devcontainer/`) bind-mounts `/dev` and allows the serial (`ttyACM`, `ttyUSB`) and raw USB device classes, so any ESP32 that appears on the host is usable from inside it. It doesn't need `--privileged`. The setup depends on where Docker is running.
 
 ## Dev container running locally
 
@@ -69,11 +69,11 @@ To build an image in the container and flash it from the host instead, see [Rele
 
 ## Debugging
 
-The ESP dev container includes the `probe-rs-debugger` VS Code extension. Run `cargo xtask ide` so the debug config matches your chip, then select **"Firmware: debug ESP32-… (probe-rs)"** in the Run & Debug panel and press F5. It builds with `--debug` first. probe-rs flashes the binary and halts the CPU at reset, giving you breakpoints, variable inspection, and step execution.
+The dev container includes the `probe-rs-debugger` VS Code extension. Run `cargo xtask ide` so the debug config matches your chip, then select **"Firmware: debug ESP32-… (probe-rs)"** in the Run & Debug panel and press F5. It builds with `--debug` first. probe-rs flashes the binary and halts the CPU at reset, giving you breakpoints, variable inspection, and step execution.
 
 ## Serial logs
 
-The ESP32-S3's USB_SERIAL_JTAG peripheral exposes a second CDC-ACM interface alongside the JTAG debug channel. Logs written via `esp-println` / the `log` crate appear on `/dev/ttyACM0` independently of the debugger. The ESP container includes the **Serial Monitor** extension (View → Serial Monitor), pre-configured for `/dev/ttyACM0` at 115200 baud. You can also read logs directly:
+The ESP32-S3's USB_SERIAL_JTAG peripheral exposes a second CDC-ACM interface alongside the JTAG debug channel. Logs written via `esp-println` / the `log` crate appear on `/dev/ttyACM0` independently of the debugger. The dev container includes the **Serial Monitor** extension (View → Serial Monitor), pre-configured for `/dev/ttyACM0` at 115200 baud. You can also read logs directly:
 
 ```bash
 stty -F /dev/ttyACM0 raw 115200 && cat /dev/ttyACM0
