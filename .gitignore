@@ -33,3 +33,6 @@ config.toml
 
 # Build artifacts
 dist/*
+
+# Firmware images (e.g. stock WiCAN firmware kept for restoring a device)
+*.bin

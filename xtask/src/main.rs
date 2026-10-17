@@ -509,8 +509,14 @@ fn run_host_tests(config: &Config) {
 
     for pkg in packages {
         println!("Testing {}...", pkg);
-        let status = Command::new("cargo")
-            .args(["test", "-p", pkg, "--", "--test-threads=1"])
+        let mut cmd = Command::new("cargo");
+        cmd.args(["test", "-p", pkg]);
+        // board-pc's tests live in modules gated behind its `hardware` feature.
+        if pkg == "board-pc" {
+            cmd.args(["--features", "hardware"]);
+        }
+        let status = cmd
+            .args(["--", "--test-threads=1"])
             .status()
             .expect("cargo test failed to spawn");
         if !status.success() {

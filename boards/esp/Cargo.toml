@@ -11,7 +11,6 @@ hardware = [
     "dep:embassy-executor",
     "dep:embassy-futures",
     "dep:embassy-net",
-    "dep:embassy-sync",
     "dep:embassy-time",
     "dep:embedded-hal-bus",
     "dep:embedded-hal",
@@ -77,7 +76,7 @@ core-interface = { workspace = true }
 embassy-executor = { workspace = true, optional = true }
 embassy-futures = { workspace = true, optional = true }
 embassy-net = { version = "0.9.0", features = ["tcp", "dhcpv4", "medium-ethernet"], optional = true }
-embassy-sync = { workspace = true, optional = true }
+embassy-sync = { workspace = true }
 embassy-time = { workspace = true, optional = true }
 embedded-can = { workspace = true }
 embedded-hal = { workspace = true, optional = true }

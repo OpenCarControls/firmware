@@ -140,8 +140,8 @@ Embassy is used freely inside `core-interface`. Boards adapt to it — not the o
 |---|---|---|
 | `core-interface` | 53 — `passes_filter`, BLE/MQTT dispatch (platform_id gating, routing, `source_device_id` stamping, empty-source rejection), response routing, state publish split, CAN read-only flag, CAN debug streaming (batch filtering, blocklist, dropped-frame counter) | `cargo test -p core-interface -- --test-threads=1` |
 | `virtual-car-controller` | 25 — `encode_state` proto encoding, CAN frame → state updates, `process_basic_command`, `tick_simulation` (initial defaults, ramp-up, park phase, odometer increment, door-lock preservation, cycle wraparound) | `cargo test -p virtual-car-controller -- --test-threads=1` |
-| `board-pc` | 8 — `socketcan_to_core_frame` and `core_to_socketcan_frame` round-trips | `cargo test -p board-pc -- --test-threads=1` |
-| `board-esp` | 14 — `compute_mcp_masks` + BLE helpers/proto size & round-trip tests (`mac_to_ble_address`, UUID uniqueness, `AppToDevice`/`DeviceToApp` encode/decode bounds, `ble_device_name_appends_mac_suffix`) | `cargo test -p board-esp -- --test-threads=1` |
+| `board-pc` | 11 — `socketcan_to_core_frame` / `core_to_socketcan_frame` round-trips + BLE helpers (gated behind the `hardware` feature) | `cargo test -p board-pc --features hardware -- --test-threads=1` |
+| `board-esp` | 11 — `compute_mcp_masks` + BLE helpers/proto size & round-trip tests (`AppToDevice`/`DeviceToApp` encode/decode bounds, `ble_device_name_appends_mac_suffix`) | `cargo test -p board-esp -- --test-threads=1` |
 
 `--test-threads=1` is required — Embassy channels are process-global statics; parallel threads corrupt each other's state.
 
