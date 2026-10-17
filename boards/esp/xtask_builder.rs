@@ -372,8 +372,7 @@ impl TargetBuilder for Builder {
         // App descriptor for the ESP-IDF 2nd stage bootloader (sets min_efuse_blk_rev_full to 0)
         cargo_toml.push_str(&format!("esp-bootloader-esp-idf = {{ version = \"{}\" }}\n", ev("esp-bootloader-esp-idf")));
 
-        cargo_toml.push_str("\n[patch.crates-io]\n");
-        cargo_toml.push_str("bitvec = { git = \"https://github.com/ferrilab/ferrilab.git\", rev = \"6af4ab0a33233573326f4b27f0193a2c956aada5\" }\n");
+        cargo_toml.push_str(&crate::workspace_patch_section(config));
 
         // Debug-profile: optimize for size while keeping debug symbols so probe-rs can still
         // attach.  Without this, opt-level=0 leaves BLE/rand_chacha stack frames so large that
@@ -746,8 +745,7 @@ impl TargetBuilder for Builder {
         // embedded-test requires harness = false for the binary target.
         cargo_toml.push_str("\n[[bin]]\nname = \"app-test-build\"\ntest = true\nharness = false\n");
 
-        cargo_toml.push_str("\n[patch.crates-io]\n");
-        cargo_toml.push_str("bitvec = { git = \"https://github.com/ferrilab/ferrilab.git\", rev = \"6af4ab0a33233573326f4b27f0193a2c956aada5\" }\n");
+        cargo_toml.push_str(&crate::workspace_patch_section(config));
 
         // Generate main.rs from template
         let template = fs::read_to_string("boards/esp/tests.template.rs")

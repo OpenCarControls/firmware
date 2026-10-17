@@ -16,6 +16,9 @@ pub struct Config {
     /// Not deserialized from `config.toml` — set manually after parsing.
     #[serde(skip, default = "default_empty_toml_table")]
     pub workspace_deps: toml::Value,
+    /// Populated at runtime from `[patch]` in the root `Cargo.toml`.
+    #[serde(skip, default = "default_empty_toml_table")]
+    pub workspace_patch: toml::Value,
 }
 
 fn default_empty_toml_table() -> toml::Value {
@@ -122,6 +125,14 @@ pub struct TransportBleCharacteristic {
     pub payload: String,
     pub properties: Vec<String>,
     pub direction: String,
+}
+
+/// The root `Cargo.toml`'s `[patch]` table, rendered for a generated crate's
+/// Cargo.toml so it resolves the same patched crates as the workspace.
+pub fn workspace_patch_section(config: &Config) -> String {
+    let mut root = toml::Table::new();
+    root.insert("patch".into(), config.workspace_patch.clone());
+    format!("\n{}", toml::to_string(&root).expect("Failed to serialize [patch] table"))
 }
 
 /// Returns the version string for a `[workspace.dependencies]` entry.
@@ -430,6 +441,7 @@ fn main() {
     let ws_toml: toml::Value =
         toml::from_str(&ws_toml_str).expect("Failed to parse workspace Cargo.toml");
     config.workspace_deps = ws_toml["workspace"]["dependencies"].clone();
+    config.workspace_patch = ws_toml.get("patch").cloned().unwrap_or_else(default_empty_toml_table);
 
     if let Some(profile) = &config.target.hardware_profile {
         let profile_path = format!("hardware-profiles/{}.toml", profile);

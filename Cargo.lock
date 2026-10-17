@@ -86,9 +86,8 @@ checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 
 [[package]]
 name = "bitvec"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddcec3d12c579d40898fe0a9a358a803c23e9c52ca3c425707f81c9436211837"
+version = "1.1.0"
+source = "git+https://github.com/ferrilab/ferrilab.git?rev=6af4ab0a33233573326f4b27f0193a2c956aada5#6af4ab0a33233573326f4b27f0193a2c956aada5"
 dependencies = [
  "funty",
  "radium",
@@ -2045,9 +2044,12 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "radium"
-version = "0.7.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
+checksum = "1775bc532a9bfde46e26eba441ca1171b91608d14a3bae71fea371f18a00cffe"
+dependencies = [
+ "cfg-if",
+]
 
 [[package]]
 name = "ral-registers"
