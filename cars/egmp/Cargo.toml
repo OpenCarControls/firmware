@@ -3,6 +3,11 @@ name = "egmp-controller"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Decode signals whose DBC mapping is not yet verified on a real car (climate target
+# temperature, window states, headlights). Off by default so guesses are never published.
+untested-signals = []
+
 [dependencies]
 core-interface = { workspace = true }
 embedded-can = { workspace = true }

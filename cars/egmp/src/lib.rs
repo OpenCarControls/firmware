@@ -62,7 +62,51 @@ pub struct EgmpCarState {
 }
 
 impl EgmpCarState {
+    /// Nothing is known about the car until the matching CAN frame has been seen, so every
+    /// field starts as `None` and is left out of the published state.
     pub const fn new() -> Self {
+        Self {
+            odometer: None,
+            is_driving: None,
+            speed: None,
+            outdoor_temperature: None,
+            indoor_temperature: None,
+            is_climate_on: None,
+            target_climate_temperature: None,
+            is_windshield_defrost_on: None,
+            is_rear_window_defrost_on: None,
+            is_steering_wheel_heater_on: None,
+            battery_soc: None,
+            battery_range_km: None,
+            charge_port_state: None,
+            power_flow_watt: None,
+            time_remaining_minutes: None,
+            are_doors_locked: None,
+            is_driver_door_open: None,
+            is_driver_window_open: None,
+            is_passenger_door_open: None,
+            is_passenger_window_open: None,
+            is_rear_left_door_open: None,
+            is_rear_left_window_open: None,
+            is_rear_right_door_open: None,
+            is_rear_right_window_open: None,
+            is_frunk_open: None,
+            is_trunk_open: None,
+            are_lights_on: None,
+            are_hazard_lights_on: None,
+            lights_flash_timestamp: None,
+            battery_voltage: None,
+            instantaneous_power_watt: None,
+            battery_minimum_temperature: None,
+            battery_maximum_temperature: None,
+            is_preconditioning_enabled: None,
+            gear: None,
+        }
+    }
+
+    /// Plausible values for the debug simulation, which only overwrites a subset of them.
+    #[cfg(debug_assertions)]
+    fn simulated() -> Self {
         Self {
             odometer: Some(0),
             is_driving: Some(false),
@@ -294,9 +338,7 @@ pub fn tick_simulation(state: &mut EgmpCarState, tick: u64) {
     } else if phase < 80 {
         // 50-79: Charging
         let charge_phase = phase - 50;
-        if charge_phase < 0 {
-            state.charge_port_state = Some(proto::basic_state::ChargePortState::Closed);
-        } else if charge_phase < 1 {
+        if charge_phase < 1 {
             state.charge_port_state = Some(proto::basic_state::ChargePortState::Open);
         } else if charge_phase < 2 {
             state.charge_port_state = Some(proto::basic_state::ChargePortState::DcConnected);
@@ -326,6 +368,8 @@ pub fn tick_simulation(state: &mut EgmpCarState, tick: u64) {
 pub async fn state_update_task() {
     #[allow(unused_variables, unused_mut)]
     let mut tick: u64 = 0;
+    #[cfg(debug_assertions)]
+    let mut was_simulating = false;
     loop {
         #[allow(unused_variables)]
         let is_heartbeat = with_timeout(STATE_HEARTBEAT_INTERVAL, STATE_CHANGED.wait())
@@ -335,9 +379,19 @@ pub async fn state_update_task() {
             #[allow(unused_mut)]
             let mut state = CAR_STATE.lock().await;
             #[cfg(debug_assertions)]
-            if is_heartbeat && core_interface::is_simulation_enabled() {
-                tick_simulation(&mut state, tick);
-                tick = tick.wrapping_add(1);
+            {
+                let simulating = core_interface::is_simulation_enabled();
+                if simulating && !was_simulating {
+                    *state = EgmpCarState::simulated();
+                    tick = 0;
+                } else if !simulating && was_simulating {
+                    *state = EgmpCarState::new();
+                }
+                was_simulating = simulating;
+                if simulating && is_heartbeat {
+                    tick_simulation(&mut state, tick);
+                    tick = tick.wrapping_add(1);
+                }
             }
             encode_state(&state)
         };
@@ -354,12 +408,19 @@ mod tests {
     use prost::Message;
 
     #[test]
-    fn encode_state_default_state_has_fields_present() {
-        let state = EgmpCarState::new();
-        let payload = encode_state(&state);
+    fn new_state_has_no_known_values() {
+        let payload = encode_state(&EgmpCarState::new());
+        assert!(payload.basic.is_empty());
+        assert!(payload.advanced.is_empty());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn simulated_state_has_fields_present() {
+        let payload = encode_state(&EgmpCarState::simulated());
         let basic = proto::BasicState::decode(payload.basic.as_slice()).unwrap();
         let advanced = proto::AdvancedState::decode(payload.advanced.as_slice()).unwrap();
-        
+
         assert_eq!(basic.odometer, Some(0));
         assert_eq!(basic.is_driving, Some(false));
         assert_eq!(basic.speed, Some(0));

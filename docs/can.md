@@ -81,3 +81,8 @@ Two layers:
 2.  Vehicle validates frame IDs, data ranges, or handshake frames against its expected car profile.
 3.  On success: `set_can_read_only(false)` — CAN TX is now live.
 4.  On any subsequent error or unexpected data: `set_can_read_only(true)` re-engages the lock.
+
+## E-GMP vehicle state
+`EgmpCarState` fields are all `None` until the matching CAN frame has been decoded, and `None` fields are omitted from the published proto, so the app never sees invented values. The debug simulation seeds its own defaults when it is switched on.
+
+`is_driving` is derived from `speed > 0`. Signals whose DBC mapping is not yet verified on a car (climate target temperature, window states, headlights) are only decoded and filtered when the `untested-signals` cargo feature of `egmp-controller` is on; it is off by default. xtask does not currently forward this feature, so enable it by hand in `cars/egmp/Cargo.toml` while verifying a mapping.

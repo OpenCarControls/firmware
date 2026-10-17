@@ -13,6 +13,9 @@ use core_interface::{CAN_RX_CHANNEL, CanFilter, CanFrame};
 
 // ── CAN Configuration ─────────────────────────────────────────────────────────
 
+// Signals whose DBC mapping has not been verified on a real car are only decoded when the
+// `untested-signals` feature is on; otherwise their state fields stay `None` and are not
+// published to the app.
 pub const CAN_FILTERS: &[CanFilter] = &[
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1041).unwrap()), mask: 0x7FF }, // BODY_STATUS
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(428).unwrap()), mask: 0x7FF },  // CLUSTER_INFO428
@@ -23,10 +26,12 @@ pub const CAN_FILTERS: &[CanFilter] = &[
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(551).unwrap()), mask: 0x7FF },  // ODOMETER
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(795).unwrap()), mask: 0x7FF },  // CLIMATE_STATUS
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(685).unwrap()), mask: 0x7FF },  // BMS_PRECOND_STATUS
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1077).unwrap()), mask: 0x7FF }, // POWER_CAN_STATUS
+    #[cfg(feature = "untested-signals")]
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(896).unwrap()), mask: 0x7FF },  // CLIMATE_TEMPERATURE
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(782).unwrap()), mask: 0x7FF },  // CHARGING_POWER
+    #[cfg(feature = "untested-signals")]
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1090).unwrap()), mask: 0x7FF }, // BCM12200ms
+    #[cfg(feature = "untested-signals")]
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1050).unwrap()), mask: 0x7FF }, // BCM07200ms
 ];
 
@@ -54,7 +59,9 @@ pub async fn handle_can_frame(frame: CanFrame) {
                 state.is_frunk_open = Some(m.hood_open() != 0);
             }
             m_can::Messages::ClusterInfo428(m) => {
-                state.speed = Some(m.speed_kph() as i32);
+                let speed = m.speed_kph() as i32;
+                state.speed = Some(speed);
+                state.is_driving = Some(speed > 0);
             }
             m_can::Messages::ChargePortDoor(m) => {
                 state.charge_port_state = Some(if m.port_open() != 0 { crate::proto::basic_state::ChargePortState::Open } else { crate::proto::basic_state::ChargePortState::Closed });
@@ -81,9 +88,7 @@ pub async fn handle_can_frame(frame: CanFrame) {
                     m.battery_precond_state() == m_can::BmsPrecondStatusBatteryPrecondState::Preparing
                 );
             }
-            m_can::Messages::PowerCanStatus(m) => {
-                state.is_driving = Some(m.power_state() == m_can::PowerCanStatusPowerState::CarOn);
-            }
+            #[cfg(feature = "untested-signals")]
             m_can::Messages::ClimateTemperature(m) => {
                 // UNTESTED MAPPING:
                 state.target_climate_temperature = Some(m.driver_temp_c_raw() as f32);
@@ -91,6 +96,7 @@ pub async fn handle_can_frame(frame: CanFrame) {
             m_can::Messages::ChargingPower(m) => {
                 state.power_flow_watt = Some((m.charging_power_k_w() as f32 * 1000.0) as i32);
             }
+            #[cfg(feature = "untested-signals")]
             m_can::Messages::Bcm12200ms(m) => {
                 // UNTESTED MAPPING:
                 state.is_driver_window_open = Some(m.window_drvr_sd_wdw_sta_bcm() != 0);
@@ -98,11 +104,14 @@ pub async fn handle_can_frame(frame: CanFrame) {
                 state.is_rear_left_window_open = Some(m.window_rr_lft_wdw_sta_bcm() != 0);
                 state.is_rear_right_window_open = Some(m.window_rr_rt_wdw_sta_bcm() != 0);
             }
+            #[cfg(feature = "untested-signals")]
             m_can::Messages::Bcm07200ms(m) => {
                 // UNTESTED MAPPING:
                 state.are_lights_on = Some(m.lamp_hd_lmp_lo_on_req() != 0);
             }
             // TODO: Unmapped BasicState fields:
+            // - is_driving is derived from speed; a power-state signal (POWER_CAN_STATUS,
+            //   BO 1077) tells "car on" apart from "moving" if that distinction is needed
             // - indoor_temperature
             // - is_windshield_defrost_on
             // - is_rear_window_defrost_on (There is a Rear_Defrost_State in BO 593 that could be used)
