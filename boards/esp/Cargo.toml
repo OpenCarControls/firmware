@@ -37,7 +37,7 @@ hardware = [
 ]
 
 # Development features — enable hardware + a specific chip for rust-analyzer IDE support.
-# Usage: set rust-analyzer.cargo.features = ["dev-esp32s3"] in .vscode/settings.json.
+# Selected automatically by `cargo xtask ide` from the MCU in config.toml.
 dev-esp32   = [
     "hardware",
     "esp-hal/esp32",

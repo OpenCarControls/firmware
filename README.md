@@ -49,6 +49,17 @@ auth_mode  = "basic"                       # "basic" or "mtls"
 
 Per-board settings live under `[hardware.esp]` / `[hardware.pc]`, including CAN buses (`[[hardware.<board>.can_buses]]`, where order determines `bus_id`) and BLE options. The `board` and `platform` values can be overridden with `--board` and `--platform`. Hardware profiles in `hardware-profiles/` are ready-made pin/CAN setups for specific devices.
 
+### Switching boards in the IDE
+
+rust-analyzer needs to know which board you're working on: which `dev-*` feature to enable, which target to analyse for, and for Xtensa chips, which toolchain to use. `cargo xtask ide` derives that from the same config the build uses. It writes the rust-analyzer settings to `.vscode/settings.json` and a matching **Firmware: debug …** config (probe-rs with the right chip for ESP, lldb for PC) to `.vscode/launch.json`. Both files are gitignored and anything else in them is kept; rust-analyzer picks up the change automatically:
+
+```bash
+cargo xtask ide                # board/MCU from config.toml (e.g. the hardware profile's ESP32-C3)
+cargo xtask ide --board pc     # temporarily work on the PC board
+```
+
+The dev container runs it once on creation. In VS Code, the **IDE: use board from config.toml** and **IDE: use PC board** tasks do the same. For ESP targets, std-only crates (`xtask`, `build-utils`, `board-pc`) and test targets are left out of rust-analyzer's `cargo check`, since they can't compile for a no_std target.
+
 ## 🏗️ Architecture
 
 The firmware is a Cargo workspace of independently compiled crates that cooperate solely through static Embassy `Channel`s defined in `core-interface`. No traits link the layers — only shared-memory queues.

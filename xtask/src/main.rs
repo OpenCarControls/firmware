@@ -357,10 +357,10 @@ fn main() {
 
     let command = args.get(1).map(|s| s.as_str()).unwrap_or("");
     match command {
-        "build" | "run" | "clippy" | "test" | "flash" => {}
+        "build" | "run" | "clippy" | "test" | "flash" | "ide" => {}
         _ => {
             eprintln!(
-                "Usage: cargo xtask <build|run|clippy|test|flash> [config_file.toml] [--board <board>] [--platform <platform>] [--on-hardware] [--debug] [--port <port>] [--monitor]"
+                "Usage: cargo xtask <build|run|clippy|test|flash|ide> [config_file.toml] [--board <board>] [--platform <platform>] [--on-hardware] [--debug] [--port <port>] [--monitor]"
             );
             exit(1);
         }
@@ -470,6 +470,15 @@ fn main() {
 
     builder.validate(&config);
 
+    if command == "ide" {
+        write_vscode_config(
+            board,
+            &builder.rust_analyzer_config(&config),
+            builder.debug_launch_config(&config),
+        );
+        return;
+    }
+
     match command {
         "test" => {
             // on_hardware is true here (handled above otherwise)
@@ -490,6 +499,108 @@ fn main() {
             }
         }
     }
+}
+
+/// rust-analyzer settings owned by `cargo xtask ide`: removed and rewritten on
+/// every run. Anything else in the settings file is left alone.
+const RUST_ANALYZER_KEYS: [&str; 6] = [
+    "rust-analyzer.cargo.features",
+    "rust-analyzer.cargo.target",
+    "rust-analyzer.cargo.extraEnv",
+    "rust-analyzer.cargo.extraArgs",
+    "rust-analyzer.check.extraArgs",
+    "rust-analyzer.check.allTargets",
+];
+
+/// Launch configurations whose name starts with this are owned by
+/// `cargo xtask ide` and replaced on every run; others are left alone.
+pub const LAUNCH_NAME_PREFIX: &str = "Firmware: ";
+
+/// Points VS Code at the selected board by merging into its config files:
+/// rust-analyzer settings (features, target, toolchain) into settings.json,
+/// and the board's debug configuration into launch.json. rust-analyzer only
+/// reads these from editor settings, not from `rust-analyzer.toml`.
+///
+/// Writes to `.vscode/` (both files are gitignored), or to the directory in
+/// `OPENCAR_VSCODE_DIR` when the editor's workspace root is elsewhere (e.g. the
+/// multi-repo workspace container). Keys and launch configs not owned by xtask
+/// are kept.
+fn write_vscode_config(board: &str, ra: &RustAnalyzerConfig, launch: serde_json::Value) {
+    use serde_json::{Value, json};
+
+    let dir = env::var("OPENCAR_VSCODE_DIR").unwrap_or_else(|_| ".vscode".into());
+    fs::create_dir_all(&dir).unwrap_or_else(|_| panic!("Failed to create {dir}"));
+
+    let settings_path = format!("{dir}/settings.json");
+    let mut settings = read_vscode_json(&settings_path);
+    for key in RUST_ANALYZER_KEYS {
+        settings.remove(key);
+    }
+    settings.insert("rust-analyzer.cargo.features".into(), json!(ra.features));
+    if let Some(target) = &ra.target {
+        settings.insert("rust-analyzer.cargo.target".into(), json!(target));
+    }
+    if !ra.extra_env.is_empty() {
+        let env: serde_json::Map<String, Value> =
+            ra.extra_env.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+        settings.insert("rust-analyzer.cargo.extraEnv".into(), Value::Object(env));
+    }
+    if !ra.extra_args.is_empty() {
+        settings.insert("rust-analyzer.cargo.extraArgs".into(), json!(ra.extra_args));
+    }
+    if !ra.check_exclude.is_empty() {
+        let args: Vec<&str> = ra.check_exclude.iter().flat_map(|p| ["--exclude", p.as_str()]).collect();
+        settings.insert("rust-analyzer.check.extraArgs".into(), json!(args));
+    }
+    if ra.check_skip_tests {
+        settings.insert("rust-analyzer.check.allTargets".into(), json!(false));
+    }
+    write_vscode_json(&settings_path, settings);
+
+    let launch_path = format!("{dir}/launch.json");
+    let mut launch_json = read_vscode_json(&launch_path);
+    let mut configurations: Vec<Value> = match launch_json.remove("configurations") {
+        Some(Value::Array(list)) => list,
+        _ => Vec::new(),
+    };
+    configurations.retain(|c| {
+        !c.get("name").and_then(Value::as_str).is_some_and(|n| n.starts_with(LAUNCH_NAME_PREFIX))
+    });
+    let launch_name = launch["name"].as_str().unwrap_or_default().to_string();
+    configurations.insert(0, launch);
+    launch_json.insert("version".into(), json!("0.2.0"));
+    launch_json.insert("configurations".into(), Value::Array(configurations));
+    write_vscode_json(&launch_path, launch_json);
+
+    let target = ra.target.as_deref().map(|t| format!(", {t}")).unwrap_or_default();
+    println!("✅ VS Code now targets the '{board}' board{target}: rust-analyzer settings and the \"{launch_name}\" debug config ({dir}/).");
+}
+
+fn read_vscode_json(path: &str) -> serde_json::Map<String, serde_json::Value> {
+    match fs::read_to_string(path) {
+        Ok(s) if !s.trim().is_empty() => match serde_json::from_str(&s) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ => {
+                eprintln!("Error: {path} isn't plain JSON (comments aren't supported); fix or delete it and re-run.");
+                exit(1);
+            }
+        },
+        _ => serde_json::Map::new(),
+    }
+}
+
+fn write_vscode_json(path: &str, map: serde_json::Map<String, serde_json::Value>) {
+    let contents = serde_json::to_string_pretty(&serde_json::Value::Object(map)).unwrap() + "\n";
+    fs::write(path, contents).unwrap_or_else(|_| panic!("Failed to write {path}"));
+}
+
+/// Absolute path of the firmware workspace, for generated debug configs: VS
+/// Code's `${workspaceFolder}` isn't this directory in the multi-repo workspace.
+pub fn firmware_dir() -> String {
+    env::current_dir()
+        .expect("Failed to read the current directory")
+        .to_string_lossy()
+        .into_owned()
 }
 
 // ==========================================
@@ -532,10 +643,32 @@ fn run_host_tests(config: &Config) {
 // 4. Platform Builders (Strategy Pattern)
 // ==========================================
 
+/// How rust-analyzer must load the workspace to see the code the way this
+/// board builds it. Written to VS Code's settings.json by `cargo xtask ide`.
+#[derive(Default)]
+pub struct RustAnalyzerConfig {
+    pub features: Vec<String>,
+    pub target: Option<String>,
+    pub extra_env: Vec<(String, String)>,
+    pub extra_args: Vec<String>,
+    /// Workspace packages to leave out of `cargo check`, e.g. std-only crates
+    /// when checking for a no_std target.
+    pub check_exclude: Vec<String>,
+    /// Check only libs/bins, not tests: host-only dev-dependencies don't
+    /// compile for no_std targets.
+    pub check_skip_tests: bool,
+}
+
 pub trait TargetBuilder {
     fn validate(&self, config: &Config);
 
     fn generate_app_build(&self, config: &Config);
+
+    fn rust_analyzer_config(&self, config: &Config) -> RustAnalyzerConfig;
+
+    /// VS Code launch configuration that builds and debugs this board's firmware.
+    /// Its name must start with `LAUNCH_NAME_PREFIX`.
+    fn debug_launch_config(&self, config: &Config) -> serde_json::Value;
 
     fn compile(&self, config: &Config, release: bool);
 

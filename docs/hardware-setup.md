@@ -69,7 +69,7 @@ To build an image in the container and flash it from the host instead, see [Rele
 
 ## Debugging
 
-The ESP dev container includes the `probe-rs-debugger` VS Code extension. Build with `--debug`, then select **"Debug: ESP32-S3 (probe-rs)"** in the Run & Debug panel and press F5. probe-rs flashes the binary and halts the CPU at reset, giving you breakpoints, variable inspection, and step execution.
+The ESP dev container includes the `probe-rs-debugger` VS Code extension. Run `cargo xtask ide` so the debug config matches your chip, then select **"Firmware: debug ESP32-… (probe-rs)"** in the Run & Debug panel and press F5. It builds with `--debug` first. probe-rs flashes the binary and halts the CPU at reset, giving you breakpoints, variable inspection, and step execution.
 
 ## Serial logs
 

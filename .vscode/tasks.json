@@ -2,9 +2,23 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Generate: app-build (xtask)",
+            "label": "IDE: use board from config.toml",
             "type": "shell",
-            "command": "cargo xtask build --board pc",
+            "command": "cargo xtask ide",
+            "presentation": { "reveal": "silent", "panel": "shared" },
+            "problemMatcher": []
+        },
+        {
+            "label": "IDE: use PC board",
+            "type": "shell",
+            "command": "cargo xtask ide --board pc",
+            "presentation": { "reveal": "silent", "panel": "shared" },
+            "problemMatcher": []
+        },
+        {
+            "label": "Build: PC firmware (debug)",
+            "type": "shell",
+            "command": "cargo xtask build --board pc --debug",
             "group": "build",
             "presentation": {
                 "reveal": "always",
@@ -13,19 +27,7 @@
             "problemMatcher": ["$rustc"]
         },
         {
-            "label": "Build: app-build (debug)",
-            "type": "shell",
-            "command": "cargo build --manifest-path ${workspaceFolder}/.app_build/Cargo.toml",
-            "dependsOn": ["Generate: app-build (xtask)"],
-            "group": "build",
-            "presentation": {
-                "reveal": "always",
-                "panel": "shared"
-            },
-            "problemMatcher": ["$rustc"]
-        },
-        {
-            "label": "Build: ESP32-S3 firmware (release)",
+            "label": "Build: ESP firmware (release)",
             "type": "shell",
             "command": "cargo xtask build --board esp",
             "group": "build",
@@ -36,7 +38,7 @@
             "problemMatcher": ["$rustc"]
         },
         {
-            "label": "Build: ESP32-S3 firmware (debug)",
+            "label": "Build: ESP firmware (debug)",
             "type": "shell",
             "command": "cargo xtask build --board esp --debug",
             "dependsOn": ["Fix: ESP JTAG USB permissions"],

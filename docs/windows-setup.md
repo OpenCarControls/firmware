@@ -31,15 +31,7 @@ espup install
 **CRITICAL:** `espup` generates an environment export script (e.g., `export-esp.ps1` in your home directory). You **must** source this script in your PowerShell profile or in the terminal session before running `cargo xtask build --board esp` to ensure the correct compilers are in your `PATH`.
 
 ## VS Code rust-analyzer
-Our `.vscode/settings.json` enables the `dev-pc` feature by default so you can navigate the PC mock board easily.
-
-If you are working on the ESP code, you must manually change the feature flags in `.vscode/settings.json`:
-```json
-{
-  "rust-analyzer.cargo.features": ["dev-esp32c3"],
-  "rust-analyzer.cargo.target": "riscv32imc-unknown-none-elf"
-}
-```
+Run `cargo xtask ide` to point rust-analyzer at the board selected in `config.toml`, or `cargo xtask ide --board pc` for the PC board. It writes the matching features, target and toolchain to `.vscode/settings.json`; see [Switching boards in the IDE](../README.md#switching-boards-in-the-ide).
 
 ## Compiling and Running
 To build the PC board natively:

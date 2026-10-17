@@ -1,6 +1,7 @@
 use crate::{
-    Config, TargetBuilder, escape_rust_string, load_transport_contract, parse_broker_url,
-    render_topic_from_template, validate_ble_transport_contract,
+    Config, LAUNCH_NAME_PREFIX, RustAnalyzerConfig, TargetBuilder, escape_rust_string,
+    firmware_dir, load_transport_contract, parse_broker_url, render_topic_from_template,
+    validate_ble_transport_contract,
 };
 use serde::Deserialize;
 use std::fs;
@@ -174,6 +175,50 @@ impl TargetBuilder for Builder {
             );
             exit(1);
         }
+    }
+
+    fn rust_analyzer_config(&self, config: &Config) -> RustAnalyzerConfig {
+        let mcu = Self::get_esp_config(config).mcu;
+        let target = mcu_to_target_arch(&mcu);
+        let mut ra = RustAnalyzerConfig {
+            features: vec![format!("dev-{mcu}")],
+            target: Some(target.to_string()),
+            // std-only crates can't be checked for a no_std target.
+            check_exclude: vec!["xtask".into(), "build-utils".into(), "board-pc".into()],
+            check_skip_tests: true,
+            ..Default::default()
+        };
+        // Xtensa has no prebuilt `core`: mirror the `+esp` toolchain and build-std
+        // that execute_cargo_command and .app_build/.cargo/config.toml use.
+        if target.starts_with("xtensa") {
+            ra.extra_env.push(("RUSTUP_TOOLCHAIN".into(), "esp".into()));
+            ra.extra_args.push("-Zbuild-std=core,alloc".into());
+        }
+        ra
+    }
+
+    fn debug_launch_config(&self, config: &Config) -> serde_json::Value {
+        let mcu = Self::get_esp_config(config).mcu;
+        let target = mcu_to_target_arch(&mcu);
+        // "esp32c3" -> "ESP32-C3", "esp32" -> "ESP32"
+        let variant = mcu.trim_start_matches("esp32").to_uppercase();
+        let chip_name = if variant.is_empty() { "ESP32".to_string() } else { format!("ESP32-{variant}") };
+        serde_json::json!({
+            "type": "probe-rs-debug",
+            "request": "launch",
+            "name": format!("{LAUNCH_NAME_PREFIX}debug {chip_name} (probe-rs)"),
+            "preLaunchTask": "Build: ESP firmware (debug)",
+            "chip": mcu,
+            "flashingConfig": {
+                "flashingEnabled": true,
+                "resetAfterFlashing": true,
+                "haltAfterReset": true
+            },
+            "coreConfigs": [{
+                "coreIndex": 0,
+                "programBinary": format!("{}/.app_build/target/{target}/debug/app-build", firmware_dir())
+            }]
+        })
     }
 
     fn generate_app_build(&self, config: &Config) {

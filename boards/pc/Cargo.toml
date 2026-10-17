@@ -19,6 +19,7 @@ hardware = [
 ]
 
 # Development feature — enable hardware for rust-analyzer IDE support on the PC config.
+# Selected automatically by `cargo xtask ide` when the board is `pc`.
 dev-pc = ["hardware"]
 
 [dependencies]

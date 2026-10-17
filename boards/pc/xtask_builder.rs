@@ -1,6 +1,7 @@
 use crate::{
-    Config, TargetBuilder, escape_rust_string, load_transport_contract, parse_broker_url,
-    render_topic_from_template, validate_ble_transport_contract,
+    Config, LAUNCH_NAME_PREFIX, RustAnalyzerConfig, TargetBuilder, escape_rust_string,
+    firmware_dir, load_transport_contract, parse_broker_url, render_topic_from_template,
+    validate_ble_transport_contract,
 };
 use serde::Deserialize;
 use std::fs;
@@ -84,6 +85,27 @@ impl TargetBuilder for Builder {
         if cfg!(windows) {
             println!("Warning: Running PC simulator on Windows. Native SocketCAN will not be available.");
         }
+    }
+
+    fn rust_analyzer_config(&self, _config: &Config) -> RustAnalyzerConfig {
+        RustAnalyzerConfig {
+            features: vec!["dev-pc".into()],
+            ..Default::default()
+        }
+    }
+
+    fn debug_launch_config(&self, _config: &Config) -> serde_json::Value {
+        let fw = firmware_dir();
+        serde_json::json!({
+            "type": "lldb",
+            "request": "launch",
+            "name": format!("{LAUNCH_NAME_PREFIX}debug PC board"),
+            "preLaunchTask": "Build: PC firmware (debug)",
+            "program": format!("{fw}/.app_build/target/debug/app-build"),
+            "args": [],
+            "cwd": fw,
+            "env": { "RUST_LOG": "info" }
+        })
     }
 
     fn generate_app_build(&self, config: &Config) {
