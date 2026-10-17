@@ -181,7 +181,7 @@ impl TargetBuilder for Builder {
         let mcu = Self::get_esp_config(config).mcu;
         let target = mcu_to_target_arch(&mcu);
         let mut ra = RustAnalyzerConfig {
-            features: vec![format!("dev-{mcu}")],
+            features: vec![mcu.clone()],
             target: Some(target.to_string()),
             // std-only crates can't be checked for a no_std target.
             check_exclude: vec!["xtask".into(), "build-utils".into(), "board-pc".into()],

@@ -9,8 +9,8 @@ The README has the quick-start commands; this page covers how the suites are org
 |---|---|---|
 | `core-interface` | `passes_filter`, BLE/MQTT dispatch (platform_id gating, routing, `source_device_id` stamping, empty-source rejection), response routing, state publish split, CAN read-only flag and its change notifications, per-bus CAN TX channels, CAN debug streaming (batch filtering, blocklist, dropped-frame counter) | `cargo test -p core-interface -- --test-threads=1` |
 | `virtual-car-controller` | `encode_state` proto encoding, CAN frame → state updates, `process_basic_command`, `tick_simulation` (initial defaults, ramp-up, park phase, odometer increment, door-lock preservation, cycle wraparound) | `cargo test -p virtual-car-controller -- --test-threads=1` |
-| `board-pc` | `socketcan_to_core_frame` / `core_to_socketcan_frame` round-trips + BLE helpers (gated behind the `hardware` feature) | `cargo test -p board-pc --features hardware -- --test-threads=1` |
-| `board-esp` | `compute_mcp_masks` + BLE helpers/proto size & round-trip tests (`AppToDevice`/`DeviceToApp` encode/decode bounds, `ble_device_name_appends_mac_suffix`) | `cargo test -p board-esp -- --test-threads=1` |
+| `board-pc` | `socketcan_to_core_frame` / `core_to_socketcan_frame` round-trips + BLE helpers | `cargo test -p board-pc -- --test-threads=1` |
+| `board-esp` | `compute_mcp_masks`, `to_core_frame`, the `StoredBond` flash layout and round-trips, BLE helpers (device name and fallback, random-static address detection) and proto size & round-trip tests (`AppToDevice`/`DeviceToApp` encode/decode bounds) | `cargo test -p board-esp -- --test-threads=1` |
 
 **`--test-threads=1` is required** — Embassy channels are process-global statics; parallel threads corrupt each other's state.
 

@@ -88,10 +88,8 @@ impl TargetBuilder for Builder {
     }
 
     fn rust_analyzer_config(&self, _config: &Config) -> RustAnalyzerConfig {
-        RustAnalyzerConfig {
-            features: vec!["dev-pc".into()],
-            ..Default::default()
-        }
+        // board-pc has no features to enable; the host target is the default.
+        RustAnalyzerConfig::default()
     }
 
     fn debug_launch_config(&self, _config: &Config) -> serde_json::Value {
@@ -141,7 +139,7 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str("[package]\nname = \"app-build\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n");
         cargo_toml.push_str("[dependencies]\n");
         cargo_toml.push_str("core-interface = { path = \"../core-interface\" }\n");
-        cargo_toml.push_str("board-pc = { path = \"../boards/pc\", features = [\"hardware\"] }\n");
+        cargo_toml.push_str("board-pc = { path = \"../boards/pc\" }\n");
         cargo_toml.push_str(&format!(
             "{} = {{ path = \"../cars/{}\" }}\n",
             vehicle_crate_name, vehicle_platform

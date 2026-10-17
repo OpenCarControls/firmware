@@ -51,7 +51,7 @@ Per-board settings live under `[hardware.esp]` / `[hardware.pc]`, including CAN 
 
 ### Switching boards in the IDE
 
-rust-analyzer needs to know which board you're working on: which `dev-*` feature to enable, which target to analyse for, and for Xtensa chips, which toolchain to use. `cargo xtask ide` derives that from the same config the build uses. It writes the rust-analyzer settings to `.vscode/settings.json` and a matching **Firmware: debug …** config (probe-rs with the right chip for ESP, lldb for PC) to `.vscode/launch.json`. Both files are gitignored and anything else in them is kept; rust-analyzer picks up the change automatically:
+rust-analyzer needs to know which board you're working on: which features to enable (`board-esp`'s chip feature, e.g. `esp32c3`), which target to analyse for, and for Xtensa chips, which toolchain to use. `cargo xtask ide` derives that from the same config the build uses. It writes the rust-analyzer settings to `.vscode/settings.json` and a matching **Firmware: debug …** config (probe-rs with the right chip for ESP, lldb for PC) to `.vscode/launch.json`. Both files are gitignored and anything else in them is kept; rust-analyzer picks up the change automatically:
 
 ```bash
 cargo xtask ide                # board/MCU from config.toml (e.g. the hardware profile's ESP32-C3)

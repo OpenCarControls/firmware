@@ -115,10 +115,7 @@ jobs:
         run: |
           for pkg in ${{ steps.crates.outputs.packages }}; do
             echo "::group::cargo test -p $pkg"
-            # board-pc's tests live in modules gated behind its `hardware` feature.
-            features=""
-            [ "$pkg" = "board-pc" ] && features="--features hardware"
-            cargo test -p "$pkg" $features -- --test-threads=1
+            cargo test -p "$pkg" -- --test-threads=1
             echo "::endgroup::"
           done
 

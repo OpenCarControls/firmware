@@ -118,7 +118,7 @@ Embassy is used freely inside `core-interface`. Boards adapt to it — not the o
 *   xtask uses `+esp -Zbuild-std=core,alloc` for xtensa targets.
 *   Embassy crate versions must match what `esp-rtos` uses (currently `embassy-executor = "0.10.0"`). In 0.10 the spawn API changed: task constructors return `Result<SpawnToken, SpawnError>` and `spawner.spawn()` returns `()` — pattern is `spawner.spawn(task(args).unwrap())`.
 *   CAN driver loops run on **core 1** via `esp_rtos::start_second_core` (4-arg form: `cpu_ctrl`, `SoftwareInterrupt::<1>`, `&mut stack`, `closure`); comms and vehicle tasks run on core 0.
-*   All ESP HAL dependencies are behind an optional `hardware` Cargo feature; firmware builds (via xtask) enable it automatically. Without the feature, the crate compiles on the host for unit testing (only `embedded-can` and `core-interface` are unconditional). Pure logic that is host-testable (e.g. `compute_mcp_masks`) is kept outside `#[cfg(feature = "hardware")]` blocks.
+*   All ESP HAL, radio and peripheral-driver dependencies are behind an optional `hardware` Cargo feature; firmware builds (via xtask) enable it automatically. Without the feature, the crate compiles on the host for unit testing. Crates that build on any target (`core-interface`, `embedded-can`, `heapless`, `bt-hci`, `trouble-host`, `sequential-storage`) are unconditional, so pure logic that uses them (e.g. `compute_mcp_masks`, `to_core_frame`, the `StoredBond` flash format) is kept outside `#[cfg(feature = "hardware")]` blocks and host-tested.
 *   WiFi/MQTT is wired against **`esp-radio 0.18.0`**. There is no shared radio controller — BLE and WiFi initialise independently.
 *   `board-esp` enables esp-radio's `coex` feature: every ESP has a single 2.4 GHz RF front end, and without `coex` WiFi and BLE are not time-sliced and interfere with each other.
 *   BLE: `ble::controller::BleConnector::new(peripherals.BT, ble::Config::default())` (2 args, no `init_radio()` call).
@@ -136,5 +136,5 @@ Embassy is used freely inside `core-interface`. Boards adapt to it — not the o
 
 ## `no_std` / test gating pattern
 *   `core-interface` and all vehicle crates use `#![cfg_attr(not(test), no_std)]`.
-*   `board-esp` uses `#![cfg_attr(not(test), no_std)]` — always `no_std` except during host tests. HAL deps are optional behind the `hardware` feature (enabled by xtask for firmware builds). Only allocation-free, HAL-free code is available without the feature.
-*   `board-pc` is always `std`.
+*   `board-esp` uses `#![cfg_attr(not(test), no_std)]` — always `no_std` except during host tests. HAL deps are optional behind the `hardware` feature (enabled by xtask for firmware builds); only HAL-free code is available without it. The chip features (`esp32`, `esp32s3`, `esp32c3`, `esp32c6`) enable `hardware` plus that chip on every ESP dependency, for rust-analyzer.
+*   `board-pc` is always `std` and has no Cargo features: it only ever builds for the host.

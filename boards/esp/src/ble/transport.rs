@@ -15,6 +15,32 @@
 //! - `source_device_id` in every accepted message is overwritten with the firmware-verified
 //!   BLE address so the vehicle layer always has a trustworthy caller identity.
 
+// ─── Device name helper ───────────────────────────────────────────────────────
+
+#[cfg_attr(not(feature = "hardware"), allow(dead_code))]
+fn build_ble_device_name(base: &str, mac: [u8; 6]) -> heapless::String<33> {
+    use core::fmt::Write as _;
+    let mut out = heapless::String::<33>::new();
+    let _ = write!(&mut out, "{}-{:02X}{:02X}", base, mac[4], mac[5]);
+    if out.is_empty() {
+        let _ = write!(&mut out, "OpenCar-{:02X}{:02X}", mac[4], mac[5]);
+    }
+    out
+}
+
+// ─── Address kind helper ──────────────────────────────────────────────────────
+
+#[cfg_attr(not(feature = "hardware"), allow(dead_code))]
+fn infer_addr_kind(bd_addr: &trouble_host::prelude::BdAddr) -> bt_hci::param::AddrKind {
+    // BdAddr raw bytes: index 5 is the most-significant byte.
+    // Random static addresses have bits 7:6 of MSB set to 0b11.
+    if (bd_addr.raw()[5] & 0xC0) == 0xC0 {
+        bt_hci::param::AddrKind::RANDOM
+    } else {
+        bt_hci::param::AddrKind::PUBLIC
+    }
+}
+
 #[cfg(feature = "hardware")]
 mod hardware {
     use alloc::vec::Vec;
@@ -32,6 +58,8 @@ mod hardware {
     use esp_storage::FlashStorage;
     use prost::Message as _;
     use trouble_host::prelude::*;
+
+    use super::{build_ble_device_name, infer_addr_kind};
 
     use bt_hci::cmd::le::{
         LeAddDeviceToFilterAcceptList, LeAddDeviceToResolvingList, LeClearFilterAcceptList,
@@ -83,18 +111,6 @@ mod hardware {
     }
 
     impl rand_core::CryptoRng for MyRng {}
-
-    // ─── Device name helper ───────────────────────────────────────────────────────
-
-    pub(super) fn build_ble_device_name(base: &str, mac: [u8; 6]) -> heapless::String<33> {
-        use core::fmt::Write as _;
-        let mut out = heapless::String::<33>::new();
-        let _ = write!(&mut out, "{}-{:02X}{:02X}", base, mac[4], mac[5]);
-        if out.is_empty() {
-            let _ = write!(&mut out, "OpenCar-{:02X}{:02X}", mac[4], mac[5]);
-        }
-        out
-    }
 
     // ─── Main BLE task ────────────────────────────────────────────────────────────
 
@@ -309,18 +325,6 @@ mod hardware {
         {
             Either::First(result) => Ok(Some(result?.with_attribute_server(server)?)),
             Either::Second(_) => Ok(None),
-        }
-    }
-
-    // ─── Address kind helper ──────────────────────────────────────────────────────
-
-    fn infer_addr_kind(bd_addr: &BdAddr) -> bt_hci::param::AddrKind {
-        // BdAddr raw bytes: index 5 is the most-significant byte.
-        // Random static addresses have bits 7:6 of MSB set to 0b11.
-        if (bd_addr.raw()[5] & 0xC0) == 0xC0 {
-            bt_hci::param::AddrKind::RANDOM
-        } else {
-            bt_hci::param::AddrKind::PUBLIC
         }
     }
 
@@ -662,14 +666,6 @@ pub use hardware::*;
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
-#[cfg(all(test, not(feature = "hardware")))]
-fn build_ble_device_name(base: &str, mac: [u8; 6]) -> std::string::String {
-    use core::fmt::Write as _;
-    let mut out = std::string::String::new();
-    let _ = write!(&mut out, "{}-{:02X}{:02X}", base, mac[4], mac[5]);
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -679,5 +675,22 @@ mod tests {
         let mac = [0x10, 0x20, 0x30, 0x40, 0xAB, 0xCD];
         let name = build_ble_device_name("OpenCar", mac);
         assert_eq!(name.as_str(), "OpenCar-ABCD");
+    }
+
+    #[test]
+    fn ble_device_name_falls_back_when_base_is_too_long() {
+        let mac = [0x10, 0x20, 0x30, 0x40, 0xAB, 0xCD];
+        let name = build_ble_device_name("A name far too long to fit in the advertisement", mac);
+        assert_eq!(name.as_str(), "OpenCar-ABCD");
+    }
+
+    #[test]
+    fn random_static_addresses_are_detected() {
+        use trouble_host::prelude::BdAddr;
+        // Index 5 is the most significant byte; random static sets its top two bits.
+        let random = BdAddr::new([0x01, 0x02, 0x03, 0x04, 0x05, 0xC6]);
+        let public = BdAddr::new([0x01, 0x02, 0x03, 0x04, 0x05, 0x46]);
+        assert_eq!(infer_addr_kind(&random), bt_hci::param::AddrKind::RANDOM);
+        assert_eq!(infer_addr_kind(&public), bt_hci::param::AddrKind::PUBLIC);
     }
 }

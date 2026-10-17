@@ -9,11 +9,29 @@
 //! against the vehicle's `CanFilter` list is done in software after the hardware delivers
 //! the frame.
 
-use core_interface::CanFilter;
+use core_interface::{CanFilter, CanFrame};
+use embedded_can::Frame as EmbeddedFrame;
+
+/// Converts any [`EmbeddedFrame`]-implementing hardware frame into the
+/// crate-shared [`CanFrame`] type. Used by both the TWAI and MCP2515 drivers.
+#[cfg_attr(not(feature = "hardware"), allow(dead_code))]
+fn to_core_frame<F: EmbeddedFrame>(frame: F, bus_id: u8) -> CanFrame {
+    let id = frame.id();
+    let dlc = frame.dlc() as u8;
+    let raw = frame.data();
+    let mut data = [0u8; 8];
+    data[..raw.len()].copy_from_slice(raw);
+    CanFrame {
+        bus_id,
+        id,
+        data,
+        dlc,
+    }
+}
 
 #[cfg(feature = "hardware")]
 mod hardware {
-    use super::CanFilter;
+    use super::{CanFilter, to_core_frame};
     use core_interface::{
         CAN_DEBUG_RX_CHANNEL, CAN_RX_CHANNEL, CanFrame, CanRawCapture, CanReadOnlyReceiver,
     };
@@ -381,22 +399,6 @@ mod hardware {
         McpFrame::new(frame.id, &frame.data[..frame.dlc as usize])
     }
 
-    /// Converts any [`EmbeddedFrame`]-implementing hardware frame into the
-    /// crate-shared [`CanFrame`] type. Used by both the TWAI and MCP2515 drivers.
-    fn to_core_frame<F: EmbeddedFrame>(frame: F, bus_id: u8) -> CanFrame {
-        let id = frame.id();
-        let dlc = frame.dlc() as u8;
-        let raw = frame.data();
-        let mut data = [0u8; 8];
-        data[..raw.len()].copy_from_slice(raw);
-        CanFrame {
-            bus_id,
-            id,
-            data,
-            dlc,
-        }
-    }
-
     /// Switches both MCP2515 RX buffer masks to accept-all (mask bits = 0).
     /// Called when CAN debug mode is enabled so the debug tap can observe every
     /// frame on the bus before the software filter runs.
@@ -530,5 +532,45 @@ mod tests {
         let (m0, m1) = compute_mcp_masks(&filters, 0);
         assert_eq!(m0, 0x700);
         assert_eq!(m1, 0x0F0);
+    }
+
+    /// Minimal stand-in for a driver's frame type.
+    struct TestFrame {
+        id: Id,
+        data: heapless::Vec<u8, 8>,
+    }
+
+    impl EmbeddedFrame for TestFrame {
+        fn new(id: impl Into<Id>, data: &[u8]) -> Option<Self> {
+            Some(Self { id: id.into(), data: heapless::Vec::from_slice(data).ok()? })
+        }
+        fn new_remote(_id: impl Into<Id>, _dlc: usize) -> Option<Self> {
+            None
+        }
+        fn is_extended(&self) -> bool {
+            matches!(self.id, Id::Extended(_))
+        }
+        fn is_remote_frame(&self) -> bool {
+            false
+        }
+        fn id(&self) -> Id {
+            self.id
+        }
+        fn dlc(&self) -> usize {
+            self.data.len()
+        }
+        fn data(&self) -> &[u8] {
+            &self.data
+        }
+    }
+
+    #[test]
+    fn to_core_frame_copies_id_and_pads_short_payloads() {
+        let id = Id::Standard(StandardId::new(0x123).unwrap());
+        let frame = to_core_frame(TestFrame::new(id, &[0xAA, 0xBB, 0xCC]).unwrap(), 2);
+        assert_eq!(frame.bus_id, 2);
+        assert_eq!(frame.id, id);
+        assert_eq!(frame.dlc, 3);
+        assert_eq!(frame.data, [0xAA, 0xBB, 0xCC, 0, 0, 0, 0, 0]);
     }
 }
