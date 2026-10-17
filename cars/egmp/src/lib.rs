@@ -8,7 +8,8 @@ pub use can::{CAN_FILTERS, can_rx_task};
 use alloc::string::String;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
-use embassy_time::{Duration, Timer};
+use embassy_sync::signal::Signal;
+use embassy_time::{Duration, Timer, with_timeout};
 use core_interface::{
     ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, CMD_RESP_CHANNEL, VEHICLE_STATE_CHANNEL, VehicleStatePayload,
 };
@@ -20,6 +21,7 @@ pub mod proto {
 
 // ── Vehicle State ─────────────────────────────────────────────────────────────
 
+#[derive(Clone, PartialEq)]
 pub struct EgmpCarState {
     pub odometer: Option<u32>,
     pub is_driving: Option<bool>,
@@ -103,6 +105,15 @@ impl EgmpCarState {
 }
 
 pub(crate) static CAR_STATE: Mutex<CriticalSectionRawMutex, EgmpCarState> = Mutex::new(EgmpCarState::new());
+
+/// Raised by the CAN handler whenever `CAR_STATE` changes. `state_update_task` coalesces
+/// these so a busy bus produces at most one publish per `STATE_MIN_PUBLISH_INTERVAL`.
+pub(crate) static STATE_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
+/// Upper bound on how often state is pushed to BLE/MQTT while CAN data is changing.
+const STATE_MIN_PUBLISH_INTERVAL: Duration = Duration::from_millis(250);
+/// State is re-published at this interval even when nothing changed.
+const STATE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
 pub fn encode_state(state: &EgmpCarState) -> VehicleStatePayload {
     let basic = proto::BasicState {
@@ -309,22 +320,29 @@ pub fn tick_simulation(state: &mut EgmpCarState, tick: u64) {
     }
 }
 
+/// Publishes the vehicle state on every heartbeat, and shortly after CAN-driven changes
+/// (rate-limited to one publish per `STATE_MIN_PUBLISH_INTERVAL`).
 #[embassy_executor::task]
 pub async fn state_update_task() {
+    #[allow(unused_variables, unused_mut)]
     let mut tick: u64 = 0;
     loop {
-        Timer::after(Duration::from_secs(5)).await;
+        #[allow(unused_variables)]
+        let is_heartbeat = with_timeout(STATE_HEARTBEAT_INTERVAL, STATE_CHANGED.wait())
+            .await
+            .is_err();
         let payload = {
             #[allow(unused_mut)]
             let mut state = CAR_STATE.lock().await;
             #[cfg(debug_assertions)]
-            if core_interface::is_simulation_enabled() {
+            if is_heartbeat && core_interface::is_simulation_enabled() {
                 tick_simulation(&mut state, tick);
+                tick = tick.wrapping_add(1);
             }
             encode_state(&state)
         };
-        tick = tick.wrapping_add(1);
         VEHICLE_STATE_CHANNEL.sender().send(payload).await;
+        Timer::after(STATE_MIN_PUBLISH_INTERVAL).await;
     }
 }
 
