@@ -4,10 +4,12 @@ use crate::types::{CanFilter, CanFrame};
 
 // ── CAN Read-Only Mode ────────────────────────────────────────────────────────
 
-/// When `true`, the board CAN driver loops silently drop all outbound TX frames
-/// instead of transmitting them on the bus. Defaults to `true` at boot so no
-/// CAN frame can be sent until the vehicle crate explicitly unlocks the bus
-/// after validating the connected car.
+/// When `true`, the CAN buses are read-only: board drivers whose controller supports
+/// it (ESP TWAI and MCP2515) run in hardware listen-only mode, so the device never
+/// drives the bus at all (no TX, no ACKs, no error frames), and every board driver
+/// silently drops outbound TX frames. Defaults to `true` at boot so nothing can reach
+/// the bus until the vehicle crate explicitly unlocks it after validating the
+/// connected car.
 static CAN_READ_ONLY: AtomicBool = AtomicBool::new(true);
 
 /// Returns `true` if the CAN buses are currently in read-only mode.
@@ -20,6 +22,10 @@ pub fn is_can_read_only() -> bool {
 }
 
 /// Enables or disables CAN read-only mode.
+///
+/// Board drivers poll this flag and switch their controller between listen-only and
+/// normal mode within a few milliseconds. On ESP TWAI the switch resets the
+/// controller, so frames arriving during the switch are lost.
 ///
 /// Call `set_can_read_only(false)` from a vehicle task once inbound CAN frames
 /// have been validated to confirm the connected car matches this firmware.

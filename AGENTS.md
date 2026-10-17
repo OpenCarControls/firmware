@@ -118,7 +118,7 @@ Embassy is used freely inside `core-interface`. Boards adapt to it — not the o
 | Core 0 (`#[esp_rtos::main]` executor) | BLE/MQTT comms, vehicle logic, `core-interface` plumbing |
 
 **ESP CAN driver modes:**
-*   **TWAI (built-in):** `init_twai` returns an unstarted `TwaiConfiguration<'static, esp_hal::Blocking>` (`TwaiDriver`), which is `Send` and can cross to core 1. `run_twai_loop` calls `.into_async().start()` on the core it runs on, so the TWAI interrupt is bound there (`esp_hal::Async` itself is `!Send`). RX is interrupt-driven (esp-hal ISR → 32-frame queue), which keeps frames from being lost on single-core chips while WiFi/BLE are busy. The TX channel is drained at least every 1 ms, TX waits are bounded to 100 ms, RX overruns clear the FIFO, and bus-off restarts the controller after 1 s. (The blocking `nb` path was dropped because esp-hal's blocking `receive()` never releases the FIFO after an overrun, so RX stays dead permanently.)
+*   **TWAI (built-in):** `init_twai` returns a `TwaiDriver` that just owns the TWAI peripheral and pins (`AnyTwai`/`AnyPin`, all `Send`, so it can cross to core 1). esp-hal only takes the operating mode at construction, so `run_twai_loop` builds a `TwaiConfiguration` from `reborrow()`s of those, calls `.into_async().start()` on the core it runs on (binding the TWAI interrupt there; `esp_hal::Async` itself is `!Send`), and rebuilds it whenever the mode has to change. RX is interrupt-driven (esp-hal ISR → 32-frame queue), which keeps frames from being lost on single-core chips while WiFi/BLE are busy. The TX channel is drained at least every 1 ms, TX waits are bounded to 100 ms, RX overruns clear the FIFO, and bus-off rebuilds the controller after 1 s. (The blocking `nb` path was dropped because esp-hal's blocking `receive()` never releases the FIFO after an overrun, so RX stays dead permanently.)
 *   **MCP2515 (SPI):** `MCP2515<ExclusiveDevice<Spi<'static, Blocking>, Output<'static>, Delay>>`. RX is interrupt-driven via `int_pin.wait_for_falling_edge().await` (async GPIO, which IS `Send`). `CanSpeed` / `McpSpeed` are re-exported from `board_esp` so the generated `main.rs` can reference them without a direct `mcp2515` dep.
 
 **PC CAN driver:** `socket_can_task` (pool of 4) opens a non-blocking `SocketCAN` socket per bus and polls it every 1 ms via Embassy timer. Outbound frames are drained from `CAN_TX_CHANNEL` after each RX sweep. If the interface cannot be opened (e.g. `vcan0` does not exist), the task logs a warning and retries every 5 seconds — it does **not** panic, so MQTT, BLE, and the simulated state heartbeat continue running normally.
@@ -162,7 +162,7 @@ xtask generates `.app_test_build/` (parallel to `.app_build/`), compiles it with
 
 ## 🔒 CAN Read-Only Mode
 
-**Purpose:** Prevent accidental CAN TX until the vehicle crate has positively identified the connected car.
+**Purpose:** Keep the device completely passive on the bus until the vehicle crate has positively identified the connected car. Where the controller supports it, read-only mode is enforced in hardware (listen-only mode): the device sends no frames, no ACKs and no error frames, so even a wrong bitrate cannot disturb the car's bus.
 
 **Flag location:** `core-interface` — `static CAN_READ_ONLY: AtomicBool = AtomicBool::new(true)`. Defaults to `true` (locked) at boot so no frame can reach the bus before validation.
 
@@ -170,10 +170,16 @@ xtask generates `.app_test_build/` (parallel to `.app_build/`), compiles it with
 *   `pub fn is_can_read_only() -> bool` — vehicle tasks call this to check whether TX is currently blocked.
 *   `pub fn set_can_read_only(enabled: bool)` — vehicle tasks call this to unlock (`false`) after validating inbound CAN frames confirm the correct car, or re-lock (`true`) if an error or inconsistent data is detected at any time.
 
-**Enforcement:** The drop happens at the board TX drain loops — not at `CAN_TX_CHANNEL` enqueue. Vehicle code is free to push frames to `CAN_TX_CHANNEL` at any time; the board loop checks `is_can_read_only()` for each frame addressed to its `bus_id` and silently discards it if the flag is set. Three sites enforce this:
-*   `board-pc` — `socket_can_task` TX arm (before `socket.write_frame()`)
-*   `board-esp` — `run_twai_loop` TX arm (before `twai.transmit_async()`)
-*   `board-esp` — `run_mcp2515_loop` TX arm (before `driver.send_message()`)
+**Enforcement:** Two layers.
+1. **Hardware listen-only (ESP):** the board CAN loops poll `is_can_read_only()` (at least every 1 ms for TWAI, 10 ms for MCP2515) and keep the controller's mode in sync. TWAI: `run_twai_loop` rebuilds the driver in `TwaiMode::ListenOnly` / `TwaiMode::Normal` (esp-hal also applies the ESP32/S3/C3 errata workaround that forces the controller error-passive in listen-only mode). The rebuild resets the controller, so frames arriving during the switch are lost. MCP2515: `init_mcp2515` leaves the chip in `OpMode::ListenOnly`, and `run_mcp2515_loop` calls `set_mode(ListenOnly | Normal)` on each change. Neither controller is ever in normal mode before its loop has checked the flag.
+2. **Software TX drop (all boards):** the board TX drain loops discard every frame addressed to their `bus_id` while the flag is set, and also while the hardware mode has not yet caught up with a flip of the flag. Vehicle code is free to push frames to `CAN_TX_CHANNEL` at any time. Sites:
+    *   `board-pc` — `socket_can_task` TX arm (before `socket.write_frame()`)
+    *   `board-esp` — `run_twai_session` TX arm (before `twai.transmit_async()`)
+    *   `board-esp` — `run_mcp2515_loop` TX arm (before `driver.send_message()`)
+
+**PC / SocketCAN:** only the software drop applies. Listen-only is a property of the Linux CAN interface, configured with root privileges while the link is down (`ip link set can0 type can bitrate 500000 listen-only on`), and `vcan` does not support it. Configure it on the interface if a PC is attached to a real car.
+
+**Known MCP2515 issue (pre-existing):** the MCP2515 only accepts writes to its mask/filter registers in Configuration mode, but `init_mcp2515` and the debug mask switching write them in an operating mode, so they have no effect and the chip effectively accepts all frames (the software filter does the real work). Fixing this naively would break vehicles with more than 6 filters per bus (the chip has 6 filter slots and egmp uses 14), so it needs a fallback to accept-all in that case.
 
 **Intended vehicle workflow:**
 1. Boot: `CAN_READ_ONLY = true`. Vehicle receives CAN frames via `can_rx_task`.

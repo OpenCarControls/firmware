@@ -22,9 +22,9 @@ mod hardware {
     use esp_hal::{
         delay::Delay,
         gpio::interconnect::{PeripheralInput, PeripheralOutput},
-        gpio::{Input, Output},
+        gpio::{AnyPin, Input, Output},
         spi::master::Spi,
-        twai::{self, EspTwaiError, TwaiConfiguration, TwaiMode},
+        twai::{self, EspTwaiError, Twai, TwaiConfiguration, TwaiMode},
     };
     pub use mcp2515::{CanSpeed, McpSpeed};
     use mcp2515::{
@@ -34,10 +34,16 @@ mod hardware {
         regs::OpMode,
     };
 
-    /// Configured-but-not-started TWAI peripheral. Blocking mode is `Send`, so it can be
-    /// handed to core 1; `run_twai_loop` converts it to async on whichever core runs it
-    /// so the TWAI interrupt is bound to that core.
-    pub type TwaiDriver = TwaiConfiguration<'static, esp_hal::Blocking>;
+    /// TWAI peripheral and pins, owned by `run_twai_loop`. The driver is rebuilt from
+    /// these (via `reborrow()`) whenever the operating mode has to change, because esp-hal
+    /// only accepts the mode at construction. All fields are `Send`, so this can be
+    /// handed to core 1; the async driver (and its interrupt) is created on whichever
+    /// core runs the loop.
+    pub struct TwaiDriver {
+        twai: twai::AnyTwai<'static>,
+        rx_pin: AnyPin<'static>,
+        tx_pin: AnyPin<'static>,
+    }
 
     /// Concrete MCP2515 driver type (blocking SPI, INT-pin driven).
     pub type Mcp2515Driver =
@@ -55,15 +61,24 @@ mod hardware {
         RxFilter::F5,
     ];
 
-    /// Configures the TWAI peripheral with an accept-all hardware filter; actual
-    /// frame selection is done in software inside `run_twai_loop`. The peripheral is
-    /// started by `run_twai_loop`, not here.
+    /// Takes ownership of the TWAI peripheral and its pins. The controller is configured
+    /// and started by `run_twai_loop`, not here.
     pub fn init_twai(
-        peripheral: impl twai::Instance + 'static,
-        rx_pin: impl PeripheralInput<'static>,
-        tx_pin: impl PeripheralOutput<'static>,
+        peripheral: impl Into<twai::AnyTwai<'static>>,
+        rx_pin: impl Into<AnyPin<'static>>,
+        tx_pin: impl Into<AnyPin<'static>>,
         _filters: &[CanFilter],
     ) -> TwaiDriver {
+        TwaiDriver {
+            twai: peripheral.into(),
+            rx_pin: rx_pin.into(),
+            tx_pin: tx_pin.into(),
+        }
+    }
+
+    /// Builds a TWAI configuration in `mode` with an accept-all hardware filter; actual
+    /// frame selection is done in software inside `run_twai_session`.
+    fn configure_twai(driver: &mut TwaiDriver, mode: TwaiMode) -> TwaiConfiguration<'_, esp_hal::Blocking> {
         // Mask = 0 in esp-hal TWAI means "don't care" for every bit -> accept all.
         let accept_all = twai::filter::SingleStandardFilter::new_from_code_mask(
             unsafe { twai::StandardId::new_unchecked(0) },
@@ -73,12 +88,12 @@ mod hardware {
             [0, 0],
             [0, 0],
         );
-        let mut cfg = twai::TwaiConfiguration::new(
-            peripheral,
-            rx_pin,
-            tx_pin,
+        let mut cfg = TwaiConfiguration::new(
+            driver.twai.reborrow(),
+            driver.rx_pin.reborrow(),
+            driver.tx_pin.reborrow(),
             esp_hal::twai::BaudRate::B500K,
-            TwaiMode::Normal,
+            mode,
         );
         cfg.set_filter(accept_all);
         cfg
@@ -86,19 +101,47 @@ mod hardware {
 
     /// Bidirectional TWAI loop - runs forever (core 1 on dual-core chips, core 0 otherwise).
     ///
+    /// While CAN read-only mode is on, the controller runs in hardware **listen-only**
+    /// mode: it never drives the bus (no ACKs, no error frames, no TX). When the flag
+    /// changes, the controller is reset and restarted in the matching mode.
+    ///
+    /// Also restarts the controller after a bus-off (with a 1 s back-off).
+    pub async fn run_twai_loop(mut driver: TwaiDriver, bus_id: u8, filters: &'static [CanFilter]) {
+        loop {
+            let listen_only = core_interface::is_can_read_only();
+            let mode = if listen_only { TwaiMode::ListenOnly } else { TwaiMode::Normal };
+            log::info!(
+                "CAN bus {}: TWAI started in {} mode",
+                bus_id,
+                if listen_only { "listen-only" } else { "normal" }
+            );
+            let mut twai = configure_twai(&mut driver, mode).into_async().start();
+            run_twai_session(&mut twai, bus_id, filters, listen_only).await;
+            // Dropping `twai` resets the peripheral before it is reconfigured.
+        }
+    }
+
+    /// Runs one TWAI session in a fixed mode. Returns when the CAN read-only flag no longer
+    /// matches `listen_only`, or after a bus-off, so the caller can rebuild the controller.
+    ///
     /// RX is interrupt-driven: the esp-hal TWAI ISR moves frames from the small hardware
     /// FIFO into a 32-frame software queue, so frames are not lost while the executor is
     /// busy with WiFi/BLE work (which matters on single-core chips like the ESP32-C3).
-    /// The TX channel is drained at least every millisecond.
-    ///
-    /// Recovers from RX overruns (clears the FIFO) and from bus-off (restarts the
-    /// controller after a back-off) instead of wedging.
-    pub async fn run_twai_loop(driver: TwaiDriver, bus_id: u8, filters: &'static [CanFilter]) {
+    /// The TX channel and the read-only flag are checked at least every millisecond.
+    async fn run_twai_session(
+        twai: &mut Twai<'_, esp_hal::Async>,
+        bus_id: u8,
+        filters: &'static [CanFilter],
+        listen_only: bool,
+    ) {
         use embassy_futures::select::{Either, select};
         use embassy_time::{Duration, Timer, with_timeout};
 
-        let mut twai = driver.into_async().start();
         loop {
+            if core_interface::is_can_read_only() != listen_only {
+                return;
+            }
+
             match select(twai.receive_async(), Timer::after(Duration::from_millis(1))).await {
                 Either::First(Ok(frame)) => {
                     crate::status_leds::pulse_can();
@@ -111,8 +154,7 @@ mod hardware {
                 Either::First(Err(EspTwaiError::BusOff)) => {
                     log::warn!("CAN bus {}: TWAI bus-off, restarting controller in 1s", bus_id);
                     Timer::after(Duration::from_secs(1)).await;
-                    twai = twai.stop().start();
-                    continue;
+                    return;
                 }
                 Either::First(Err(EspTwaiError::EmbeddedHAL(twai::ErrorKind::Overrun))) => {
                     log::warn!("CAN bus {}: TWAI RX overrun, frames dropped", bus_id);
@@ -131,7 +173,9 @@ mod hardware {
             while let Ok(outbound) = CAN_TX_CHANNEL.receiver().try_receive() {
                 if outbound.bus_id == bus_id {
                     // Drop silently when in read-only mode; do not transmit on the bus.
-                    if !core_interface::is_can_read_only() {
+                    // Both checks matter: the flag may have flipped since this session
+                    // started, and the controller is only rebuilt at the top of the loop.
+                    if !listen_only && !core_interface::is_can_read_only() {
                         if let Some(f) = core_to_twai_frame(&outbound) {
                             // Bounded wait: without another node to ACK, a frame never
                             // completes. Dropping the future aborts the transmission.
@@ -158,7 +202,9 @@ mod hardware {
     }
 
     /// Initialises an MCP2515 via blocking SPI. Programs hardware RX filters/masks.
-    /// Returns `(driver, int_pin)`. Pass both to `run_mcp2515_loop`.
+    /// The chip is left in listen-only mode; `run_mcp2515_loop` applies the mode that
+    /// matches the CAN read-only flag. Returns `(driver, int_pin)`. Pass both to
+    /// `run_mcp2515_loop`.
     pub fn init_mcp2515(
         spi_peri: impl esp_hal::spi::master::Instance + 'static,
         sck_pin: impl PeripheralOutput<'static>,
@@ -183,7 +229,7 @@ mod hardware {
         mcp.init(
             &mut Delay::new(),
             mcp2515::Settings {
-                mode: OpMode::Normal,
+                mode: OpMode::ListenOnly,
                 can_speed,
                 mcp_speed,
                 clkout_en: false,
@@ -216,8 +262,11 @@ mod hardware {
 
     /// Bidirectional MCP2515 loop — runs forever on core 1.
     ///
-    /// Waits for the INT pin to fall (MCP2515 asserts it on any RX or TX event), then
-    /// drains all available received frames and the outbound TX channel.
+    /// Waits for the INT pin to fall (MCP2515 asserts it on any RX or TX event), or at
+    /// most 10 ms, then drains all available received frames and the outbound TX channel.
+    ///
+    /// While CAN read-only mode is on, the chip runs in hardware **listen-only** mode: it
+    /// never drives the bus (no ACKs, no error frames, no TX). The mode follows the flag.
     ///
     /// Hardware RX masks are swapped to accept-all when CAN debug mode is active so the
     /// debug tap can observe every frame on the bus, and restored when debug is disabled.
@@ -227,8 +276,18 @@ mod hardware {
         bus_id: u8,
         filters: &'static [CanFilter],
     ) {
+        use embassy_futures::select::select;
+        use embassy_time::{Duration, Timer};
+
         let mut was_debug_active = false;
+        let mut listen_only = core_interface::is_can_read_only();
+        set_mcp_operating_mode(&mut driver, bus_id, listen_only);
         loop {
+            if core_interface::is_can_read_only() != listen_only {
+                listen_only = !listen_only;
+                set_mcp_operating_mode(&mut driver, bus_id, listen_only);
+            }
+
             // MCP2515 hardware mask switching on debug enable/disable.
             let debug_now = core_interface::is_can_debug_active();
             if debug_now && !was_debug_active {
@@ -240,7 +299,9 @@ mod hardware {
             }
             was_debug_active = debug_now;
 
-            int_pin.wait_for_falling_edge().await;
+            // INT is level-triggered: if it is already low (frames left pending), no edge
+            // arrives, so the timeout also guarantees the flag and TX channel are serviced.
+            select(int_pin.wait_for_falling_edge(), Timer::after(Duration::from_millis(10))).await;
 
             loop {
                 match driver.read_message() {
@@ -259,7 +320,9 @@ mod hardware {
             while let Ok(outbound) = CAN_TX_CHANNEL.receiver().try_receive() {
                 if outbound.bus_id == bus_id {
                     // Drop silently when in read-only mode; do not transmit on the bus.
-                    if !core_interface::is_can_read_only() {
+                    // Both checks matter: the flag may have flipped since the mode was
+                    // last applied at the top of the loop.
+                    if !listen_only && !core_interface::is_can_read_only() {
                         if let Some(f) = core_to_mcp_frame(&outbound) {
                             if driver.send_message(f).is_ok() {
                                 crate::status_leds::pulse_can();
@@ -270,6 +333,19 @@ mod hardware {
                     let _ = CAN_TX_CHANNEL.sender().try_send(outbound);
                 }
             }
+        }
+    }
+
+    /// Switches the MCP2515 between listen-only (CAN read-only mode) and normal mode.
+    fn set_mcp_operating_mode(driver: &mut Mcp2515Driver, bus_id: u8, listen_only: bool) {
+        let mode = if listen_only { OpMode::ListenOnly } else { OpMode::Normal };
+        match driver.set_mode(mode) {
+            Ok(()) => log::info!(
+                "CAN bus {}: MCP2515 in {} mode",
+                bus_id,
+                if listen_only { "listen-only" } else { "normal" }
+            ),
+            Err(_) => log::error!("CAN bus {}: failed to set MCP2515 mode", bus_id),
         }
     }
 
