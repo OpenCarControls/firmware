@@ -3,14 +3,18 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
-    // Watch the boards directory so cargo automatically rebuilds xtask
-    // if a new board folder is created or removed.
-    println!("cargo:rerun-if-changed=../boards");
-
     let mut mods = String::new();
     let mut match_arms = String::new();
 
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap().replace('\\', "/");
+
+    // Watch the boards directory so cargo automatically rebuilds xtask
+    // if a new board folder is created or removed. The generated registry
+    // holds absolute paths, so watch absolute paths too: when the repo is
+    // mounted somewhere else (e.g. the firmware and workspace dev containers
+    // sharing one target/), the old path is missing and cargo reruns this
+    // script instead of reusing a registry that points at the old location.
+    println!("cargo:rerun-if-changed={manifest_dir}/../boards");
 
     let boards_dir = Path::new("../boards");
     if boards_dir.exists() {
@@ -23,13 +27,11 @@ fn main() {
                 let builder_file = path.join("xtask_builder.rs");
 
                 if builder_file.exists() {
-                    println!("cargo:rerun-if-changed={}", builder_file.display());
+                    let abs_path = format!("{manifest_dir}/../boards/{board_name}/xtask_builder.rs");
+                    println!("cargo:rerun-if-changed={abs_path}");
 
-                    let abs_path =
-                        format!("{manifest_dir}/../boards/{board_name}/xtask_builder.rs")
-                            .replace('\\', "/");
-
-                    // Note: This path is evaluated relative to `xtask/src/main.rs` where the include! macro sits
+                    // Must be absolute: inside the include!d registry, a relative
+                    // #[path] resolves against OUT_DIR, not xtask/src/.
                     mods.push_str(&format!(
                         "#[path = \"{abs_path}\"]\nmod board_{board_name};\n"
                     ));
