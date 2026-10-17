@@ -5,8 +5,9 @@
 //! - **MCP2515** – external SPI CAN controller, interrupt-driven via a falling-edge INT pin.
 //!
 //! Both share the same channel contract: `CAN_RX_CHANNEL` (board → vehicle) and
-//! `CAN_TX_CHANNEL` (vehicle → board). All frame filtering against the vehicle's
-//! `CanFilter` list is done in software after the hardware delivers the frame.
+//! `CAN_TX_CHANNELS[bus_id]` (vehicle → board, one queue per bus). All frame filtering
+//! against the vehicle's `CanFilter` list is done in software after the hardware delivers
+//! the frame.
 
 use core_interface::CanFilter;
 
@@ -14,7 +15,7 @@ use core_interface::CanFilter;
 mod hardware {
     use super::CanFilter;
     use core_interface::{
-        CAN_DEBUG_RX_CHANNEL, CAN_RX_CHANNEL, CAN_TX_CHANNEL, CanFrame, CanRawCapture,
+        CAN_DEBUG_RX_CHANNEL, CAN_RX_CHANNEL, CanFrame, CanRawCapture, CanReadOnlyReceiver,
     };
     use embedded_can::Frame as EmbeddedFrame;
     use embedded_can::{Id, StandardId};
@@ -107,6 +108,8 @@ mod hardware {
     ///
     /// Also restarts the controller after a bus-off (with a 1 s back-off).
     pub async fn run_twai_loop(mut driver: TwaiDriver, bus_id: u8, filters: &'static [CanFilter]) {
+        let mut read_only_changed = core_interface::can_read_only_receiver()
+            .expect("more CAN bus drivers than MAX_CAN_BUSES");
         loop {
             let listen_only = core_interface::is_can_read_only();
             let mode = if listen_only { TwaiMode::ListenOnly } else { TwaiMode::Normal };
@@ -116,7 +119,7 @@ mod hardware {
                 if listen_only { "listen-only" } else { "normal" }
             );
             let mut twai = configure_twai(&mut driver, mode).into_async().start();
-            run_twai_session(&mut twai, bus_id, filters, listen_only).await;
+            run_twai_session(&mut twai, bus_id, filters, listen_only, &mut read_only_changed).await;
             // Dropping `twai` resets the peripheral before it is reconfigured.
         }
     }
@@ -127,23 +130,35 @@ mod hardware {
     /// RX is interrupt-driven: the esp-hal TWAI ISR moves frames from the small hardware
     /// FIFO into a 32-frame software queue, so frames are not lost while the executor is
     /// busy with WiFi/BLE work (which matters on single-core chips like the ESP32-C3).
-    /// The TX channel and the read-only flag are checked at least every millisecond.
+    /// The loop sleeps until a frame arrives, a TX frame is queued for this bus, or the
+    /// read-only flag changes; there is no polling timer.
     async fn run_twai_session(
         twai: &mut Twai<'_, esp_hal::Async>,
         bus_id: u8,
         filters: &'static [CanFilter],
         listen_only: bool,
+        read_only_changed: &mut CanReadOnlyReceiver,
     ) {
-        use embassy_futures::select::{Either, select};
-        use embassy_time::{Duration, Timer, with_timeout};
+        use embassy_futures::select::{Either3, select3};
+        use embassy_time::{Duration, Timer};
+
+        let tx_channel = core_interface::can_tx_channel(bus_id)
+            .expect("CAN bus id exceeds MAX_CAN_BUSES");
 
         loop {
             if core_interface::is_can_read_only() != listen_only {
                 return;
             }
 
-            match select(twai.receive_async(), Timer::after(Duration::from_millis(1))).await {
-                Either::First(Ok(frame)) => {
+            let mut pending_tx = None;
+            match select3(
+                twai.receive_async(),
+                tx_channel.receive(),
+                read_only_changed.changed(),
+            )
+            .await
+            {
+                Either3::First(Ok(frame)) => {
                     crate::status_leds::pulse_can();
                     let core_frame = to_core_frame(frame, bus_id);
                     try_send_can_debug_capture(bus_id, &core_frame);
@@ -151,46 +166,46 @@ mod hardware {
                         CAN_RX_CHANNEL.sender().send(core_frame).await;
                     }
                 }
-                Either::First(Err(EspTwaiError::BusOff)) => {
+                Either3::First(Err(EspTwaiError::BusOff)) => {
                     log::warn!("CAN bus {}: TWAI bus-off, restarting controller in 1s", bus_id);
                     Timer::after(Duration::from_secs(1)).await;
                     return;
                 }
-                Either::First(Err(EspTwaiError::EmbeddedHAL(twai::ErrorKind::Overrun))) => {
+                Either3::First(Err(EspTwaiError::EmbeddedHAL(twai::ErrorKind::Overrun))) => {
                     log::warn!("CAN bus {}: TWAI RX overrun, frames dropped", bus_id);
                     twai.clear_receive_fifo();
                 }
-                Either::First(Err(e)) => {
+                Either3::First(Err(e)) => {
                     log::debug!("CAN bus {}: TWAI RX error: {:?}", bus_id, e);
                 }
-                Either::Second(()) => {}
+                Either3::Second(outbound) => pending_tx = Some(outbound),
+                // The flag is re-checked at the top of the loop.
+                Either3::Third(_) => {}
             }
 
-            // Drain outbound TX channel for this bus
-            // Frames for other buses are put back on the shared channel so their
-            // respective bus loops can pick them up. try_send is intentional — if the
-            // channel is momentarily full the frame is dropped rather than stalling.
-            while let Ok(outbound) = CAN_TX_CHANNEL.receiver().try_receive() {
-                if outbound.bus_id == bus_id {
-                    // Drop silently when in read-only mode; do not transmit on the bus.
-                    // Both checks matter: the flag may have flipped since this session
-                    // started, and the controller is only rebuilt at the top of the loop.
-                    if !listen_only && !core_interface::is_can_read_only() {
-                        if let Some(f) = core_to_twai_frame(&outbound) {
-                            // Bounded wait: without another node to ACK, a frame never
-                            // completes. Dropping the future aborts the transmission.
-                            match with_timeout(Duration::from_millis(100), twai.transmit_async(&f))
-                                .await
-                            {
-                                Ok(Ok(())) => crate::status_leds::pulse_can(),
-                                Ok(Err(e)) => log::debug!("CAN bus {}: TWAI TX error: {:?}", bus_id, e),
-                                Err(_) => log::debug!("CAN bus {}: TWAI TX timed out", bus_id),
-                            }
-                        }
-                    }
-                } else {
-                    let _ = CAN_TX_CHANNEL.sender().try_send(outbound);
+            // `select3` polls RX first, so a busy bus could starve the TX arm; drain TX
+            // here every iteration regardless of which arm fired.
+            while let Some(outbound) = pending_tx.take().or_else(|| tx_channel.try_receive().ok()) {
+                // Drop silently when in read-only mode; do not transmit on the bus.
+                // Both checks matter: the flag may have flipped since this session
+                // started, and the controller is only rebuilt at the top of the loop.
+                if !listen_only && !core_interface::is_can_read_only() {
+                    transmit_twai(twai, bus_id, &outbound).await;
                 }
+            }
+        }
+    }
+
+    async fn transmit_twai(twai: &mut Twai<'_, esp_hal::Async>, bus_id: u8, outbound: &CanFrame) {
+        use embassy_time::{Duration, with_timeout};
+
+        if let Some(f) = core_to_twai_frame(outbound) {
+            // Bounded wait: without another node to ACK, a frame never
+            // completes. Dropping the future aborts the transmission.
+            match with_timeout(Duration::from_millis(100), twai.transmit_async(&f)).await {
+                Ok(Ok(())) => crate::status_leds::pulse_can(),
+                Ok(Err(e)) => log::debug!("CAN bus {}: TWAI TX error: {:?}", bus_id, e),
+                Err(_) => log::debug!("CAN bus {}: TWAI TX timed out", bus_id),
             }
         }
     }
@@ -262,8 +277,9 @@ mod hardware {
 
     /// Bidirectional MCP2515 loop — runs forever on core 1.
     ///
-    /// Waits for the INT pin to fall (MCP2515 asserts it on any RX or TX event), or at
-    /// most 10 ms, then drains all available received frames and the outbound TX channel.
+    /// Waits for the INT pin to fall (MCP2515 asserts it on any RX or TX event), a TX frame
+    /// to be queued for this bus, a read-only flag change, or at most 10 ms, then drains
+    /// all available received frames and the outbound TX channel.
     ///
     /// While CAN read-only mode is on, the chip runs in hardware **listen-only** mode: it
     /// never drives the bus (no ACKs, no error frames, no TX). The mode follows the flag.
@@ -276,8 +292,13 @@ mod hardware {
         bus_id: u8,
         filters: &'static [CanFilter],
     ) {
-        use embassy_futures::select::select;
+        use embassy_futures::select::select4;
         use embassy_time::{Duration, Timer};
+
+        let tx_channel = core_interface::can_tx_channel(bus_id)
+            .expect("CAN bus id exceeds MAX_CAN_BUSES");
+        let mut read_only_changed = core_interface::can_read_only_receiver()
+            .expect("more CAN bus drivers than MAX_CAN_BUSES");
 
         let mut was_debug_active = false;
         let mut listen_only = core_interface::is_can_read_only();
@@ -300,8 +321,19 @@ mod hardware {
             was_debug_active = debug_now;
 
             // INT is level-triggered: if it is already low (frames left pending), no edge
-            // arrives, so the timeout also guarantees the flag and TX channel are serviced.
-            select(int_pin.wait_for_falling_edge(), Timer::after(Duration::from_millis(10))).await;
+            // arrives, so the timeout also guarantees RX is serviced and the debug-mask
+            // state above is re-evaluated.
+            let mut pending_tx = match select4(
+                int_pin.wait_for_falling_edge(),
+                Timer::after(Duration::from_millis(10)),
+                tx_channel.receive(),
+                read_only_changed.changed(),
+            )
+            .await
+            {
+                embassy_futures::select::Either4::Third(outbound) => Some(outbound),
+                _ => None,
+            };
 
             loop {
                 match driver.read_message() {
@@ -317,20 +349,16 @@ mod hardware {
                 }
             }
 
-            while let Ok(outbound) = CAN_TX_CHANNEL.receiver().try_receive() {
-                if outbound.bus_id == bus_id {
-                    // Drop silently when in read-only mode; do not transmit on the bus.
-                    // Both checks matter: the flag may have flipped since the mode was
-                    // last applied at the top of the loop.
-                    if !listen_only && !core_interface::is_can_read_only() {
-                        if let Some(f) = core_to_mcp_frame(&outbound) {
-                            if driver.send_message(f).is_ok() {
-                                crate::status_leds::pulse_can();
-                            }
+            while let Some(outbound) = pending_tx.take().or_else(|| tx_channel.try_receive().ok()) {
+                // Drop silently when in read-only mode; do not transmit on the bus.
+                // Both checks matter: the flag may have flipped since the mode was
+                // last applied at the top of the loop.
+                if !listen_only && !core_interface::is_can_read_only() {
+                    if let Some(f) = core_to_mcp_frame(&outbound) {
+                        if driver.send_message(f).is_ok() {
+                            crate::status_leds::pulse_can();
                         }
                     }
-                } else {
-                    let _ = CAN_TX_CHANNEL.sender().try_send(outbound);
                 }
             }
         }

@@ -35,9 +35,33 @@ pub static VEHICLE_STATE_CHANNEL: Channel<CriticalSectionRawMutex, VehicleStateP
 /// CAN frames received by a board CAN driver task and forwarded to the vehicle task.
 /// Each frame carries a `bus_id` identifying which physical bus it arrived on.
 pub static CAN_RX_CHANNEL: Channel<CriticalSectionRawMutex, CanFrame, 16> = Channel::new();
-/// CAN frames produced by the vehicle task and forwarded to the board CAN driver
-/// task for transmission. Each frame carries the `bus_id` of the target bus.
-pub static CAN_TX_CHANNEL: Channel<CriticalSectionRawMutex, CanFrame, 16> = Channel::new();
+/// Maximum number of physical CAN buses a board can drive.
+pub const MAX_CAN_BUSES: usize = 4;
+/// Per-bus CAN transmit queues, indexed by `CanFrame::bus_id`. Vehicle tasks enqueue with
+/// [`send_can_frame`]; each board CAN driver drains only its own bus's channel, so no
+/// driver ever has to look at (or re-queue) another bus's frames.
+pub static CAN_TX_CHANNELS: [Channel<CriticalSectionRawMutex, CanFrame, 16>; MAX_CAN_BUSES] =
+    [const { Channel::new() }; MAX_CAN_BUSES];
+
+/// Returns the transmit channel for `bus_id`, or `None` if the bus does not exist.
+pub fn can_tx_channel(
+    bus_id: u8,
+) -> Option<&'static Channel<CriticalSectionRawMutex, CanFrame, 16>> {
+    CAN_TX_CHANNELS.get(bus_id as usize)
+}
+
+/// Queues `frame` for transmission on its `bus_id`. Returns `false` (and drops the frame)
+/// if that bus does not exist. Whether the frame reaches the wire is still decided by the
+/// board driver's CAN read-only check.
+pub async fn send_can_frame(frame: CanFrame) -> bool {
+    match can_tx_channel(frame.bus_id) {
+        Some(channel) => {
+            channel.send(frame).await;
+            true
+        }
+        None => false,
+    }
+}
 /// Raw CAN frames captured before vehicle filtering, consumed by `publish_can_debug_task`.
 pub static CAN_DEBUG_RX_CHANNEL: Channel<CriticalSectionRawMutex, CanRawCapture, 16> =
     Channel::new();

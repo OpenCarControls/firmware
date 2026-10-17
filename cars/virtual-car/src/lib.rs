@@ -9,7 +9,7 @@ use embedded_can::{Id, StandardId};
 use prost::Message;
 
 use core_interface::{
-    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, CAN_RX_CHANNEL, CAN_TX_CHANNEL, CMD_RESP_CHANNEL,
+    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, CAN_RX_CHANNEL, CMD_RESP_CHANNEL,
     CanFilter, CanFrame, VEHICLE_STATE_CHANNEL, VehicleStatePayload,
 };
 
@@ -184,15 +184,13 @@ async fn send_can_request(id: StandardId, data: &[u8]) {
     let mut buf = [0u8; 8];
     let dlc = data.len().min(8) as u8;
     buf[..dlc as usize].copy_from_slice(&data[..dlc as usize]);
-    CAN_TX_CHANNEL
-        .sender()
-        .send(CanFrame {
-            bus_id: 0,
-            id: Id::Standard(id),
-            data: buf,
-            dlc,
-        })
-        .await;
+    core_interface::send_can_frame(CanFrame {
+        bus_id: 0,
+        id: Id::Standard(id),
+        data: buf,
+        dlc,
+    })
+    .await;
 }
 
 /// state update to `VEHICLE_STATE_CHANNEL`, and sends a `CommandResponse` to

@@ -66,7 +66,7 @@ The actual binary entry point. Generated fresh by `xtask` before every build fro
 | `CMD_RESP_CHANNEL` | vehicle → core | `(Transport, CommandResponse)` | Transport tag routes response back |
 | `VEHICLE_STATE_CHANNEL` | vehicle → core | `VehicleStatePayload` | BLE gets full; MQTT gets basic only |
 | `CAN_RX_CHANNEL` | board → vehicle | `CanFrame` | Hardware-received CAN frame |
-| `CAN_TX_CHANNEL` | vehicle → board | `CanFrame` | Frame to transmit on a CAN bus |
+| `CAN_TX_CHANNELS[bus_id]` | vehicle → board | `CanFrame` | Frame to transmit on that CAN bus (one queue per bus) |
 | `CAN_DEBUG_RX_CHANNEL` | board → core | `CanRawCapture` | Raw (pre-filter) frames for debug streaming; consumed by `publish_can_debug_task` → BLE only |
 
 **`InboundCommand`** carries `{ message_id: u64, transport: Transport, bytes: Vec<u8> }`. The vehicle echoes the `Transport` tag back in `CMD_RESP_CHANNEL` so `route_responses_task` can route the response to the correct radio without the vehicle knowing anything about transports.
@@ -107,7 +107,7 @@ Embassy is used freely inside `core-interface`. Boards adapt to it — not the o
 *   `.app_build` spawns all tasks from all three layers in `main`.
 
 **Per-subsystem approach:**
-*   **CAN:** Vehicle crates define their filter list (`&'static [CanFilter]`). Board crates own all hardware; `CAN_RX_CHANNEL` and `CAN_TX_CHANNEL` are the shared contract. Each board provides driver functions (`init_*` / `run_*_loop`) and async loop tasks that software-filter received frames against the vehicle's filter list. See [CAN bus](can.md).
+*   **CAN:** Vehicle crates define their filter list (`&'static [CanFilter]`). Board crates own all hardware; `CAN_RX_CHANNEL` and the per-bus `CAN_TX_CHANNELS` are the shared contract. Each board provides driver functions (`init_*` / `run_*_loop`) and async loop tasks that software-filter received frames against the vehicle's filter list. See [CAN bus](can.md).
 *   **MQTT / networking:** `core-interface` logic uses `embassy-net::TcpSocket`. Each board provides an `embassy-net::driver::Driver` implementation (`esp-radio` WiFi on ESP, tuntap shim on PC).
 *   **BLE:** No single cross-platform embassy BLE abstraction exists. `core-interface` defines its own traits (e.g. `trait BleGatt`). ESP implements them with `esp-radio` + `trouble-host`; PC implements them as mocks. See [BLE](ble.md).
 

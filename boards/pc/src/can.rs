@@ -1,7 +1,7 @@
 #[cfg(target_os = "linux")]
 mod linux_can {
     use core_interface::{
-        CAN_DEBUG_RX_CHANNEL, CAN_RX_CHANNEL, CAN_TX_CHANNEL, CanFilter, CanFrame, CanRawCapture,
+        CAN_DEBUG_RX_CHANNEL, CAN_RX_CHANNEL, CanFilter, CanFrame, CanRawCapture,
     };
     use embassy_time::{Duration, Timer};
     use embedded_can::{Frame as EmbeddedFrame, Id};
@@ -48,9 +48,8 @@ mod linux_can {
     ///
     /// - RX: Polls the non-blocking socket every 1 ms via Embassy timer. Software-filters
     ///   received frames against `filters` and forwards matches to `CAN_RX_CHANNEL`.
-    /// - TX: After each RX poll, drains `CAN_TX_CHANNEL` for frames addressed to
-    ///   `bus_id` and writes them to the socket. Frames for other buses are returned
-    ///   to the channel so the corresponding task can pick them up.
+    /// - TX: After each RX poll, drains this bus's `CAN_TX_CHANNELS` entry and writes
+    ///   the frames to the socket.
     ///
     /// If the interface cannot be opened (e.g. it does not exist), the task logs a
     /// warning and retries every 5 seconds so the rest of the system keeps running.
@@ -85,6 +84,11 @@ mod linux_can {
             return;
         }
 
+        let Some(tx_channel) = core_interface::can_tx_channel(bus_id) else {
+            log::error!("CAN bus {}: bus id exceeds MAX_CAN_BUSES", bus_id);
+            return;
+        };
+
         loop {
             Timer::after(Duration::from_millis(1)).await;
 
@@ -116,13 +120,8 @@ mod linux_can {
                 }
             }
 
-            // TX: drain outbound frames for this bus, return others to the channel
-            while let Ok(outbound) = CAN_TX_CHANNEL.receiver().try_receive() {
-                if outbound.bus_id != bus_id {
-                    // Not ours — return to the back of the channel for the correct bus task
-                    let _ = CAN_TX_CHANNEL.sender().try_send(outbound);
-                    break; // avoid spinning on someone else's frames
-                }
+            // TX: drain this bus's own outbound channel
+            while let Ok(outbound) = tx_channel.try_receive() {
                 // Drop silently when in read-only mode; do not transmit on the bus.
                 if core_interface::is_can_read_only() {
                     continue;
@@ -260,7 +259,7 @@ pub use linux_can::socket_can_task;
 
 #[cfg(not(target_os = "linux"))]
 mod dummy_can {
-    use core_interface::{CAN_TX_CHANNEL, CanFilter};
+    use core_interface::CanFilter;
     use embassy_time::{Duration, Timer};
 
     #[embassy_executor::task(pool_size = 4)]
@@ -275,16 +274,16 @@ mod dummy_can {
             interface
         );
 
+        let Some(tx_channel) = core_interface::can_tx_channel(bus_id) else {
+            log::error!("CAN bus {}: bus id exceeds MAX_CAN_BUSES", bus_id);
+            return;
+        };
+
         loop {
             Timer::after(Duration::from_millis(10)).await;
 
-            // TX: drain outbound frames for this bus, return others to the channel
-            while let Ok(outbound) = CAN_TX_CHANNEL.receiver().try_receive() {
-                if outbound.bus_id != bus_id {
-                    // Not ours — return to the back of the channel for the correct bus task
-                    let _ = CAN_TX_CHANNEL.sender().try_send(outbound);
-                    break;
-                }
+            // TX: drain this bus's own outbound channel
+            while let Ok(_outbound) = tx_channel.try_receive() {
                 // Silently drop on non-Linux
             }
         }

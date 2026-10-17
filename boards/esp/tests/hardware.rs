@@ -13,7 +13,7 @@
 //
 // #[test]
 // async fn twai_loopback_roundtrip() {
-//     use core_interface::{CAN_RX_CHANNEL, CAN_TX_CHANNEL, CanFrame};
+//     use core_interface::{CAN_RX_CHANNEL, CAN_TX_CHANNELS, CanFrame};
 //     use embedded_can::{Id, StandardId};
 //
 //     let frame = CanFrame {
@@ -22,7 +22,7 @@
 //         data: [1, 2, 3, 4, 0, 0, 0, 0],
 //         dlc: 4,
 //     };
-//     CAN_TX_CHANNEL.sender().send(frame).await;
+//     CAN_TX_CHANNELS[0].sender().send(frame).await;
 //
 //     let timeout = embassy_time::Timer::after(embassy_time::Duration::from_millis(50));
 //     let rx = embassy_futures::select::select(
