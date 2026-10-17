@@ -1,0 +1,32 @@
+# Testing
+
+The README has the quick-start commands; this page covers how the suites are organised and why.
+
+## Host tests
+`cargo xtask test` runs all host-side tests in sequence without hardware. They use standard `cargo test` and need no ESP toolchain.
+
+| Crate | Covers | Command |
+|---|---|---|
+| `core-interface` | `passes_filter`, BLE/MQTT dispatch (platform_id gating, routing, `source_device_id` stamping, empty-source rejection), response routing, state publish split, CAN read-only flag, CAN debug streaming (batch filtering, blocklist, dropped-frame counter) | `cargo test -p core-interface -- --test-threads=1` |
+| `virtual-car-controller` | `encode_state` proto encoding, CAN frame → state updates, `process_basic_command`, `tick_simulation` (initial defaults, ramp-up, park phase, odometer increment, door-lock preservation, cycle wraparound) | `cargo test -p virtual-car-controller -- --test-threads=1` |
+| `board-pc` | `socketcan_to_core_frame` / `core_to_socketcan_frame` round-trips + BLE helpers (gated behind the `hardware` feature) | `cargo test -p board-pc --features hardware -- --test-threads=1` |
+| `board-esp` | `compute_mcp_masks` + BLE helpers/proto size & round-trip tests (`AppToDevice`/`DeviceToApp` encode/decode bounds, `ble_device_name_appends_mac_suffix`) | `cargo test -p board-esp -- --test-threads=1` |
+
+**`--test-threads=1` is required** — Embassy channels are process-global statics; parallel threads corrupt each other's state.
+
+## On-hardware tests (ESP32, requires `probe-rs`)
+```
+cargo xtask test --board esp --on-hardware
+```
+xtask generates `.app_test_build/` (parallel to `.app_build/`), compiles it with the Xtensa toolchain using `embedded-test 0.7` (features: `external-executor`, `embassy-09`, `xtensa-semihosting`, `panic-handler`) and flashes/runs via `probe-rs run` (invoked with `sudo` because the USB device is `root:root` in the dev container).
+
+Test results are reported via semihosting — no defmt or RTT involved. The template (`boards/esp/tests.template.rs`) uses plain `assert!`/`assert_eq!` and includes channel round-trip and `passes_filter` smoke tests. Add custom on-device tests to `boards/esp/tests/hardware.rs` — xtask injects that file automatically.
+
+## `no_std` gating
+See [Architecture](architecture.md#no_std--test-gating-pattern) for how crates compile on the host for testing.
+
+## CI
+The `test` job in `.github/workflows/ci.yml` uses git diff to detect which crate directories changed and runs only the affected packages:
+*   Changes to `boards/pc/` trigger `board-pc` tests.
+*   Changes to `boards/esp/` trigger `board-esp` tests.
+*   Changes to `core-interface/` trigger all four crates.

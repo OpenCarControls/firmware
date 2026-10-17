@@ -6,7 +6,7 @@
 //! triggering a full re-pairing procedure.
 //!
 //! Storage layout: the store occupies the last two NOR flash sectors (fixed end-of-
-//! flash regions — see AGENTS.md for the planned migration to named partitions).
+//! flash regions — see docs/ble.md for the planned migration to named partitions).
 
 #[cfg(feature = "hardware")]
 mod hardware {
