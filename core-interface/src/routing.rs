@@ -67,6 +67,29 @@ pub async fn route_responses_task() {
 
 // ── State Publisher ───────────────────────────────────────────────────────────
 
+/// The BLE state message for one update: the full state (basic + advanced).
+/// Public so vehicle crates can check their worst-case state still fits in
+/// `ble::BLE_MAX_MESSAGE_BYTES`.
+pub fn ble_state_update(
+    timestamp_ms: u64,
+    platform_id: u32,
+    payload: VehicleStatePayload,
+) -> proto::DeviceToApp {
+    proto::DeviceToApp {
+        timestamp_ms,
+        platform_id,
+        payload: Some(proto::device_to_app::Payload::StateUpdate(
+            proto::StateUpdate {
+                system_state: None,
+                vehicle_state: Some(proto::VehicleState {
+                    basic_state_bytes: payload.basic,
+                    advanced_state_bytes: payload.advanced,
+                }),
+            },
+        )),
+    }
+}
+
 /// Publishes a single vehicle state update.
 /// - BLE receives the full state (basic + advanced).
 /// - MQTT receives basic only (`advanced_state_bytes` is always empty).
@@ -83,19 +106,8 @@ pub async fn publish_single_state(payload: VehicleStatePayload, timestamp_ms: u6
     let pid = crate::PLATFORM_ID.load(Ordering::Relaxed);
 
     // BLE: full state (basic + advanced)
-    let ble_msg = proto::DeviceToApp {
-        timestamp_ms,
-        platform_id: pid,
-        payload: Some(proto::device_to_app::Payload::StateUpdate(
-            proto::StateUpdate {
-                system_state: None,
-                vehicle_state: Some(proto::VehicleState {
-                    basic_state_bytes: payload.basic.clone(),
-                    advanced_state_bytes: payload.advanced,
-                }),
-            },
-        )),
-    };
+    let basic = payload.basic.clone();
+    let ble_msg = ble_state_update(timestamp_ms, pid, payload);
     if let Err(embassy_sync::channel::TrySendError::Full(msg)) = BLE_TX_CHANNEL.try_send(ble_msg) {
         // Channel full — evict the oldest stale state and replace with latest.
         let _ = BLE_TX_CHANNEL.try_receive();
@@ -121,7 +133,7 @@ pub async fn publish_single_state(payload: VehicleStatePayload, timestamp_ms: u6
                 proto::StateUpdate {
                     system_state: None,
                     vehicle_state: Some(proto::VehicleState {
-                        basic_state_bytes: payload.basic,
+                        basic_state_bytes: basic,
                         advanced_state_bytes: vec![],
                     }),
                 },

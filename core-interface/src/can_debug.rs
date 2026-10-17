@@ -5,6 +5,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, with_timeout};
 
+use crate::ble::BLE_MAX_MESSAGE_BYTES;
 use crate::channels::{BLE_TX_CHANNEL, CAN_DEBUG_RX_CHANNEL};
 use crate::proto;
 use crate::types::{CanDebugFilter, CanRawCapture};
@@ -93,7 +94,10 @@ pub(crate) async fn update_can_debug_filters(new_filters: Vec<CanDebugFilter>) {
 
 // ── Debug publish helpers ─────────────────────────────────────────────────────
 
-/// Builds and sends a single `CanDebugUpdate` batch to `BLE_TX_CHANNEL`.
+/// Builds a `CanDebugUpdate` batch and sends it to `BLE_TX_CHANNEL`, split
+/// into as many messages as needed for each to fit in
+/// `BLE_MAX_MESSAGE_BYTES` (BLE messages aren't fragmented). Frame order is
+/// kept and `dropped` is reported once, in the first message.
 ///
 /// Each capture in `captures` is converted to a `CanDebugFrame`. Captures that
 /// match any entry in `debug_filters` (blocklist) are silently excluded — this
@@ -140,19 +144,55 @@ pub async fn publish_single_debug_batch(
         return;
     }
 
-    BLE_TX_CHANNEL
-        .sender()
-        .send(proto::DeviceToApp {
-            timestamp_ms,
-            platform_id: pid,
-            payload: Some(proto::device_to_app::Payload::CanDebugUpdate(
-                proto::CanDebugUpdate {
-                    frames,
-                    dropped_frames: dropped,
-                },
-            )),
-        })
-        .await;
+    for msg in split_debug_batch(frames, dropped, pid, timestamp_ms) {
+        BLE_TX_CHANNEL.sender().send(msg).await;
+    }
+}
+
+/// Packs `frames` into `CanDebugUpdate` messages that each fit in
+/// `BLE_MAX_MESSAGE_BYTES`, in order. Always returns at least one message.
+fn split_debug_batch(
+    frames: Vec<proto::CanDebugFrame>,
+    dropped: u32,
+    pid: u32,
+    timestamp_ms: u64,
+) -> Vec<proto::DeviceToApp> {
+    use prost::Message as _;
+
+    let message = |frames: Vec<proto::CanDebugFrame>, dropped_frames: u32| proto::DeviceToApp {
+        timestamp_ms,
+        platform_id: pid,
+        payload: Some(proto::device_to_app::Payload::CanDebugUpdate(
+            proto::CanDebugUpdate {
+                frames,
+                dropped_frames,
+            },
+        )),
+    };
+
+    fn frames_of(msg: &mut proto::DeviceToApp) -> &mut Vec<proto::CanDebugFrame> {
+        match &mut msg.payload {
+            Some(proto::device_to_app::Payload::CanDebugUpdate(update)) => &mut update.frames,
+            _ => unreachable!("split_debug_batch only builds CanDebugUpdate messages"),
+        }
+    }
+
+    let mut messages = Vec::new();
+    let mut current = message(Vec::new(), dropped);
+    for frame in frames {
+        frames_of(&mut current).push(frame);
+        // A lone frame always fits (at most ~50 bytes), so only a frame that
+        // overflows a non-empty message moves on to the next one.
+        if current.encoded_len() > BLE_MAX_MESSAGE_BYTES && frames_of(&mut current).len() > 1 {
+            let overflow = frames_of(&mut current).pop().unwrap();
+            messages.push(core::mem::replace(
+                &mut current,
+                message(alloc::vec![overflow], 0),
+            ));
+        }
+    }
+    messages.push(current);
+    messages
 }
 
 /// Collects raw CAN frames from `CAN_DEBUG_RX_CHANNEL`, applies the active

@@ -374,4 +374,30 @@ mod tests {
         assert_eq!(advanced.speed, Some(0));
         assert_eq!(advanced.gear, Some(0));
     }
+
+    /// The largest state update this vehicle can produce must fit in one BLE
+    /// message: BLE messages aren't fragmented, and an oversized update is
+    /// dropped on the device. Every field is set to the value with the longest
+    /// protobuf encoding (negative ints take 10 bytes). The struct is built
+    /// without `..` on purpose: a new state field won't compile until it's
+    /// covered here.
+    #[test]
+    fn worst_case_state_update_fits_one_ble_message() {
+        let state = VirtualCarState {
+            odometer: Some(u32::MAX),
+            is_driving: Some(true),
+            are_doors_locked: Some(true),
+            speed: Some(i32::MIN),
+            gear: Some(i32::MIN),
+            custom_state1: Some(true),
+        };
+
+        let msg = core_interface::ble_state_update(u64::MAX, u32::MAX, encode_state(&state));
+        let limit = core_interface::ble::BLE_MAX_MESSAGE_BYTES;
+        assert!(
+            msg.encoded_len() <= limit,
+            "worst-case virtual car state update is {} bytes, BLE limit is {limit}",
+            msg.encoded_len()
+        );
+    }
 }

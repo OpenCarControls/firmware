@@ -430,4 +430,62 @@ mod tests {
         assert_eq!(advanced.battery_voltage, Some(400));
         assert_eq!(advanced.gear, Some(0));
     }
+
+    /// The largest state update this vehicle can produce must fit in one BLE
+    /// message: BLE messages aren't fragmented, and an oversized update is
+    /// dropped on the device. Every field is set to the value with the longest
+    /// protobuf encoding (negative ints take 10 bytes). The struct is built
+    /// without `..` on purpose: a new state field won't compile until it's
+    /// covered here.
+    #[test]
+    fn worst_case_state_update_fits_one_ble_message() {
+        use proto::advanced_state::Gear;
+        use proto::basic_state::ChargePortState;
+
+        let state = EgmpCarState {
+            odometer: Some(u32::MAX),
+            is_driving: Some(true),
+            speed: Some(i32::MIN),
+            outdoor_temperature: Some(f32::MIN),
+            indoor_temperature: Some(f32::MIN),
+            is_climate_on: Some(true),
+            target_climate_temperature: Some(f32::MIN),
+            is_windshield_defrost_on: Some(true),
+            is_rear_window_defrost_on: Some(true),
+            is_steering_wheel_heater_on: Some(true),
+            battery_soc: Some(u32::MAX),
+            battery_range_km: Some(u32::MAX),
+            charge_port_state: Some(ChargePortState::V2lError),
+            power_flow_watt: Some(i32::MIN),
+            time_remaining_minutes: Some(u32::MAX),
+            are_doors_locked: Some(true),
+            is_driver_door_open: Some(true),
+            is_driver_window_open: Some(true),
+            is_passenger_door_open: Some(true),
+            is_passenger_window_open: Some(true),
+            is_rear_left_door_open: Some(true),
+            is_rear_left_window_open: Some(true),
+            is_rear_right_door_open: Some(true),
+            is_rear_right_window_open: Some(true),
+            is_frunk_open: Some(true),
+            is_trunk_open: Some(true),
+            are_lights_on: Some(true),
+            are_hazard_lights_on: Some(true),
+            lights_flash_timestamp: Some(u64::MAX),
+            battery_voltage: Some(u32::MAX),
+            instantaneous_power_watt: Some(i32::MIN),
+            battery_minimum_temperature: Some(f32::MIN),
+            battery_maximum_temperature: Some(f32::MIN),
+            is_preconditioning_enabled: Some(true),
+            gear: Some(Gear::Drive),
+        };
+
+        let msg = core_interface::ble_state_update(u64::MAX, u32::MAX, encode_state(&state));
+        let limit = core_interface::ble::BLE_MAX_MESSAGE_BYTES;
+        assert!(
+            msg.encoded_len() <= limit,
+            "worst-case E-GMP state update is {} bytes, BLE limit is {limit}",
+            msg.encoded_len()
+        );
+    }
 }

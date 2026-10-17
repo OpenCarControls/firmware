@@ -10,6 +10,14 @@ BLE uses `esp-radio 0.18` + `trouble-host 0.6.0` (with `bt-hci 0.8.1`), built wi
 ## GATT transport
 `ble_transport_task` runs a full advertise/connect loop and bridges GATT RX/TX characteristics to `BLE_RX_CHANNEL` / `BLE_TX_CHANNEL`. It accepts a `name_base: &'static str` 4th parameter (injected by the generated `main.rs` as `BLE_DEVICE_NAME_BASE`).
 
+## Message size
+BLE messages are never fragmented: every encoded `AppToDevice` / `DeviceToApp` must fit in one ATT write or notification. The limit comes from the contract (`ble.payload` in `transport.toml`): the app requests an ATT MTU of `BLE_ATT_MTU` (247), so a message carries at most `BLE_MAX_MESSAGE_BYTES` (244). Both constants are generated into `core_interface::ble`; the GATT characteristics are sized with `BLE_MAX_MESSAGE_BYTES`, and a compile-time check ensures the stack's packet pool supports `BLE_ATT_MTU`.
+
+What keeps messages within the limit:
+*   **State updates:** each vehicle crate has a `worst_case_state_update_fits_one_ble_message` test that builds the state update through `core_interface::ble_state_update` with every field at its longest encoding. Adding fields to a vehicle's state fails that test before it can fail on a car.
+*   **CAN debug batches:** `publish_single_debug_batch` splits each batch (up to 20 frames) into as many `CanDebugUpdate` messages as needed. A single 8-byte frame takes 20–30 bytes, so a full batch needs two or three messages.
+*   Anything larger is dropped on the device with a `BLE GATT TX message too large` warning.
+
 ## Device name
 Configurable base name via `[hardware.esp.ble] device_name` in `config.toml` (default `"OpenCar"`). At runtime `ble_transport_task` appends a 2-byte MAC suffix using `build_ble_device_name(base, mac)` → `"{base}-{mac[4]:02X}{mac[5]:02X}"` (e.g. `"OpenCar-ABCD"`). The result is stored in a `StaticCell<heapless::String<33>>` for the `'static` lifetime required by `PeripheralConfig`.
 

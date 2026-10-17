@@ -69,7 +69,15 @@ mod hardware {
     use bt_hci::controller::ControllerCmdSync;
 
     use crate::ble::store::BondStore;
-    use core_interface::ble::{GATT_RX_UUID, GATT_SERVICE_UUID, GATT_TX_UUID, mac_to_ble_address};
+    use core_interface::ble::{
+        BLE_ATT_MTU, BLE_MAX_MESSAGE_BYTES, GATT_RX_UUID, GATT_SERVICE_UUID, GATT_TX_UUID,
+        mac_to_ble_address,
+    };
+
+    // The stack answers an MTU exchange with at most its packet size minus the
+    // 4-byte L2CAP header, so the contract's ATT MTU (which the app requests)
+    // must fit in it.
+    const _: () = assert!(BLE_ATT_MTU as usize <= <DefaultPacketPool as PacketPool>::MTU - 4);
 
     const BLE_CONNECTIONS_MAX: usize = 1;
     const BLE_L2CAP_CHANNELS_MAX: usize = 3;
@@ -82,9 +90,9 @@ mod hardware {
     #[gatt_service(uuid = GATT_SERVICE_UUID)]
     struct OpenCarGattService {
         #[characteristic(uuid = GATT_RX_UUID, write, write_without_response, permissions(encrypted))]
-        rx: heapless::Vec<u8, 244>,
+        rx: heapless::Vec<u8, BLE_MAX_MESSAGE_BYTES>,
         #[characteristic(uuid = GATT_TX_UUID, notify, permissions(encrypted))]
-        tx: heapless::Vec<u8, 244>,
+        tx: heapless::Vec<u8, BLE_MAX_MESSAGE_BYTES>,
     }
 
     // ─── RNG wrapper ──────────────────────────────────────────────────────────────
@@ -646,13 +654,14 @@ mod hardware {
                 continue;
             }
 
-            let payload = match heapless::Vec::<u8, 244>::from_slice(encoded.as_slice()) {
-                Ok(v) => v,
-                Err(_) => {
-                    log::warn!("BLE GATT TX message too large: {} bytes", encoded.len());
-                    continue;
-                }
-            };
+            let payload =
+                match heapless::Vec::<u8, BLE_MAX_MESSAGE_BYTES>::from_slice(encoded.as_slice()) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        log::warn!("BLE GATT TX message too large: {} bytes", encoded.len());
+                        continue;
+                    }
+                };
 
             if server.link.tx.notify(conn, &payload).await.is_err() {
                 break;

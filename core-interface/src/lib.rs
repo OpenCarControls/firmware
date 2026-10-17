@@ -82,7 +82,7 @@ pub use dispatch::{
 
 // Routing tasks
 pub use routing::{
-    publish_single_state, publish_state_task, record_mqtt_activity, reset_mqtt_throttle_for_tests,
+    ble_state_update, publish_single_state, publish_state_task, record_mqtt_activity, reset_mqtt_throttle_for_tests,
     route_responses_task, route_single_response,
 };
 

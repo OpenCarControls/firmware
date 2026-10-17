@@ -42,6 +42,25 @@ fn generate_ble_transport_constants() -> Result<()> {
     let pairing_window_s = transport["ble"]["pairing"]["pairing_window_seconds"]
         .as_integer()
         .expect("ble.pairing.pairing_window_seconds must be an integer");
+    // Added after the other keys: point at a stale contracts checkout rather
+    // than failing with a bare "index not found".
+    let payload_key = |key: &str| {
+        transport["ble"]
+            .get("payload")
+            .and_then(|p| p.get(key))
+            .and_then(|v| v.as_integer())
+            .unwrap_or_else(|| {
+                panic!("transport.toml is missing integer ble.payload.{key}; update the contracts submodule")
+            })
+    };
+    let att_mtu = payload_key("att_mtu");
+    let max_message_bytes = payload_key("max_message_bytes");
+    // A notification or write carries the ATT MTU minus the 3-byte ATT header.
+    assert!(
+        max_message_bytes == att_mtu - 3,
+        "transport.toml ble.payload.max_message_bytes ({max_message_bytes}) must be att_mtu - 3 ({})",
+        att_mtu - 3
+    );
 
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let out_path = std::path::Path::new(&out_dir).join("ble_transport.rs");
@@ -52,7 +71,12 @@ fn generate_ble_transport_constants() -> Result<()> {
              pub const GATT_SERVICE_UUID: u128 = 0x{service_uuid:032x};\n\
              pub const GATT_RX_UUID: u128 = 0x{rx_uuid:032x};\n\
              pub const GATT_TX_UUID: u128 = 0x{tx_uuid:032x};\n\
-             pub const BLE_PAIRING_WINDOW_SECONDS: u32 = {pairing_window_s};\n"
+             pub const BLE_PAIRING_WINDOW_SECONDS: u32 = {pairing_window_s};\n\
+             /// ATT MTU the app requests; the BLE stack must support at least this.\n\
+             pub const BLE_ATT_MTU: u16 = {att_mtu};\n\
+             /// Largest encoded `AppToDevice`/`DeviceToApp` message that fits one\n\
+             /// ATT write or notification. Messages are never fragmented.\n\
+             pub const BLE_MAX_MESSAGE_BYTES: usize = {max_message_bytes};\n"
         ),
     )?;
 
