@@ -312,7 +312,9 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str(&format!("esp-hal = {{ version = \"{}\", features = [\"unstable\"] }}\n", ev("esp-hal")));
         cargo_toml.push_str(&format!("esp-rtos = {{ version = \"{}\", features = [\"embassy\", \"esp-radio\", \"esp-alloc\"] }}\n", ev("esp-rtos")));
         cargo_toml.push_str(&format!("esp-backtrace = {{ version = \"{}\", features = [\"panic-handler\", \"println\"] }}\n", ev("esp-backtrace")));
-        cargo_toml.push_str(&format!("esp-println = {{ version = \"{}\", default-features = false, features = [\"log-04\", \"jtag-serial\"] }}\n", ev("esp-println")));
+        // The classic ESP32 has no USB-Serial-JTAG peripheral; log over UART0 there.
+        let println_iface = if esp_hw.mcu == "esp32" { "uart" } else { "jtag-serial" };
+        cargo_toml.push_str(&format!("esp-println = {{ version = \"{}\", default-features = false, features = [\"log-04\", \"{}\"] }}\n", ev("esp-println"), println_iface));
         cargo_toml.push_str(&format!("esp-alloc = \"{}\"\n", ev("esp-alloc")));
         cargo_toml.push_str(&format!("embassy-executor = \"{}\"\n", v("embassy-executor")));
         cargo_toml.push_str(&format!("embassy-time = \"{}\"\n", v("embassy-time")));
@@ -461,6 +463,14 @@ impl TargetBuilder for Builder {
 
         let is_dual_core = esp_hw.mcu == "esp32" || esp_hw.mcu == "esp32s3";
         let heap_size = if is_dual_core { "160 * 1024" } else { "83 * 1024" };
+        // RAM used by the 2nd-stage bootloader is free once the app runs. On the RISC-V
+        // chips it is a separate ~64 KB region, so use it as extra heap for the WiFi/BLE
+        // stacks instead of taking more from the shared stack/heap SRAM.
+        let reclaimed_heap = if mcu_to_target_arch(&esp_hw.mcu).starts_with("riscv") {
+            "    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);\n"
+        } else {
+            ""
+        };
 
         let can_driver_spawn = if is_dual_core {
             format!(
@@ -543,6 +553,7 @@ impl TargetBuilder for Builder {
             .replace("{PLATFORM_ID}", &format!("0x{:08X}", platform_id))
             .replace("{VEHICLE_CRATE_IDENT}", &vehicle_crate_ident)
             .replace("{HEAP_SIZE}", heap_size)
+            .replace("{RECLAIMED_HEAP}", reclaimed_heap)
             .replace("{CAN_HARDWARE_INIT}", &can_hardware_init)
             .replace("{CAN_TASK_DEFS}", &can_task_defs)
             .replace("{CAN_DRIVER_SPAWN}", &can_driver_spawn)
@@ -562,15 +573,10 @@ impl TargetBuilder for Builder {
                 target = target_arch
             )
         } else {
-            let rustflags = vec!["\"-C\"", "\"link-arg=-Tlinkall.x\""];
-            if esp_hw.mcu == "esp32c3" {
-                // Removed invalid target-feature=+a for ESP32-C3
-            }
             format!(
                 "[build]\ntarget = \"{target}\"\n\n\
-                 [target.{target}]\nrustflags = [{flags}]\n",
-                target = target_arch,
-                flags = rustflags.join(", ")
+                 [target.{target}]\nrustflags = [\"-C\", \"link-arg=-Tlinkall.x\"]\n",
+                target = target_arch
             )
         };
 

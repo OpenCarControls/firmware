@@ -1,7 +1,7 @@
 //! CAN bus drivers for the ESP32 board.
 //!
 //! Two driver implementations are provided:
-//! - **TWAI** – the ESP32's built-in CAN peripheral, polled with `nb` non-blocking reads.
+//! - **TWAI** – the ESP32's built-in CAN peripheral, interrupt-driven (esp-hal async mode).
 //! - **MCP2515** – external SPI CAN controller, interrupt-driven via a falling-edge INT pin.
 //!
 //! Both share the same channel contract: `CAN_RX_CHANNEL` (board → vehicle) and
@@ -24,7 +24,7 @@ mod hardware {
         gpio::interconnect::{PeripheralInput, PeripheralOutput},
         gpio::{Input, Output},
         spi::master::Spi,
-        twai::{self, Twai, TwaiMode},
+        twai::{self, EspTwaiError, TwaiConfiguration, TwaiMode},
     };
     pub use mcp2515::{CanSpeed, McpSpeed};
     use mcp2515::{
@@ -34,8 +34,10 @@ mod hardware {
         regs::OpMode,
     };
 
-    /// Concrete TWAI driver type (Blocking mode -> implements Send, safe for core 1).
-    pub type TwaiDriver = Twai<'static, esp_hal::Blocking>;
+    /// Configured-but-not-started TWAI peripheral. Blocking mode is `Send`, so it can be
+    /// handed to core 1; `run_twai_loop` converts it to async on whichever core runs it
+    /// so the TWAI interrupt is bound to that core.
+    pub type TwaiDriver = TwaiConfiguration<'static, esp_hal::Blocking>;
 
     /// Concrete MCP2515 driver type (blocking SPI, INT-pin driven).
     pub type Mcp2515Driver =
@@ -53,8 +55,9 @@ mod hardware {
         RxFilter::F5,
     ];
 
-    /// Initialises the TWAI peripheral with an accept-all hardware filter; actual
-    /// frame selection is done in software inside `run_twai_loop`.
+    /// Configures the TWAI peripheral with an accept-all hardware filter; actual
+    /// frame selection is done in software inside `run_twai_loop`. The peripheral is
+    /// started by `run_twai_loop`, not here.
     pub fn init_twai(
         peripheral: impl twai::Instance + 'static,
         rx_pin: impl PeripheralInput<'static>,
@@ -78,31 +81,47 @@ mod hardware {
             TwaiMode::Normal,
         );
         cfg.set_filter(accept_all);
-        cfg.start()
+        cfg
     }
 
-    /// Bidirectional TWAI loop - runs forever on core 1.
+    /// Bidirectional TWAI loop - runs forever (core 1 on dual-core chips, core 0 otherwise).
     ///
-    /// Uses non-blocking nb polling on RX (1 ms yield when no frame is available)
-    /// and drains the TX channel between polls.
+    /// RX is interrupt-driven: the esp-hal TWAI ISR moves frames from the small hardware
+    /// FIFO into a 32-frame software queue, so frames are not lost while the executor is
+    /// busy with WiFi/BLE work (which matters on single-core chips like the ESP32-C3).
+    /// The TX channel is drained at least every millisecond.
+    ///
+    /// Recovers from RX overruns (clears the FIFO) and from bus-off (restarts the
+    /// controller after a back-off) instead of wedging.
     pub async fn run_twai_loop(driver: TwaiDriver, bus_id: u8, filters: &'static [CanFilter]) {
-        use embassy_time::{Duration, Timer};
+        use embassy_futures::select::{Either, select};
+        use embassy_time::{Duration, Timer, with_timeout};
 
-        let (mut rx, mut tx) = driver.split();
+        let mut twai = driver.into_async().start();
         loop {
-            // Drain all available received frames
-            loop {
-                match rx.receive() {
-                    Ok(frame) => {
-                        crate::status_leds::pulse_can();
-                        let core_frame = to_core_frame(frame, bus_id);
-                        try_send_can_debug_capture(bus_id, &core_frame);
-                        if core_interface::passes_filter(&core_frame, filters) {
-                            CAN_RX_CHANNEL.sender().send(core_frame).await;
-                        }
+            match select(twai.receive_async(), Timer::after(Duration::from_millis(1))).await {
+                Either::First(Ok(frame)) => {
+                    crate::status_leds::pulse_can();
+                    let core_frame = to_core_frame(frame, bus_id);
+                    try_send_can_debug_capture(bus_id, &core_frame);
+                    if core_interface::passes_filter(&core_frame, filters) {
+                        CAN_RX_CHANNEL.sender().send(core_frame).await;
                     }
-                    Err(_) => break, // WouldBlock (no frame) or bus error; either way keep going
                 }
+                Either::First(Err(EspTwaiError::BusOff)) => {
+                    log::warn!("CAN bus {}: TWAI bus-off, restarting controller in 1s", bus_id);
+                    Timer::after(Duration::from_secs(1)).await;
+                    twai = twai.stop().start();
+                    continue;
+                }
+                Either::First(Err(EspTwaiError::EmbeddedHAL(twai::ErrorKind::Overrun))) => {
+                    log::warn!("CAN bus {}: TWAI RX overrun, frames dropped", bus_id);
+                    twai.clear_receive_fifo();
+                }
+                Either::First(Err(e)) => {
+                    log::debug!("CAN bus {}: TWAI RX error: {:?}", bus_id, e);
+                }
+                Either::Second(()) => {}
             }
 
             // Drain outbound TX channel for this bus
@@ -114,18 +133,14 @@ mod hardware {
                     // Drop silently when in read-only mode; do not transmit on the bus.
                     if !core_interface::is_can_read_only() {
                         if let Some(f) = core_to_twai_frame(&outbound) {
-                            // nb::block! would stall the executor; spin until TX buffer free
-                            loop {
-                                match tx.transmit(&f) {
-                                    Ok(_) => {
-                                        crate::status_leds::pulse_can();
-                                        break;
-                                    }
-                                    Err(nb::Error::Other(_)) => break,
-                                    Err(nb::Error::WouldBlock) => {
-                                        Timer::after(Duration::from_micros(100)).await
-                                    }
-                                }
+                            // Bounded wait: without another node to ACK, a frame never
+                            // completes. Dropping the future aborts the transmission.
+                            match with_timeout(Duration::from_millis(100), twai.transmit_async(&f))
+                                .await
+                            {
+                                Ok(Ok(())) => crate::status_leds::pulse_can(),
+                                Ok(Err(e)) => log::debug!("CAN bus {}: TWAI TX error: {:?}", bus_id, e),
+                                Err(_) => log::debug!("CAN bus {}: TWAI TX timed out", bus_id),
                             }
                         }
                     }
@@ -133,9 +148,6 @@ mod hardware {
                     let _ = CAN_TX_CHANNEL.sender().try_send(outbound);
                 }
             }
-
-            // Yield 1 ms before next poll
-            Timer::after(Duration::from_millis(1)).await;
         }
     }
 

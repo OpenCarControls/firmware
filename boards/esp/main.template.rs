@@ -24,7 +24,7 @@ async fn main(spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env();
     esp_println::println!("!!! FIRMWARE BOOTED SUCCESSFULLY !!!");
     log::info!("Booting firmware for vehicle platform: {}", stringify!({VEHICLE_CRATE_IDENT}));
-    esp_alloc::heap_allocator!(size: {HEAP_SIZE});
+{RECLAIMED_HEAP}    esp_alloc::heap_allocator!(size: {HEAP_SIZE});
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
