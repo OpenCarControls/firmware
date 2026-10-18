@@ -133,6 +133,13 @@ fn battery_power_watt(voltage: f32, current: f32) -> i32 {
     -(voltage * current) as i32
 }
 
+/// `CHARGING_POWER` is only set on DC, so while AC charging the charge port power comes from
+/// the battery power instead. That is what reaches the battery, a little under what the
+/// charger supplies. Clamped at 0, since a negative `power_flow_watt` means V2L.
+fn is_ac_charging(state: &crate::EgmpCarState) -> bool {
+    state.charge_port_state == Some(ChargePortState::AcCharging)
+}
+
 /// Last battery voltage and current, which come in separate messages.
 static BATTERY: embassy_sync::blocking_mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
@@ -221,6 +228,9 @@ pub async fn handle_can_frame(frame: CanFrame) {
                 state.battery_soc = Some(m.state_of_charge() as u32);
                 if let Some(power) = track_battery(None, Some(m.battery_current())) {
                     state.instantaneous_power_watt = Some(power);
+                    if is_ac_charging(&state) {
+                        state.power_flow_watt = Some(power.max(0));
+                    }
                 }
             }
             m_can::Messages::BatteryInfo567(m) => {
@@ -228,6 +238,9 @@ pub async fn handle_can_frame(frame: CanFrame) {
                 state.battery_voltage = Some(voltage as u32);
                 if let Some(power) = track_battery(Some(voltage), None) {
                     state.instantaneous_power_watt = Some(power);
+                    if is_ac_charging(&state) {
+                        state.power_flow_watt = Some(power.max(0));
+                    }
                 }
             }
             m_can::Messages::AmbientTemperature(m) => {
@@ -252,7 +265,9 @@ pub async fn handle_can_frame(frame: CanFrame) {
                 state.target_climate_temperature = Some(m.driver_temp_c_raw() as f32);
             }
             m_can::Messages::ChargingPower(m) => {
-                state.power_flow_watt = Some((m.charging_power_k_w() as f32 * 1000.0) as i32);
+                if !is_ac_charging(&state) {
+                    state.power_flow_watt = Some((m.charging_power_k_w() as f32 * 1000.0) as i32);
+                }
             }
             m_can::Messages::Bcm15200ms(m) => {
                 state.is_driver_window_open = window_open(m.window_drvr_sd_wdw_detail_opn_sta_raw());
@@ -453,6 +468,32 @@ mod tests {
         let i = m_can::BatteryInfo764::try_from(&[0xC9, 0xF6, 0x1B, 0x1D, 0x00, 0x00, 0x8C, 0x61][..]).ok().unwrap();
         assert!((i.battery_current() + 235.9).abs() < 0.05);
         assert!((battery_power_watt(v.battery_voltage(), i.battery_current()) - 177_892).abs() <= 1);
+    }
+
+    fn feed(id: u16, data: [u8; 8]) {
+        let frame = CanFrame { bus_id: 0, id: Id::Standard(StandardId::new(id).unwrap()), data, dlc: 8 };
+        embassy_futures::block_on(handle_can_frame(frame));
+    }
+
+    /// Frames from the L2 running capture, through the real handler: CHARGING_POWER reads 0
+    /// on AC, so the charge port power must come from the battery and not be overwritten.
+    #[test]
+    fn ac_charging_power_flow_comes_from_the_battery() {
+        feed(938, [0x0D, 0xA0, 0x00, 0x02, 0x52, 0x00, 0x00, 0x00]);
+        feed(780, [0x80, 0x63, 0x76, 0x00, 0x0F, 0x01, 0xA0, 0x0F]);
+        feed(413, [0x00, 0x11, 0x01, 0x04, 0x04, 0x00, 0x00, 0x00]);
+        feed(806, [0xCD, 0x31, 0x91, 0x14, 0x01, 0x00, 0x72, 0x01]);
+        feed(567, [0x00, 0x05, 0x57, 0x00, 0x00, 0x6E, 0x1B, 0x00]);
+        feed(764, [0xE1, 0xFF, 0x10, 0x11, 0x00, 0x00, 0x8D, 0x54]);
+        feed(782, [0x00, 0x00, 0x18, 0x05, 0x21, 0x00, 0x00, 0x10]);
+
+        let state = embassy_futures::block_on(CAR_STATE.lock()).clone();
+        assert_eq!(state.charge_port_state, Some(ChargePortState::AcCharging));
+        assert_eq!(state.battery_voltage, Some(702));
+        // 702.2 V * 3.1 A into the battery.
+        let power = state.instantaneous_power_watt.unwrap();
+        assert!((power - 2_176).abs() <= 1, "{power}");
+        assert_eq!(state.power_flow_watt, Some(power));
     }
 
     #[test]
