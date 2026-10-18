@@ -57,7 +57,7 @@ pub struct EgmpCarState {
     pub instantaneous_power_watt: Option<i32>,
     pub battery_minimum_temperature: Option<f32>,
     pub battery_maximum_temperature: Option<f32>,
-    pub is_preconditioning_enabled: Option<bool>,
+    pub preconditioning_state: Option<proto::advanced_state::PreconditioningState>,
     pub gear: Option<proto::advanced_state::Gear>,
 }
 
@@ -99,7 +99,7 @@ impl EgmpCarState {
             instantaneous_power_watt: None,
             battery_minimum_temperature: None,
             battery_maximum_temperature: None,
-            is_preconditioning_enabled: None,
+            preconditioning_state: None,
             gear: None,
         }
     }
@@ -142,7 +142,7 @@ impl EgmpCarState {
             instantaneous_power_watt: Some(0),
             battery_minimum_temperature: Some(25.0),
             battery_maximum_temperature: Some(26.0),
-            is_preconditioning_enabled: Some(false),
+            preconditioning_state: Some(proto::advanced_state::PreconditioningState::Off),
             gear: Some(proto::advanced_state::Gear::Unspecified),
         }
     }
@@ -196,7 +196,7 @@ pub fn encode_state(state: &EgmpCarState) -> VehicleStatePayload {
         instantaneous_power_watt: state.instantaneous_power_watt,
         battery_minimum_temperature: state.battery_minimum_temperature,
         battery_maximum_temperature: state.battery_maximum_temperature,
-        is_preconditioning_enabled: state.is_preconditioning_enabled,
+        preconditioning_state: state.preconditioning_state.map(|s| s as i32),
         gear: state.gear.map(|g| g as i32),
     };
     VehicleStatePayload {
@@ -476,7 +476,7 @@ mod tests {
             instantaneous_power_watt: Some(i32::MIN),
             battery_minimum_temperature: Some(f32::MIN),
             battery_maximum_temperature: Some(f32::MIN),
-            is_preconditioning_enabled: Some(true),
+            preconditioning_state: Some(proto::advanced_state::PreconditioningState::Heating),
             gear: Some(Gear::Drive),
         };
 

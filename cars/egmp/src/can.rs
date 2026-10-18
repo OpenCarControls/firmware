@@ -147,6 +147,21 @@ fn is_dc_plugged_in(state: &crate::EgmpCarState) -> bool {
     matches!(state.charge_port_state, Some(ChargePortState::DcConnected | ChargePortState::DcCharging))
 }
 
+/// "On" is when the battery heater switches on (and the cluster shows the battery icon), about
+/// a minute after the request; the delay varies. Anything else, like the 2 sent while the car
+/// is off, asleep or charging, is unknown rather than off.
+fn preconditioning_state(
+    raw: m_can::BmsPrecondStatusBatteryPrecondState,
+) -> crate::proto::advanced_state::PreconditioningState {
+    use crate::proto::advanced_state::PreconditioningState;
+    match raw {
+        m_can::BmsPrecondStatusBatteryPrecondState::Off => PreconditioningState::Off,
+        m_can::BmsPrecondStatusBatteryPrecondState::Preparing => PreconditioningState::Preparing,
+        m_can::BmsPrecondStatusBatteryPrecondState::On => PreconditioningState::Heating,
+        m_can::BmsPrecondStatusBatteryPrecondState::_Other(_) => PreconditioningState::Unspecified,
+    }
+}
+
 /// Last battery voltage and current, which come in separate messages.
 static BATTERY: embassy_sync::blocking_mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
@@ -277,10 +292,7 @@ pub async fn handle_can_frame(frame: CanFrame) {
                 }
             }
             m_can::Messages::BmsPrecondStatus(m) => {
-                state.is_preconditioning_enabled = Some(
-                    m.battery_precond_state() == m_can::BmsPrecondStatusBatteryPrecondState::On ||
-                    m.battery_precond_state() == m_can::BmsPrecondStatusBatteryPrecondState::Preparing
-                );
+                state.preconditioning_state = Some(preconditioning_state(m.battery_precond_state()));
             }
             m_can::Messages::ClimateTemperature(m) => {
                 // OFF is also sent with the car off; keep the last set temperature then.
@@ -581,6 +593,19 @@ mod tests {
         assert_eq!(state.is_climate_on, Some(false));
         assert_eq!(state.is_windshield_defrost_on, Some(false));
         assert_eq!(state.target_climate_temperature, Some(19.0));
+    }
+
+    /// The manual preconditioning captures, and the car off.
+    #[test]
+    fn preconditioning_states() {
+        use crate::proto::advanced_state::PreconditioningState;
+        let state = |data: [u8; 8]| {
+            preconditioning_state(m_can::BmsPrecondStatus::try_from(&data[..]).ok().unwrap().battery_precond_state())
+        };
+        assert_eq!(state([0x00, 0x41, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x0F]), PreconditioningState::Off);
+        assert_eq!(state([0x00, 0x45, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x0F]), PreconditioningState::Preparing);
+        assert_eq!(state([0x00, 0x55, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x0F]), PreconditioningState::Heating);
+        assert_eq!(state([0x00, 0x42, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x0F]), PreconditioningState::Unspecified);
     }
 
     #[test]
