@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 # Decode signals whose DBC mapping is not yet verified on a real car (climate target
-# temperature, window states, headlights). Off by default so guesses are never published.
+# temperature). Off by default so guesses are never published.
 untested-signals = []
 
 [dependencies]

@@ -29,15 +29,35 @@ pub const CAN_FILTERS: &[CanFilter] = &[
     #[cfg(feature = "untested-signals")]
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(896).unwrap()), mask: 0x7FF },  // CLIMATE_TEMPERATURE
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(782).unwrap()), mask: 0x7FF },  // CHARGING_POWER
-    #[cfg(feature = "untested-signals")]
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1090).unwrap()), mask: 0x7FF }, // BCM12200ms
-    #[cfg(feature = "untested-signals")]
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1124).unwrap()), mask: 0x7FF }, // BCM15200ms
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1050).unwrap()), mask: 0x7FF }, // BCM07200ms
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1043).unwrap()), mask: 0x7FF }, // BLINKERS
 ];
 
 // ── Vehicle Tasks ─────────────────────────────────────────────────────────────
 
 use crate::{CAR_STATE, STATE_CHANGED};
+use crate::proto::basic_state::ChargePortState;
+
+/// `None` for values the DBC doesn't define, so an unknown value never overwrites a known
+/// state. This message only reports the door; charging states come from elsewhere.
+fn charge_port_state(port: m_can::ChargePortDoorPortOpen) -> Option<ChargePortState> {
+    match port {
+        m_can::ChargePortDoorPortOpen::Open => Some(ChargePortState::Open),
+        m_can::ChargePortDoorPortOpen::Closed => Some(ChargePortState::Closed),
+        m_can::ChargePortDoorPortOpen::_Other(_) => None,
+    }
+}
+
+/// Maps a `Window_*DetailOpnSta` raw value from BCM_15_200ms: 0 is closed, 1 to 3 are
+/// open by steps. `None` for Not_Available (7), which the EV6 reports for its rear windows.
+fn window_open(position: u8) -> Option<bool> {
+    match position {
+        0 => Some(false),
+        1..=3 => Some(true),
+        _ => None,
+    }
+}
 
 pub async fn handle_can_frame(frame: CanFrame) {
     let id = match frame.id {
@@ -64,7 +84,9 @@ pub async fn handle_can_frame(frame: CanFrame) {
                 state.is_driving = Some(speed > 0);
             }
             m_can::Messages::ChargePortDoor(m) => {
-                state.charge_port_state = Some(if m.port_open() != 0 { crate::proto::basic_state::ChargePortState::Open } else { crate::proto::basic_state::ChargePortState::Closed });
+                if let Some(port) = charge_port_state(m.port_open()) {
+                    state.charge_port_state = Some(port);
+                }
             }
             m_can::Messages::TrunkStatus(m) => {
                 state.is_trunk_open = Some(m.trunk_open() != 0);
@@ -96,18 +118,17 @@ pub async fn handle_can_frame(frame: CanFrame) {
             m_can::Messages::ChargingPower(m) => {
                 state.power_flow_watt = Some((m.charging_power_k_w() as f32 * 1000.0) as i32);
             }
-            #[cfg(feature = "untested-signals")]
-            m_can::Messages::Bcm12200ms(m) => {
-                // UNTESTED MAPPING:
-                state.is_driver_window_open = Some(m.window_drvr_sd_wdw_sta_bcm() != 0);
-                state.is_passenger_window_open = Some(m.window_asst_sd_wdw_sta_bcm() != 0);
-                state.is_rear_left_window_open = Some(m.window_rr_lft_wdw_sta_bcm() != 0);
-                state.is_rear_right_window_open = Some(m.window_rr_rt_wdw_sta_bcm() != 0);
+            m_can::Messages::Bcm15200ms(m) => {
+                state.is_driver_window_open = window_open(m.window_drvr_sd_wdw_detail_opn_sta_raw());
+                state.is_passenger_window_open = window_open(m.window_asst_sd_wdw_detail_opn_sta_raw());
+                state.is_rear_left_window_open = window_open(m.window_rr_lft_wdw_detail_opn_sta_raw());
+                state.is_rear_right_window_open = window_open(m.window_rr_rt_wdw_detail_opn_sta_raw());
             }
-            #[cfg(feature = "untested-signals")]
             m_can::Messages::Bcm07200ms(m) => {
-                // UNTESTED MAPPING:
                 state.are_lights_on = Some(m.lamp_hd_lmp_lo_on_req() != 0);
+            }
+            m_can::Messages::Blinkers(m) => {
+                state.are_hazard_lights_on = Some(m.hazard_on());
             }
             // TODO: Unmapped BasicState fields:
             // - is_driving is derived from speed; a power-state signal (POWER_CAN_STATUS,
@@ -117,7 +138,8 @@ pub async fn handle_can_frame(frame: CanFrame) {
             // - is_rear_window_defrost_on (There is a Rear_Defrost_State in BO 593 that could be used)
             // - battery_range_km
             // - time_remaining_minutes
-            // - are_hazard_lights_on
+            // - charge_port_state while plugged in or charging (CHARGE_PORT_DOOR only reports
+            //   the door)
 
             // TODO: Unmapped AdvancedState fields:
             // - battery_voltage
@@ -156,4 +178,52 @@ pub(crate) async fn send_can_request(id: StandardId, data: &[u8]) {
         dlc,
     })
     .await;
+}
+
+// ── Unit Tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Payloads are real frames from EV6 CAN logs.
+
+    #[test]
+    fn charge_port_door_maps_open_and_closed() {
+        let open = m_can::ChargePortDoor::try_from(&[0xD3, 0xE0, 0x00, 0x02, 0x52, 0x00, 0x00, 0x00][..]).ok().unwrap();
+        let closed = m_can::ChargePortDoor::try_from(&[0xB2, 0x90, 0x00, 0x02, 0x54, 0x00, 0x00, 0x00][..]).ok().unwrap();
+        assert_eq!(charge_port_state(open.port_open()), Some(ChargePortState::Open));
+        assert_eq!(charge_port_state(closed.port_open()), Some(ChargePortState::Closed));
+    }
+
+    #[test]
+    fn charge_port_door_ignores_unknown_values() {
+        assert_eq!(charge_port_state(m_can::ChargePortDoorPortOpen::_Other(0)), None);
+    }
+
+    #[test]
+    fn front_windows_decode_and_rear_windows_are_not_available() {
+        let closed = m_can::Bcm15200ms::try_from(&[0xF5, 0xE0, 0x00, 0xFF, 0x00, 0x3F, 0x05, 0x00][..]).ok().unwrap();
+        assert_eq!(window_open(closed.window_drvr_sd_wdw_detail_opn_sta_raw()), Some(false));
+        assert_eq!(window_open(closed.window_asst_sd_wdw_detail_opn_sta_raw()), Some(false));
+        assert_eq!(window_open(closed.window_rr_lft_wdw_detail_opn_sta_raw()), None);
+        assert_eq!(window_open(closed.window_rr_rt_wdw_detail_opn_sta_raw()), None);
+
+        let driver_open = m_can::Bcm15200ms::try_from(&[0x76, 0x20, 0x01, 0xFF, 0x03, 0x3F, 0x05, 0x00][..]).ok().unwrap();
+        assert_eq!(window_open(driver_open.window_drvr_sd_wdw_detail_opn_sta_raw()), Some(true));
+        assert_eq!(window_open(driver_open.window_asst_sd_wdw_detail_opn_sta_raw()), Some(false));
+
+        let passenger_open = m_can::Bcm15200ms::try_from(&[0x37, 0xC0, 0x10, 0xFF, 0x18, 0x3F, 0x05, 0x00][..]).ok().unwrap();
+        assert_eq!(window_open(passenger_open.window_drvr_sd_wdw_detail_opn_sta_raw()), Some(false));
+        assert_eq!(window_open(passenger_open.window_asst_sd_wdw_detail_opn_sta_raw()), Some(true));
+    }
+
+    #[test]
+    fn blinkers_hazard_bit() {
+        let on = m_can::Blinkers::try_from(&[0xCD, 0x65, 0x50, 0x04, 0x00, 0x00, 0x00, 0x00][..]).ok().unwrap();
+        let left_only = m_can::Blinkers::try_from(&[0xF0, 0x01, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00][..]).ok().unwrap();
+        assert!(on.hazard_on());
+        assert!(!left_only.hazard_on());
+        assert!(left_only.left_stalk());
+    }
 }

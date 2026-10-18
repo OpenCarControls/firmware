@@ -86,4 +86,6 @@ Two layers:
 ## E-GMP vehicle state
 `EgmpCarState` fields are all `None` until the matching CAN frame has been decoded, and `None` fields are omitted from the published proto, so the app never sees invented values. The debug simulation seeds its own defaults when it is switched on.
 
-`is_driving` is derived from `speed > 0`. Signals whose DBC mapping is not yet verified on a car (climate target temperature, window states, headlights) are only decoded and filtered when the `untested-signals` cargo feature of `egmp-controller` is on; it is off by default. xtask does not currently forward this feature, so enable it by hand in `cars/egmp/Cargo.toml` while verifying a mapping.
+`is_driving` is derived from `speed > 0`. The charge port state comes from the door signal only (`CHARGE_PORT_DOOR`), so it is Open or Closed; plugged-in and charging states aren't decoded yet, and values the DBC doesn't define leave the state unchanged. Window states come from `BCM_15_200ms`; the EV6 reports its rear windows as not available there, so those fields stay `None`.
+
+The DBC comments say which signals were checked against CAN logs or a live car. Signals whose mapping is not yet verified (climate target temperature) are only decoded and filtered when the `untested-signals` cargo feature of `egmp-controller` is on; it is off by default. xtask does not currently forward this feature, so enable it by hand in `cars/egmp/Cargo.toml` while verifying a mapping.
