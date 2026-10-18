@@ -19,7 +19,7 @@ Vehicles queue frames with `core_interface::send_can_frame(frame).await`, which 
 ## Filter strategy
 Hardware filters are set to accept-all where driver constraints apply (TWAI on ESP). All matching is done in software inside the driver loop against the vehicle-supplied filter list. MCP2515 also programs hardware RX masks/filters from the same list as a first-pass optimisation.
 
-**Known MCP2515 issue (pre-existing):** the MCP2515 only accepts writes to its mask/filter registers in Configuration mode, but `init_mcp2515` and the debug mask switching write them in an operating mode, so they have no effect and the chip effectively accepts all frames (the software filter does the real work). Fixing this naively would break vehicles with more than 6 filters per bus (the chip has 6 filter slots and egmp uses 14), so it needs a fallback to accept-all in that case.
+**Known MCP2515 issue (pre-existing):** the MCP2515 only accepts writes to its mask/filter registers in Configuration mode, but `init_mcp2515` and the debug mask switching write them in an operating mode, so they have no effect and the chip effectively accepts all frames (the software filter does the real work). Fixing this naively would break vehicles with more than 6 filters per bus (the chip has 6 filter slots and egmp uses 17), so it needs a fallback to accept-all in that case.
 
 ## ESP two-core split
 
@@ -86,6 +86,6 @@ Two layers:
 ## E-GMP vehicle state
 `EgmpCarState` fields are all `None` until the matching CAN frame has been decoded, and `None` fields are omitted from the published proto, so the app never sees invented values. The debug simulation seeds its own defaults when it is switched on.
 
-`is_driving` is derived from `speed > 0`. The charge port state comes from the door signal only (`CHARGE_PORT_DOOR`), so it is Open or Closed; plugged-in and charging states aren't decoded yet, and values the DBC doesn't define leave the state unchanged. Window states come from `BCM_15_200ms`; the EV6 reports its rear windows as not available there, so those fields stay `None`.
+`is_driving` is derived from `speed > 0`. The charge port state combines four frames: the door (`CHARGE_PORT_DOOR`), the plug (`CHARGE_INLET`), whether energy is flowing (`CHARGING_STATUS`) and the charger type with the DC sequence stage (`CHARGER_SESSION`). With no cable it is the door state. E-GMP cars try DC first at every plug-in, so the charger type is only taken once it is certain (AC reported, or a DC stage an AC charger never reaches) and kept until unplug; until then the state is `Connected`, which lasts about 7 s on an AC charger. Error, DC negotiating and V2L states aren't decoded. Window states come from `BCM_15_200ms`; the EV6 reports its rear windows as not available there, so those fields stay `None`.
 
 The DBC comments say which signals were checked against CAN logs or a live car. Signals whose mapping is not yet verified (climate target temperature) are only decoded and filtered when the `untested-signals` cargo feature of `egmp-controller` is on; it is off by default. xtask does not currently forward this feature, so enable it by hand in `cars/egmp/Cargo.toml` while verifying a mapping.

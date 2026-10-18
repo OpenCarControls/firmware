@@ -32,6 +32,9 @@ pub const CAN_FILTERS: &[CanFilter] = &[
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1124).unwrap()), mask: 0x7FF }, // BCM15200ms
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1050).unwrap()), mask: 0x7FF }, // BCM07200ms
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1043).unwrap()), mask: 0x7FF }, // BLINKERS
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(780).unwrap()), mask: 0x7FF },  // CHARGE_INLET
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(806).unwrap()), mask: 0x7FF },  // CHARGING_STATUS
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(413).unwrap()), mask: 0x7FF },  // CHARGER_SESSION
 ];
 
 // ── Vehicle Tasks ─────────────────────────────────────────────────────────────
@@ -40,13 +43,97 @@ use crate::{CAR_STATE, STATE_CHANGED};
 use crate::proto::basic_state::ChargePortState;
 
 /// `None` for values the DBC doesn't define, so an unknown value never overwrites a known
-/// state. This message only reports the door; charging states come from elsewhere.
-fn charge_port_state(port: m_can::ChargePortDoorPortOpen) -> Option<ChargePortState> {
+/// state. CHARGE_PORT_DOOR only reports the door; `ChargeTracker` adds the cable.
+fn door_state(port: m_can::ChargePortDoorPortOpen) -> Option<ChargePortState> {
     match port {
         m_can::ChargePortDoorPortOpen::Open => Some(ChargePortState::Open),
         m_can::ChargePortDoorPortOpen::Closed => Some(ChargePortState::Closed),
         m_can::ChargePortDoorPortOpen::_Other(_) => None,
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Charger {
+    Ac,
+    Dc,
+}
+
+/// Combines the door, inlet, charging and charger-session frames into one charge port state.
+///
+/// E-GMP cars try DC first at every plug-in, so CHARGER_SESSION reports DC for the first
+/// seconds on an AC charger too. The charger type is only taken once it is certain (AC
+/// reported, or a DC sequence stage that an AC charger never reaches) and kept until unplug,
+/// because the stage moves on once a DC session ends. Until then the state is `Connected`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ChargeTracker {
+    door: Option<ChargePortState>,
+    plugged: Option<bool>,
+    charging: bool,
+    charger: Option<Charger>,
+}
+
+impl ChargeTracker {
+    const fn new() -> Self {
+        Self { door: None, plugged: None, charging: false, charger: None }
+    }
+
+    fn on_door(&mut self, port: m_can::ChargePortDoorPortOpen) {
+        if let Some(door) = door_state(port) {
+            self.door = Some(door);
+        }
+    }
+
+    fn on_inlet(&mut self, plugged: bool) {
+        // A new plug-in starts a new session; an unplug ends it.
+        if self.plugged != Some(plugged) {
+            self.charger = None;
+            self.charging = false;
+        }
+        self.plugged = Some(plugged);
+    }
+
+    fn on_charging(&mut self, charging: bool) {
+        self.charging = charging;
+    }
+
+    fn on_session(&mut self, charger_type: m_can::ChargerSessionChargerType, dc_stage: u8) {
+        if self.plugged == Some(false) {
+            return;
+        }
+        match charger_type {
+            m_can::ChargerSessionChargerType::Ac => self.charger = Some(Charger::Ac),
+            m_can::ChargerSessionChargerType::Dc if (2..=6).contains(&dc_stage) => self.charger = Some(Charger::Dc),
+            _ => {}
+        }
+    }
+
+    fn state(&self) -> Option<ChargePortState> {
+        if self.plugged != Some(true) {
+            return self.door;
+        }
+        Some(match (self.charger, self.charging) {
+            (None, _) => ChargePortState::Connected,
+            (Some(Charger::Ac), false) => ChargePortState::AcConnected,
+            (Some(Charger::Ac), true) => ChargePortState::AcCharging,
+            (Some(Charger::Dc), false) => ChargePortState::DcConnected,
+            (Some(Charger::Dc), true) => ChargePortState::DcCharging,
+        })
+    }
+}
+
+static CHARGE_TRACKER: embassy_sync::blocking_mutex::Mutex<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    core::cell::Cell<ChargeTracker>,
+> = embassy_sync::blocking_mutex::Mutex::new(core::cell::Cell::new(ChargeTracker::new()));
+
+/// Applies `update` to the shared tracker and returns the resulting charge port state.
+fn track_charge(update: impl FnOnce(&mut ChargeTracker)) -> Option<ChargePortState> {
+    CHARGE_TRACKER.lock(|cell| {
+        let mut tracker = cell.get();
+        update(&mut tracker);
+        cell.set(tracker);
+        tracker.state()
+    })
 }
 
 /// Maps a `Window_*DetailOpnSta` raw value from BCM_15_200ms: 0 is closed, 1 to 3 are
@@ -84,7 +171,22 @@ pub async fn handle_can_frame(frame: CanFrame) {
                 state.is_driving = Some(speed > 0);
             }
             m_can::Messages::ChargePortDoor(m) => {
-                if let Some(port) = charge_port_state(m.port_open()) {
+                if let Some(port) = track_charge(|t| t.on_door(m.port_open())) {
+                    state.charge_port_state = Some(port);
+                }
+            }
+            m_can::Messages::ChargeInlet(m) => {
+                if let Some(port) = track_charge(|t| t.on_inlet(m.plug_connected())) {
+                    state.charge_port_state = Some(port);
+                }
+            }
+            m_can::Messages::ChargingStatus(m) => {
+                if let Some(port) = track_charge(|t| t.on_charging(m.charging())) {
+                    state.charge_port_state = Some(port);
+                }
+            }
+            m_can::Messages::ChargerSession(m) => {
+                if let Some(port) = track_charge(|t| t.on_session(m.charger_type(), m.dc_sequence_stage())) {
                     state.charge_port_state = Some(port);
                 }
             }
@@ -138,8 +240,7 @@ pub async fn handle_can_frame(frame: CanFrame) {
             // - is_rear_window_defrost_on (There is a Rear_Defrost_State in BO 593 that could be used)
             // - battery_range_km
             // - time_remaining_minutes
-            // - charge_port_state while plugged in or charging (CHARGE_PORT_DOOR only reports
-            //   the door)
+            // - charge_port_state errors, DC negotiating and V2L
 
             // TODO: Unmapped AdvancedState fields:
             // - battery_voltage
@@ -192,13 +293,101 @@ mod tests {
     fn charge_port_door_maps_open_and_closed() {
         let open = m_can::ChargePortDoor::try_from(&[0xD3, 0xE0, 0x00, 0x02, 0x52, 0x00, 0x00, 0x00][..]).ok().unwrap();
         let closed = m_can::ChargePortDoor::try_from(&[0xB2, 0x90, 0x00, 0x02, 0x54, 0x00, 0x00, 0x00][..]).ok().unwrap();
-        assert_eq!(charge_port_state(open.port_open()), Some(ChargePortState::Open));
-        assert_eq!(charge_port_state(closed.port_open()), Some(ChargePortState::Closed));
+        assert_eq!(door_state(open.port_open()), Some(ChargePortState::Open));
+        assert_eq!(door_state(closed.port_open()), Some(ChargePortState::Closed));
     }
 
     #[test]
     fn charge_port_door_ignores_unknown_values() {
-        assert_eq!(charge_port_state(m_can::ChargePortDoorPortOpen::_Other(0)), None);
+        assert_eq!(door_state(m_can::ChargePortDoorPortOpen::_Other(0)), None);
+    }
+
+    fn inlet(data: [u8; 8]) -> bool {
+        m_can::ChargeInlet::try_from(&data[..]).ok().unwrap().plug_connected()
+    }
+
+    fn session(t: &mut ChargeTracker, data: [u8; 8]) {
+        let m = m_can::ChargerSession::try_from(&data[..]).ok().unwrap();
+        t.on_session(m.charger_type(), m.dc_sequence_stage());
+    }
+
+    fn charging(data: [u8; 8]) -> bool {
+        m_can::ChargingStatus::try_from(&data[..]).ok().unwrap().charging()
+    }
+
+    /// The L2 start capture: the car reports DC first, gives up on it, then reports AC.
+    #[test]
+    fn ac_charger_shows_connected_until_the_car_reports_ac() {
+        let mut t = ChargeTracker::new();
+        t.on_door(m_can::ChargePortDoorPortOpen::Open);
+        t.on_inlet(inlet([0x00, 0x00, 0x0E, 0x00, 0x2C, 0x00, 0xA0, 0x0F]));
+        assert_eq!(t.state(), Some(ChargePortState::Open));
+
+        t.on_inlet(inlet([0x80, 0x1C, 0xB4, 0x00, 0x0F, 0x01, 0xA0, 0x0F]));
+        assert_eq!(t.state(), Some(ChargePortState::Connected));
+        for frame in [
+            [0x00, 0x12, 0x02, 0x03, 0x00, 0x00, 0x00, 0x00],
+            [0x00, 0x12, 0x02, 0x14, 0x00, 0x00, 0x00, 0x00],
+            [0x00, 0x12, 0x02, 0x94, 0x00, 0x00, 0x00, 0x30],
+            [0x00, 0x12, 0x02, 0xB5, 0x00, 0x00, 0x00, 0x50],
+            [0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00],
+        ] {
+            session(&mut t, frame);
+            assert_eq!(t.state(), Some(ChargePortState::Connected));
+        }
+
+        session(&mut t, [0x00, 0x11, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(t.state(), Some(ChargePortState::AcConnected));
+        t.on_charging(charging([0x29, 0x00, 0x00, 0x14, 0x01, 0x00, 0x72, 0x01]));
+        assert_eq!(t.state(), Some(ChargePortState::AcCharging));
+    }
+
+    /// log_21: a DC session from plug-in to unplug.
+    #[test]
+    fn dc_charger_is_kept_until_unplug() {
+        let mut t = ChargeTracker::new();
+        t.on_door(m_can::ChargePortDoorPortOpen::Open);
+        t.on_inlet(true);
+        session(&mut t, [0x00, 0x12, 0x02, 0x14, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(t.state(), Some(ChargePortState::Connected));
+        session(&mut t, [0x00, 0x12, 0x02, 0x24, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(t.state(), Some(ChargePortState::DcConnected));
+
+        t.on_charging(charging([0xB6, 0x10, 0x00, 0x10, 0x01, 0x00, 0x00, 0x00]));
+        session(&mut t, [0x00, 0x12, 0x02, 0x64, 0x00, 0x00, 0x00, 0x08]);
+        assert_eq!(t.state(), Some(ChargePortState::DcCharging));
+
+        // Charging stops; the ending stages must not drop the charger type.
+        t.on_charging(charging([0x92, 0x10, 0x00, 0x10, 0x10, 0x00, 0x00, 0x00]));
+        session(&mut t, [0x00, 0x12, 0x02, 0xA4, 0x00, 0x00, 0x00, 0x58]);
+        assert_eq!(t.state(), Some(ChargePortState::DcConnected));
+
+        t.on_inlet(false);
+        assert_eq!(t.state(), Some(ChargePortState::Open));
+        t.on_door(m_can::ChargePortDoorPortOpen::Closed);
+        assert_eq!(t.state(), Some(ChargePortState::Closed));
+    }
+
+    #[test]
+    fn a_new_plug_in_forgets_the_last_charger() {
+        let mut t = ChargeTracker::new();
+        t.on_inlet(true);
+        session(&mut t, [0x00, 0x11, 0x01, 0x04, 0x02, 0x00, 0x00, 0x00]);
+        assert_eq!(t.state(), Some(ChargePortState::AcConnected));
+
+        t.on_inlet(false);
+        // A late session frame after unplug must not carry over to the next plug-in.
+        session(&mut t, [0x00, 0x11, 0x01, 0x04, 0x02, 0x00, 0x00, 0x00]);
+        t.on_inlet(true);
+        assert_eq!(t.state(), Some(ChargePortState::Connected));
+    }
+
+    #[test]
+    fn unknown_inlet_state_falls_back_to_the_door() {
+        let mut t = ChargeTracker::new();
+        assert_eq!(t.state(), None);
+        t.on_door(m_can::ChargePortDoorPortOpen::Closed);
+        assert_eq!(t.state(), Some(ChargePortState::Closed));
     }
 
     #[test]
