@@ -19,7 +19,7 @@ Vehicles queue frames with `core_interface::send_can_frame(frame).await`, which 
 ## Filter strategy
 Hardware filters are set to accept-all where driver constraints apply (TWAI on ESP). All matching is done in software inside the driver loop against the vehicle-supplied filter list. MCP2515 also programs hardware RX masks/filters from the same list as a first-pass optimisation.
 
-**Known MCP2515 issue (pre-existing):** the MCP2515 only accepts writes to its mask/filter registers in Configuration mode, but `init_mcp2515` and the debug mask switching write them in an operating mode, so they have no effect and the chip effectively accepts all frames (the software filter does the real work). Fixing this naively would break vehicles with more than 6 filters per bus (the chip has 6 filter slots and egmp uses 20), so it needs a fallback to accept-all in that case.
+**Known MCP2515 issue (pre-existing):** the MCP2515 only accepts writes to its mask/filter registers in Configuration mode, but `init_mcp2515` and the debug mask switching write them in an operating mode, so they have no effect and the chip effectively accepts all frames (the software filter does the real work). Fixing this naively would break vehicles with more than 6 filters per bus (the chip has 6 filter slots and egmp uses 21), so it needs a fallback to accept-all in that case.
 
 ## ESP two-core split
 
@@ -92,4 +92,4 @@ Two layers:
 
 `battery_range_km` is the range the cluster shows (`CLUSTER_RANGE`), which is for the active drive mode only; the car doesn't send the other modes' ranges. `time_remaining_minutes` comes from `CHARGE_TIME_ESTIMATE` (time to the charge limit) and is only taken while a DC charger is plugged in: the car sends that estimate all the time, also driving, and its units on AC are not confirmed yet. Window states come from `BCM_15_200ms`; the EV6 reports its rear windows as not available there, so those fields stay `None`.
 
-The DBC comments say which signals were checked against CAN logs or a live car. Signals whose mapping is not yet verified (climate target temperature) are only decoded and filtered when the `untested-signals` cargo feature of `egmp-controller` is on; it is off by default. xtask does not currently forward this feature, so enable it by hand in `cars/egmp/Cargo.toml` while verifying a mapping.
+Only signals checked on a real car are decoded; the DBC comments say how each was checked (CAN logs with timed notes, or live). Climate on/off, windshield defog and the target temperature come from the climate controller's `DATC_*` messages and `CLIMATE_TEMPERATURE`, the steering wheel heater from `ICU_08_200ms`. Values that mean "not available" (car off) leave the last known state, so the target temperature doesn't drop to the OFF value.

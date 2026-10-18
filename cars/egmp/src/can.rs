@@ -13,9 +13,8 @@ use core_interface::{CAN_RX_CHANNEL, CanFilter, CanFrame};
 
 // ── CAN Configuration ─────────────────────────────────────────────────────────
 
-// Signals whose DBC mapping has not been verified on a real car are only decoded when the
-// `untested-signals` feature is on; otherwise their state fields stay `None` and are not
-// published to the app.
+// Only signals checked on a real car are decoded (the DBC comments say how each was checked),
+// so the app never gets a guessed value.
 pub const CAN_FILTERS: &[CanFilter] = &[
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1041).unwrap()), mask: 0x7FF }, // BODY_STATUS
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(428).unwrap()), mask: 0x7FF },  // CLUSTER_INFO428
@@ -24,10 +23,10 @@ pub const CAN_FILTERS: &[CanFilter] = &[
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(764).unwrap()), mask: 0x7FF },  // BATTERY_INFO764
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(550).unwrap()), mask: 0x7FF },  // AMBIENT_TEMPERATURE
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(551).unwrap()), mask: 0x7FF },  // ODOMETER
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(795).unwrap()), mask: 0x7FF },  // CLIMATE_STATUS
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(685).unwrap()), mask: 0x7FF },  // BMS_PRECOND_STATUS
-    #[cfg(feature = "untested-signals")]
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(896).unwrap()), mask: 0x7FF },  // CLIMATE_TEMPERATURE
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(899).unwrap()), mask: 0x7FF },  // DATC_06_200ms
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1048).unwrap()), mask: 0x7FF }, // ICU_08_200ms
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(782).unwrap()), mask: 0x7FF },  // CHARGING_POWER
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1124).unwrap()), mask: 0x7FF }, // BCM15200ms
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1050).unwrap()), mask: 0x7FF }, // BCM07200ms
@@ -257,9 +256,25 @@ pub async fn handle_can_frame(frame: CanFrame) {
             m_can::Messages::Odometer(m) => {
                 state.odometer = Some(m.odometer() as u32);
             }
-            m_can::Messages::ClimateStatus(m) => {
-                state.is_steering_wheel_heater_on = Some(m.steering_wheel_heating_state());
-                state.is_climate_on = Some(m.climate_ac_state());
+            m_can::Messages::Datc06200ms(m) => {
+                // Not_Available with the car off: keep the last known state.
+                match m.datc_op_sta() {
+                    m_can::Datc06200msDatcOpSta::On => state.is_climate_on = Some(true),
+                    m_can::Datc06200msDatcOpSta::Off => state.is_climate_on = Some(false),
+                    _ => {}
+                }
+                match m.datc_fr_dfg_sta() {
+                    m_can::Datc06200msDatcFrDfgSta::On => state.is_windshield_defrost_on = Some(true),
+                    m_can::Datc06200msDatcFrDfgSta::Off => state.is_windshield_defrost_on = Some(false),
+                    _ => {}
+                }
+            }
+            m_can::Messages::Icu08200ms(m) => {
+                match m.hsws_sys_wrng_sta_icu() {
+                    m_can::Icu08200msHswsSysWrngStaIcu::On => state.is_steering_wheel_heater_on = Some(true),
+                    m_can::Icu08200msHswsSysWrngStaIcu::Off => state.is_steering_wheel_heater_on = Some(false),
+                    _ => {}
+                }
             }
             m_can::Messages::BmsPrecondStatus(m) => {
                 state.is_preconditioning_enabled = Some(
@@ -267,10 +282,11 @@ pub async fn handle_can_frame(frame: CanFrame) {
                     m.battery_precond_state() == m_can::BmsPrecondStatusBatteryPrecondState::Preparing
                 );
             }
-            #[cfg(feature = "untested-signals")]
             m_can::Messages::ClimateTemperature(m) => {
-                // UNTESTED MAPPING:
-                state.target_climate_temperature = Some(m.driver_temp_c_raw() as f32);
+                // OFF is also sent with the car off; keep the last set temperature then.
+                if let m_can::ClimateTemperatureDriverTempC::_Other(celsius) = m.driver_temp_c() {
+                    state.target_climate_temperature = Some(celsius);
+                }
             }
             m_can::Messages::ClusterRange(m) => {
                 // The range for the active drive mode, as the cluster shows it.
@@ -302,8 +318,8 @@ pub async fn handle_can_frame(frame: CanFrame) {
             // - is_driving is derived from speed; a power-state signal (POWER_CAN_STATUS,
             //   BO 1077) tells "car on" apart from "moving" if that distinction is needed
             // - indoor_temperature
-            // - is_windshield_defrost_on
-            // - is_rear_window_defrost_on (There is a Rear_Defrost_State in BO 593 that could be used)
+            // - is_rear_window_defrost_on (no state found on this bus; Rear_Defrost_State in BO 593
+            //   is noise)
             // - time_remaining_minutes on AC (CHARGE_TIME_ESTIMATE units unclear there) and
             //   when driving (time to empty)
             // - charge_port_state errors, DC negotiating and V2L
@@ -540,6 +556,31 @@ mod tests {
         let state = embassy_futures::block_on(CAR_STATE.lock()).clone();
         assert_eq!(state.charge_port_state, Some(ChargePortState::DcCharging));
         assert_eq!(state.time_remaining_minutes, Some(33));
+    }
+
+    /// log_10 and the idle captures.
+    #[test]
+    fn climate_state() {
+        // Climate on, windshield defog on (log_10 at 0:39).
+        feed(899, [0xF1, 0xF8, 0x03, 0x10, 0x09, 0x00, 0x40, 0x00]);
+        // Steering wheel heater on (log_10 at 2:48).
+        feed(1048, [0x07, 0xC4, 0x00, 0x00, 0x12, 0x0C, 0x00, 0x00]);
+        // Target 19 C (log_10 at 0:30).
+        feed(896, [0xCC, 0x62, 0x11, 0x0A, 0x0A, 0x0A, 0x0A, 0x01]);
+        let state = embassy_futures::block_on(CAR_STATE.lock()).clone();
+        assert_eq!(state.is_climate_on, Some(true));
+        assert_eq!(state.is_windshield_defrost_on, Some(true));
+        assert_eq!(state.is_steering_wheel_heater_on, Some(true));
+        assert_eq!(state.target_climate_temperature, Some(19.0));
+
+        // Parked with the climate off, then the car off while charging: the driver zone reads
+        // OFF, which must not become 14 C.
+        feed(899, [0x28, 0x0C, 0x03, 0x00, 0x02, 0x00, 0x40, 0x00]);
+        feed(896, [0xE2, 0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        let state = embassy_futures::block_on(CAR_STATE.lock()).clone();
+        assert_eq!(state.is_climate_on, Some(false));
+        assert_eq!(state.is_windshield_defrost_on, Some(false));
+        assert_eq!(state.target_climate_temperature, Some(19.0));
     }
 
     #[test]
