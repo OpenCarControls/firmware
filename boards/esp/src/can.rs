@@ -128,6 +128,8 @@ mod hardware {
     pub async fn run_twai_loop(mut driver: TwaiDriver, bus_id: u8, filters: &'static [CanFilter]) {
         let mut read_only_changed = core_interface::can_read_only_receiver()
             .expect("more CAN bus drivers than MAX_CAN_BUSES");
+        let mut stats = TwaiRxStats::new();
+        let mut next_report = embassy_time::Instant::now() + RX_STATS_INTERVAL;
         loop {
             let listen_only = core_interface::is_can_read_only();
             let mode = if listen_only { TwaiMode::ListenOnly } else { TwaiMode::Normal };
@@ -137,7 +139,16 @@ mod hardware {
                 if listen_only { "listen-only" } else { "normal" }
             );
             let mut twai = configure_twai(&mut driver, mode).into_async().start();
-            run_twai_session(&mut twai, bus_id, filters, listen_only, &mut read_only_changed).await;
+            run_twai_session(
+                &mut twai,
+                bus_id,
+                filters,
+                listen_only,
+                &mut read_only_changed,
+                &mut stats,
+                &mut next_report,
+            )
+            .await;
             // Dropping `twai` resets the peripheral before it is reconfigured.
         }
     }
@@ -148,17 +159,20 @@ mod hardware {
     /// RX is interrupt-driven: the esp-hal TWAI ISR moves frames from the small hardware
     /// FIFO into a 32-frame software queue, so frames are not lost while the executor is
     /// busy with WiFi/BLE work (which matters on single-core chips like the ESP32-C3).
-    /// The loop sleeps until a frame arrives, a TX frame is queued for this bus, or the
-    /// read-only flag changes; there is no polling timer.
+    /// The loop sleeps until a frame arrives, a TX frame is queued for this bus, the
+    /// read-only flag changes, or the next RX stats report is due.
+    #[allow(clippy::too_many_arguments)]
     async fn run_twai_session(
         twai: &mut Twai<'_, esp_hal::Async>,
         bus_id: u8,
         filters: &'static [CanFilter],
         listen_only: bool,
         read_only_changed: &mut CanReadOnlyReceiver,
+        stats: &mut TwaiRxStats,
+        next_report: &mut embassy_time::Instant,
     ) {
-        use embassy_futures::select::{Either3, select3};
-        use embassy_time::{Duration, Timer};
+        use embassy_futures::select::{Either4, select4};
+        use embassy_time::{Duration, Instant, Timer};
 
         let tx_channel = core_interface::can_tx_channel(bus_id)
             .expect("CAN bus id exceeds MAX_CAN_BUSES");
@@ -169,39 +183,49 @@ mod hardware {
             }
 
             let mut pending_tx = None;
-            match select3(
+            match select4(
                 twai.receive_async(),
                 tx_channel.receive(),
                 read_only_changed.changed(),
+                Timer::at(*next_report),
             )
             .await
             {
-                Either3::First(Ok(frame)) => {
+                Either4::First(Ok(frame)) => {
                     crate::status_leds::pulse_can();
                     let core_frame = to_core_frame(frame, bus_id);
                     try_send_can_debug_capture(bus_id, &core_frame);
-                    if core_interface::passes_filter(&core_frame, filters) {
+                    let matched = core_interface::passes_filter(&core_frame, filters);
+                    stats.record_frame(matched);
+                    if matched {
                         CAN_RX_CHANNEL.sender().send(core_frame).await;
                     }
                 }
-                Either3::First(Err(EspTwaiError::BusOff)) => {
+                Either4::First(Err(EspTwaiError::BusOff)) => {
+                    stats.record_bus_off();
                     log::warn!("CAN bus {}: TWAI bus-off, restarting controller in 1s", bus_id);
                     Timer::after(Duration::from_secs(1)).await;
                     return;
                 }
-                Either3::First(Err(EspTwaiError::EmbeddedHAL(twai::ErrorKind::Overrun))) => {
+                Either4::First(Err(EspTwaiError::EmbeddedHAL(twai::ErrorKind::Overrun))) => {
+                    stats.record_overrun();
                     log::warn!("CAN bus {}: TWAI RX overrun, frames dropped", bus_id);
                     twai.clear_receive_fifo();
                 }
-                Either3::First(Err(e)) => {
+                Either4::First(Err(e)) => {
+                    stats.record_error(e);
                     log::debug!("CAN bus {}: TWAI RX error: {:?}", bus_id, e);
                 }
-                Either3::Second(outbound) => pending_tx = Some(outbound),
+                Either4::Second(outbound) => pending_tx = Some(outbound),
                 // The flag is re-checked at the top of the loop.
-                Either3::Third(_) => {}
+                Either4::Third(_) => {}
+                Either4::Fourth(()) => {
+                    log_rx_stats(bus_id, listen_only, &stats.take());
+                    *next_report = Instant::now() + RX_STATS_INTERVAL;
+                }
             }
 
-            // `select3` polls RX first, so a busy bus could starve the TX arm; drain TX
+            // `select4` polls RX first, so a busy bus could starve the TX arm; drain TX
             // here every iteration regardless of which arm fired.
             while let Some(outbound) = pending_tx.take().or_else(|| tx_channel.try_receive().ok()) {
                 // Drop silently when in read-only mode; do not transmit on the bus.
@@ -211,6 +235,28 @@ mod hardware {
                     transmit_twai(twai, bus_id, &outbound).await;
                 }
             }
+        }
+    }
+
+    /// How often each CAN bus logs its RX counters, including when nothing was received.
+    const RX_STATS_INTERVAL: embassy_time::Duration = embassy_time::Duration::from_secs(5);
+
+    type TwaiRxStats = crate::can::RxStats<EspTwaiError>;
+
+    /// Logs one RX stats window. A silent bus logs zeros, so "no data" is visible on the
+    /// serial console; errors without frames usually mean a wrong bitrate or wiring.
+    fn log_rx_stats(bus_id: u8, listen_only: bool, stats: &TwaiRxStats) {
+        let mode = if listen_only { "listen-only" } else { "normal" };
+        let secs = RX_STATS_INTERVAL.as_secs();
+        match stats.last_error {
+            Some(e) => log::info!(
+                "CAN bus {} ({}), last {}s: {} frames, {} matched filters, {} RX errors (last: {:?}), {} overruns, {} bus-offs",
+                bus_id, mode, secs, stats.received, stats.matched, stats.errors, e, stats.overruns, stats.bus_offs
+            ),
+            None => log::info!(
+                "CAN bus {} ({}), last {}s: {} frames, {} matched filters, 0 RX errors, {} overruns, {} bus-offs",
+                bus_id, mode, secs, stats.received, stats.matched, stats.overruns, stats.bus_offs
+            ),
         }
     }
 
@@ -447,6 +493,50 @@ mod hardware {
 #[cfg(feature = "hardware")]
 pub use hardware::*;
 
+/// RX counters behind the periodic CAN health log. `take` returns them and starts a fresh
+/// window, so each log line covers one reporting interval. `E` is the driver's error type.
+#[cfg_attr(not(feature = "hardware"), allow(dead_code))]
+#[derive(Debug, PartialEq)]
+pub(crate) struct RxStats<E> {
+    pub received: u32,
+    pub matched: u32,
+    pub errors: u32,
+    pub overruns: u32,
+    pub bus_offs: u32,
+    pub last_error: Option<E>,
+}
+
+#[cfg_attr(not(feature = "hardware"), allow(dead_code))]
+impl<E> RxStats<E> {
+    pub const fn new() -> Self {
+        Self { received: 0, matched: 0, errors: 0, overruns: 0, bus_offs: 0, last_error: None }
+    }
+
+    pub fn record_frame(&mut self, matched: bool) {
+        self.received = self.received.saturating_add(1);
+        if matched {
+            self.matched = self.matched.saturating_add(1);
+        }
+    }
+
+    pub fn record_error(&mut self, error: E) {
+        self.errors = self.errors.saturating_add(1);
+        self.last_error = Some(error);
+    }
+
+    pub fn record_overrun(&mut self) {
+        self.overruns = self.overruns.saturating_add(1);
+    }
+
+    pub fn record_bus_off(&mut self) {
+        self.bus_offs = self.bus_offs.saturating_add(1);
+    }
+
+    pub fn take(&mut self) -> Self {
+        core::mem::replace(self, Self::new())
+    }
+}
+
 /// Computes the two combined RX buffer masks required by the MCP2515 from a
 /// `CanFilter` slice for a specific `bus_id`.
 ///
@@ -532,6 +622,47 @@ mod tests {
         let (m0, m1) = compute_mcp_masks(&filters, 0);
         assert_eq!(m0, 0x700);
         assert_eq!(m1, 0x0F0);
+    }
+
+    #[test]
+    fn rx_stats_count_frames_and_errors() {
+        let mut stats = RxStats::<&str>::new();
+        stats.record_frame(true);
+        stats.record_frame(false);
+        stats.record_error("bit");
+        stats.record_error("stuff");
+        stats.record_overrun();
+        stats.record_bus_off();
+        assert_eq!(
+            stats,
+            RxStats {
+                received: 2,
+                matched: 1,
+                errors: 2,
+                overruns: 1,
+                bus_offs: 1,
+                last_error: Some("stuff"),
+            }
+        );
+    }
+
+    #[test]
+    fn rx_stats_take_starts_a_new_window() {
+        let mut stats = RxStats::<&str>::new();
+        stats.record_frame(true);
+        stats.record_error("bit");
+        let report = stats.take();
+        assert_eq!(report.received, 1);
+        assert_eq!(report.last_error, Some("bit"));
+        assert_eq!(stats, RxStats::new());
+    }
+
+    #[test]
+    fn rx_stats_saturate_instead_of_wrapping() {
+        let mut stats = RxStats::<&str>::new();
+        stats.received = u32::MAX;
+        stats.record_frame(false);
+        assert_eq!(stats.received, u32::MAX);
     }
 
     /// Minimal stand-in for a driver's frame type.
