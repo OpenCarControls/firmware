@@ -35,6 +35,7 @@ pub const CAN_FILTERS: &[CanFilter] = &[
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(780).unwrap()), mask: 0x7FF },  // CHARGE_INLET
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(806).unwrap()), mask: 0x7FF },  // CHARGING_STATUS
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(413).unwrap()), mask: 0x7FF },  // CHARGER_SESSION
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(567).unwrap()), mask: 0x7FF },  // BATTERY_INFO567
 ];
 
 // ── Vehicle Tasks ─────────────────────────────────────────────────────────────
@@ -126,6 +127,29 @@ static CHARGE_TRACKER: embassy_sync::blocking_mutex::Mutex<
     core::cell::Cell<ChargeTracker>,
 > = embassy_sync::blocking_mutex::Mutex::new(core::cell::Cell::new(ChargeTracker::new()));
 
+/// Battery power in watts from the voltage and current, positive when charging as the proto
+/// defines it. The car reports the current positive when discharging.
+fn battery_power_watt(voltage: f32, current: f32) -> i32 {
+    -(voltage * current) as i32
+}
+
+/// Last battery voltage and current, which come in separate messages.
+static BATTERY: embassy_sync::blocking_mutex::Mutex<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    core::cell::Cell<(Option<f32>, Option<f32>)>,
+> = embassy_sync::blocking_mutex::Mutex::new(core::cell::Cell::new((None, None)));
+
+/// Records a new voltage or current and returns the battery power once both are known.
+fn track_battery(voltage: Option<f32>, current: Option<f32>) -> Option<i32> {
+    BATTERY.lock(|cell| {
+        let (mut v, mut i) = cell.get();
+        v = voltage.or(v);
+        i = current.or(i);
+        cell.set((v, i));
+        Some(battery_power_watt(v?, i?))
+    })
+}
+
 /// Applies `update` to the shared tracker and returns the resulting charge port state.
 fn track_charge(update: impl FnOnce(&mut ChargeTracker)) -> Option<ChargePortState> {
     CHARGE_TRACKER.lock(|cell| {
@@ -195,6 +219,16 @@ pub async fn handle_can_frame(frame: CanFrame) {
             }
             m_can::Messages::BatteryInfo764(m) => {
                 state.battery_soc = Some(m.state_of_charge() as u32);
+                if let Some(power) = track_battery(None, Some(m.battery_current())) {
+                    state.instantaneous_power_watt = Some(power);
+                }
+            }
+            m_can::Messages::BatteryInfo567(m) => {
+                let voltage = m.battery_voltage();
+                state.battery_voltage = Some(voltage as u32);
+                if let Some(power) = track_battery(Some(voltage), None) {
+                    state.instantaneous_power_watt = Some(power);
+                }
             }
             m_can::Messages::AmbientTemperature(m) => {
                 state.outdoor_temperature = Some(m.outdoor_temperature() as f32);
@@ -243,8 +277,6 @@ pub async fn handle_can_frame(frame: CanFrame) {
             // - charge_port_state errors, DC negotiating and V2L
 
             // TODO: Unmapped AdvancedState fields:
-            // - battery_voltage
-            // - instantaneous_power_watt
             // - battery_minimum_temperature
             // - battery_maximum_temperature
             // - gear (BCM_GearPosPSta in BO 1058 is unverified and might just be the parking pawl)
@@ -405,6 +437,22 @@ mod tests {
         let passenger_open = m_can::Bcm15200ms::try_from(&[0x37, 0xC0, 0x10, 0xFF, 0x18, 0x3F, 0x05, 0x00][..]).ok().unwrap();
         assert_eq!(window_open(passenger_open.window_drvr_sd_wdw_detail_opn_sta_raw()), Some(false));
         assert_eq!(window_open(passenger_open.window_asst_sd_wdw_detail_opn_sta_raw()), Some(true));
+    }
+
+    #[test]
+    fn battery_voltage_current_and_power() {
+        // log_15 at 1:43.6, a hard launch: discharging.
+        let v = m_can::BatteryInfo567::try_from(&[0x00, 0x15, 0x65, 0x00, 0x00, 0x07, 0x1B, 0x00][..]).ok().unwrap();
+        let i = m_can::BatteryInfo764::try_from(&[0xBC, 0x07, 0x18, 0x1A, 0x00, 0x00, 0x8D, 0x63][..]).ok().unwrap();
+        assert!((v.battery_voltage() - 691.9).abs() < 0.05);
+        assert!((i.battery_current() - 198.0).abs() < 0.05);
+        assert!((battery_power_watt(v.battery_voltage(), i.battery_current()) + 136_996).abs() <= 1);
+
+        // log_21 at 3:30, DC charging at 177-178 kW: negative current, positive power.
+        let v = m_can::BatteryInfo567::try_from(&[0x00, 0x25, 0x63, 0x00, 0x00, 0x75, 0x1D, 0x00][..]).ok().unwrap();
+        let i = m_can::BatteryInfo764::try_from(&[0xC9, 0xF6, 0x1B, 0x1D, 0x00, 0x00, 0x8C, 0x61][..]).ok().unwrap();
+        assert!((i.battery_current() + 235.9).abs() < 0.05);
+        assert!((battery_power_watt(v.battery_voltage(), i.battery_current()) - 177_892).abs() <= 1);
     }
 
     #[test]
