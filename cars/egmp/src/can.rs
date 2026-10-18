@@ -36,6 +36,8 @@ pub const CAN_FILTERS: &[CanFilter] = &[
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(806).unwrap()), mask: 0x7FF },  // CHARGING_STATUS
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(413).unwrap()), mask: 0x7FF },  // CHARGER_SESSION
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(567).unwrap()), mask: 0x7FF },  // BATTERY_INFO567
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(695).unwrap()), mask: 0x7FF },  // CLUSTER_RANGE
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(818).unwrap()), mask: 0x7FF },  // CHARGE_TIME_ESTIMATE
 ];
 
 // ── Vehicle Tasks ─────────────────────────────────────────────────────────────
@@ -138,6 +140,12 @@ fn battery_power_watt(voltage: f32, current: f32) -> i32 {
 /// charger supplies. Clamped at 0, since a negative `power_flow_watt` means V2L.
 fn is_ac_charging(state: &crate::EgmpCarState) -> bool {
     state.charge_port_state == Some(ChargePortState::AcCharging)
+}
+
+/// CHARGE_TIME_ESTIMATE is sent all the time as the estimate for a DC fast charge, and its
+/// units are unclear on AC, so it is only taken while a DC charger is plugged in.
+fn is_dc_plugged_in(state: &crate::EgmpCarState) -> bool {
+    matches!(state.charge_port_state, Some(ChargePortState::DcConnected | ChargePortState::DcCharging))
 }
 
 /// Last battery voltage and current, which come in separate messages.
@@ -264,6 +272,15 @@ pub async fn handle_can_frame(frame: CanFrame) {
                 // UNTESTED MAPPING:
                 state.target_climate_temperature = Some(m.driver_temp_c_raw() as f32);
             }
+            m_can::Messages::ClusterRange(m) => {
+                // The range for the active drive mode, as the cluster shows it.
+                state.battery_range_km = Some(m.range() as u32);
+            }
+            m_can::Messages::ChargeTimeEstimate(m) => {
+                if is_dc_plugged_in(&state) {
+                    state.time_remaining_minutes = Some(m.charge_time_to_limit() as u32 / 60);
+                }
+            }
             m_can::Messages::ChargingPower(m) => {
                 if !is_ac_charging(&state) {
                     state.power_flow_watt = Some((m.charging_power_k_w() as f32 * 1000.0) as i32);
@@ -287,8 +304,8 @@ pub async fn handle_can_frame(frame: CanFrame) {
             // - indoor_temperature
             // - is_windshield_defrost_on
             // - is_rear_window_defrost_on (There is a Rear_Defrost_State in BO 593 that could be used)
-            // - battery_range_km
-            // - time_remaining_minutes
+            // - time_remaining_minutes on AC (CHARGE_TIME_ESTIMATE units unclear there) and
+            //   when driving (time to empty)
             // - charge_port_state errors, DC negotiating and V2L
 
             // TODO: Unmapped AdvancedState fields:
@@ -494,6 +511,35 @@ mod tests {
         let power = state.instantaneous_power_watt.unwrap();
         assert!((power - 2_176).abs() <= 1, "{power}");
         assert_eq!(state.power_flow_watt, Some(power));
+    }
+
+    #[test]
+    fn cluster_range() {
+        // log_03 at 18:13, in Sport: the cluster showed 263 km.
+        let m = m_can::ClusterRange::try_from(&[0x07, 0x01, 0x86, 0x24, 0x00, 0x04, 0x00, 0x00][..]).ok().unwrap();
+        assert_eq!(m.range(), 263);
+    }
+
+    /// log_23 at 1:51: 33 min to 100% on DC. The same frame is sent while driving or on AC,
+    /// where it must not be taken.
+    #[test]
+    fn charge_time_is_only_taken_on_dc() {
+        const ESTIMATE: [u8; 8] = [0xBC, 0x07, 0x58, 0x02, 0x00, 0x00, 0x00, 0x00];
+        feed(780, [0x00, 0x00, 0x0E, 0x00, 0x2C, 0x00, 0xA0, 0x0F]);
+        feed(780, [0x80, 0x1C, 0xB4, 0x00, 0x0F, 0x01, 0xA0, 0x0F]);
+        feed(413, [0x00, 0x11, 0x01, 0x04, 0x04, 0x00, 0x00, 0x00]);
+        let before = embassy_futures::block_on(CAR_STATE.lock()).time_remaining_minutes;
+        feed(818, ESTIMATE);
+        assert_eq!(embassy_futures::block_on(CAR_STATE.lock()).time_remaining_minutes, before);
+
+        feed(780, [0x00, 0x00, 0x0E, 0x00, 0x2C, 0x00, 0xA0, 0x0F]);
+        feed(780, [0x80, 0x1C, 0xB4, 0x00, 0x0F, 0x01, 0xA0, 0x0F]);
+        feed(413, [0x00, 0x12, 0x02, 0x64, 0x00, 0x00, 0x00, 0x08]);
+        feed(806, [0xB6, 0x10, 0x00, 0x10, 0x01, 0x00, 0x00, 0x00]);
+        feed(818, ESTIMATE);
+        let state = embassy_futures::block_on(CAR_STATE.lock()).clone();
+        assert_eq!(state.charge_port_state, Some(ChargePortState::DcCharging));
+        assert_eq!(state.time_remaining_minutes, Some(33));
     }
 
     #[test]
