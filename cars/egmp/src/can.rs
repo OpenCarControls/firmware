@@ -37,6 +37,10 @@ pub const CAN_FILTERS: &[CanFilter] = &[
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(567).unwrap()), mask: 0x7FF },  // BATTERY_INFO567
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(695).unwrap()), mask: 0x7FF },  // CLUSTER_RANGE
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(818).unwrap()), mask: 0x7FF },  // CHARGE_TIME_ESTIMATE
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(504).unwrap()), mask: 0x7FF },  // CHARGING_TIME
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(337).unwrap()), mask: 0x7FF },  // CHARGE_LIMITS
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(435).unwrap()), mask: 0x7FF },  // CABIN_TEMPERATURE
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(898).unwrap()), mask: 0x7FF },  // DATC_05_200ms
 ];
 
 // ── Vehicle Tasks ─────────────────────────────────────────────────────────────
@@ -141,8 +145,8 @@ fn is_ac_charging(state: &crate::EgmpCarState) -> bool {
     state.charge_port_state == Some(ChargePortState::AcCharging)
 }
 
-/// CHARGE_TIME_ESTIMATE is sent all the time as the estimate for a DC fast charge, and its
-/// units are unclear on AC, so it is only taken while a DC charger is plugged in.
+/// CHARGE_TIME_ESTIMATE is the car's estimate for a DC fast charge and is sent all the time,
+/// also on AC, so its time to 80% is only taken while a DC charger is plugged in.
 fn is_dc_plugged_in(state: &crate::EgmpCarState) -> bool {
     matches!(state.charge_port_state, Some(ChargePortState::DcConnected | ChargePortState::DcCharging))
 }
@@ -266,10 +270,31 @@ pub async fn handle_can_frame(frame: CanFrame) {
                 }
             }
             m_can::Messages::AmbientTemperature(m) => {
-                state.outdoor_temperature = Some(m.outdoor_temperature() as f32);
+                // Not_Available while the car displays Fahrenheit; ODOMETER has it then.
+                if let m_can::AmbientTemperatureOutdoorTemperature::_Other(celsius) = m.outdoor_temperature() {
+                    state.outdoor_temperature = Some(celsius);
+                }
             }
             m_can::Messages::Odometer(m) => {
                 state.odometer = Some(m.odometer() as u32);
+                if let m_can::OdometerOutdoorTemperatureF::_Other(fahrenheit) = m.outdoor_temperature_f() {
+                    state.outdoor_temperature = Some((fahrenheit - 32.0) / 1.8);
+                }
+            }
+            m_can::Messages::CabinTemperature(m) => {
+                state.indoor_temperature = Some(m.cabin_temperature());
+            }
+            m_can::Messages::Datc05200ms(m) => {
+                use crate::proto::basic_state::TemperatureUnit;
+                match m.datc_temp_disp_unit_sta() {
+                    m_can::Datc05200msDatcTempDispUnitSta::Celsius => state.temperature_unit = Some(TemperatureUnit::Celsius),
+                    m_can::Datc05200msDatcTempDispUnitSta::Fahrenheit => state.temperature_unit = Some(TemperatureUnit::Fahrenheit),
+                    _ => {}
+                }
+            }
+            m_can::Messages::ChargeLimits(m) => {
+                state.ac_charge_limit_percent = Some(m.ac_charge_limit() as u32);
+                state.dc_charge_limit_percent = Some(m.dc_charge_limit() as u32);
             }
             m_can::Messages::Datc06200ms(m) => {
                 // Not_Available with the car off: keep the last known state.
@@ -304,9 +329,13 @@ pub async fn handle_can_frame(frame: CanFrame) {
                 // The range for the active drive mode, as the cluster shows it.
                 state.battery_range_km = Some(m.range() as u32);
             }
+            m_can::Messages::ChargingTime(m) => {
+                // The charge in progress, AC or DC; 0 when not charging.
+                state.time_remaining_minutes = Some(m.charging_time_to_limit() as u32);
+            }
             m_can::Messages::ChargeTimeEstimate(m) => {
                 if is_dc_plugged_in(&state) {
-                    state.time_remaining_minutes = Some(m.charge_time_to_limit() as u32 / 60);
+                    state.time_to_80_percent_minutes = Some(m.charge_time_to_80() as u32 / 60);
                 }
             }
             m_can::Messages::ChargingPower(m) => {
@@ -329,11 +358,7 @@ pub async fn handle_can_frame(frame: CanFrame) {
             // TODO: Unmapped BasicState fields:
             // - is_driving is derived from speed; a power-state signal (POWER_CAN_STATUS,
             //   BO 1077) tells "car on" apart from "moving" if that distinction is needed
-            // - indoor_temperature
-            // - is_rear_window_defrost_on (no state found on this bus; Rear_Defrost_State in BO 593
-            //   is noise)
-            // - time_remaining_minutes on AC (CHARGE_TIME_ESTIMATE units unclear there) and
-            //   when driving (time to empty)
+            // - is_rear_window_defrost_on (not on this bus; Rear_Defrost_State in BO 593 is noise)
             // - charge_port_state errors, DC negotiating and V2L
 
             // TODO: Unmapped AdvancedState fields:
@@ -548,18 +573,24 @@ mod tests {
         assert_eq!(m.range(), 263);
     }
 
-    /// log_23 at 1:51: 33 min to 100% on DC. The same frame is sent while driving or on AC,
-    /// where it must not be taken.
+    /// The time to the limit comes from CHARGING_TIME for AC and DC; the time to 80% from the
+    /// DC estimate, only while a DC charger is plugged in since that estimate is always sent.
     #[test]
-    fn charge_time_is_only_taken_on_dc() {
+    fn charging_times() {
+        // log_23 at 1:51: 10 min to 80% in the DC estimate.
         const ESTIMATE: [u8; 8] = [0xBC, 0x07, 0x58, 0x02, 0x00, 0x00, 0x00, 0x00];
+        // On L2 (log_30 at 15:05): 135 min to the 80% AC limit, the cluster's "2 h 15".
         feed(780, [0x00, 0x00, 0x0E, 0x00, 0x2C, 0x00, 0xA0, 0x0F]);
         feed(780, [0x80, 0x1C, 0xB4, 0x00, 0x0F, 0x01, 0xA0, 0x0F]);
         feed(413, [0x00, 0x11, 0x01, 0x04, 0x04, 0x00, 0x00, 0x00]);
-        let before = embassy_futures::block_on(CAR_STATE.lock()).time_remaining_minutes;
+        feed(504, [0x00, 0x87, 0x00, 0x7D, 0x00, 0x87, 0x00, 0x00]);
+        let before = embassy_futures::block_on(CAR_STATE.lock()).time_to_80_percent_minutes;
         feed(818, ESTIMATE);
-        assert_eq!(embassy_futures::block_on(CAR_STATE.lock()).time_remaining_minutes, before);
+        let state = embassy_futures::block_on(CAR_STATE.lock()).clone();
+        assert_eq!(state.time_remaining_minutes, Some(135));
+        assert_eq!(state.time_to_80_percent_minutes, before);
 
+        // DC charging.
         feed(780, [0x00, 0x00, 0x0E, 0x00, 0x2C, 0x00, 0xA0, 0x0F]);
         feed(780, [0x80, 0x1C, 0xB4, 0x00, 0x0F, 0x01, 0xA0, 0x0F]);
         feed(413, [0x00, 0x12, 0x02, 0x64, 0x00, 0x00, 0x00, 0x08]);
@@ -567,7 +598,36 @@ mod tests {
         feed(818, ESTIMATE);
         let state = embassy_futures::block_on(CAR_STATE.lock()).clone();
         assert_eq!(state.charge_port_state, Some(ChargePortState::DcCharging));
-        assert_eq!(state.time_remaining_minutes, Some(33));
+        assert_eq!(state.time_to_80_percent_minutes, Some(10));
+    }
+
+    /// log_30: charge limits, cabin temperature, and the outside temperature in both units.
+    #[test]
+    fn limits_and_temperatures() {
+        use crate::proto::basic_state::TemperatureUnit;
+        // AC limit 50%, DC limit 100%.
+        feed(337, [0xB9, 0xA3, 0x36, 0x64, 0xC8, 0x00, 0x28, 0x09]);
+        // Cabin 20 C.
+        feed(435, [0xA5, 0x1D, 0x00, 0x03, 0x52, 0x78, 0x9A, 0xAF]);
+        // Celsius: 7 C outside.
+        feed(898, [0xC5, 0xA8, 0xAA, 0x06, 0x00, 0x04, 0x08, 0x00]);
+        feed(550, [0xCD, 0xDE, 0x57, 0x2F, 0x50, 0x51, 0x30, 0x41]);
+        let state = embassy_futures::block_on(CAR_STATE.lock()).clone();
+        assert_eq!(state.ac_charge_limit_percent, Some(50));
+        assert_eq!(state.dc_charge_limit_percent, Some(100));
+        assert_eq!(state.indoor_temperature, Some(20.0));
+        assert_eq!(state.temperature_unit, Some(TemperatureUnit::Celsius));
+        assert_eq!(state.outdoor_temperature, Some(7.0));
+
+        // Fahrenheit: AMBIENT_TEMPERATURE reads Not_Available (must not become 215 C) and
+        // ODOMETER carries 44.5 F.
+        feed(898, [0x66, 0x64, 0xC5, 0x08, 0x00, 0x05, 0x08, 0x00]);
+        feed(550, [0xF3, 0x44, 0xDD, 0xFF, 0x4F, 0xD1, 0x30, 0x41]);
+        assert_eq!(embassy_futures::block_on(CAR_STATE.lock()).outdoor_temperature, Some(7.0));
+        feed(551, [0x14, 0x30, 0x7F, 0x03, 0x00, 0xF1, 0xA7, 0x02]);
+        let state = embassy_futures::block_on(CAR_STATE.lock()).clone();
+        assert_eq!(state.temperature_unit, Some(TemperatureUnit::Fahrenheit));
+        assert!((state.outdoor_temperature.unwrap() - 6.94).abs() < 0.01);
     }
 
     /// log_10 and the idle captures.
