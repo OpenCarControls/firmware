@@ -41,6 +41,7 @@ pub const CAN_FILTERS: &[CanFilter] = &[
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(337).unwrap()), mask: 0x7FF },  // CHARGE_LIMITS
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(435).unwrap()), mask: 0x7FF },  // CABIN_TEMPERATURE
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(898).unwrap()), mask: 0x7FF },  // DATC_05_200ms
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(54).unwrap()), mask: 0x7FF },   // DRIVE_MODE_STATUS
 ];
 
 // ── Vehicle Tasks ─────────────────────────────────────────────────────────────
@@ -191,6 +192,18 @@ fn track_charge(update: impl FnOnce(&mut ChargeTracker)) -> Option<ChargePortSta
         cell.set(tracker);
         tracker.state()
     })
+}
+
+/// `None` for values not seen on a real car, so they never overwrite the last known gear.
+fn gear(raw: m_can::DriveModeStatusGear) -> Option<crate::proto::advanced_state::Gear> {
+    use crate::proto::advanced_state::Gear;
+    match raw {
+        m_can::DriveModeStatusGear::Park => Some(Gear::Park),
+        m_can::DriveModeStatusGear::Reverse => Some(Gear::Reverse),
+        m_can::DriveModeStatusGear::Neutral => Some(Gear::Neutral),
+        m_can::DriveModeStatusGear::Drive => Some(Gear::Drive),
+        m_can::DriveModeStatusGear::_Other(_) => None,
+    }
 }
 
 /// Maps a `Window_*DetailOpnSta` raw value from BCM_15_200ms: 0 is closed, 1 to 3 are
@@ -355,6 +368,12 @@ pub async fn handle_can_frame(frame: CanFrame) {
             m_can::Messages::Blinkers(m) => {
                 state.are_hazard_lights_on = Some(m.hazard_on());
             }
+            m_can::Messages::DriveModeStatus(m) => {
+                // Park with the car off, asleep or charging.
+                if let Some(gear) = gear(m.gear()) {
+                    state.gear = Some(gear);
+                }
+            }
             // TODO: Unmapped BasicState fields:
             // - is_driving is derived from speed; a power-state signal (POWER_CAN_STATUS,
             //   BO 1077) tells "car on" apart from "moving" if that distinction is needed
@@ -364,7 +383,6 @@ pub async fn handle_can_frame(frame: CanFrame) {
             // TODO: Unmapped AdvancedState fields:
             // - battery_minimum_temperature
             // - battery_maximum_temperature
-            // - gear (BCM_GearPosPSta in BO 1058 is unverified and might just be the parking pawl)
             _ => {}
         }
 
@@ -666,6 +684,22 @@ mod tests {
         assert_eq!(state([0x00, 0x45, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x0F]), PreconditioningState::Preparing);
         assert_eq!(state([0x00, 0x55, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x0F]), PreconditioningState::Heating);
         assert_eq!(state([0x00, 0x42, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x0F]), PreconditioningState::Unspecified);
+    }
+
+    /// log_09: shifts with the brake held, then the car switched off.
+    #[test]
+    fn gear_follows_the_shifter() {
+        use crate::proto::advanced_state::Gear;
+        let gear_of = |data: [u8; 8]| {
+            feed(54, data);
+            embassy_futures::block_on(CAR_STATE.lock()).gear
+        };
+        assert_eq!(gear_of([0xF1, 0x66, 0xDB, 0x51, 0x05, 0x00, 0x35, 0x05]), Some(Gear::Drive));
+        assert_eq!(gear_of([0x7D, 0xB9, 0x3E, 0x51, 0x07, 0x00, 0x35, 0x05]), Some(Gear::Reverse));
+        assert_eq!(gear_of([0xFE, 0xC8, 0xD1, 0x51, 0x06, 0x00, 0x35, 0x05]), Some(Gear::Neutral));
+        assert_eq!(gear_of([0x0B, 0xEF, 0x0D, 0x51, 0x00, 0x00, 0x35, 0x05]), Some(Gear::Park));
+        // Car off: bit 36 is set next to the gear, which still reads Park.
+        assert_eq!(gear_of([0x3C, 0x3A, 0x8E, 0x01, 0x10, 0x00, 0x30, 0x05]), Some(Gear::Park));
     }
 
     #[test]

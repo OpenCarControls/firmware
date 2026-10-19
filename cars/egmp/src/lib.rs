@@ -155,7 +155,7 @@ impl EgmpCarState {
             battery_minimum_temperature: Some(25.0),
             battery_maximum_temperature: Some(26.0),
             preconditioning_state: Some(proto::advanced_state::PreconditioningState::Off),
-            gear: Some(proto::advanced_state::Gear::Unspecified),
+            gear: Some(proto::advanced_state::Gear::Park),
         }
     }
 }
@@ -309,7 +309,7 @@ pub fn tick_simulation(state: &mut EgmpCarState, tick: u64) {
     // Base state for each tick
     state.speed = Some(0);
     state.is_driving = Some(false);
-    state.gear = Some(proto::advanced_state::Gear::Unspecified);
+    state.gear = Some(proto::advanced_state::Gear::Park);
     state.charge_port_state = Some(proto::basic_state::ChargePortState::Unspecified);
     state.power_flow_watt = Some(0);
     state.is_driver_door_open = Some(false);
@@ -336,7 +336,7 @@ pub fn tick_simulation(state: &mut EgmpCarState, tick: u64) {
         };
         state.speed = Some(speed);
         state.is_driving = Some(speed > 0);
-        state.gear = Some(if speed > 0 { proto::advanced_state::Gear::Drive } else { proto::advanced_state::Gear::Unspecified });
+        state.gear = Some(if speed > 0 { proto::advanced_state::Gear::Drive } else { proto::advanced_state::Gear::Park });
         
         if speed > 0 {
             state.power_flow_watt = Some(-25000); // Discharging 25kW
@@ -444,7 +444,7 @@ mod tests {
         assert_eq!(basic.are_doors_locked, Some(false));
 
         assert_eq!(advanced.battery_voltage, Some(400));
-        assert_eq!(advanced.gear, Some(0));
+        assert_eq!(advanced.gear, Some(proto::advanced_state::Gear::Park as i32));
     }
 
     /// The largest state update this vehicle can produce must fit in one BLE
