@@ -42,6 +42,7 @@ pub const CAN_FILTERS: &[CanFilter] = &[
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(435).unwrap()), mask: 0x7FF },  // CABIN_TEMPERATURE
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(898).unwrap()), mask: 0x7FF },  // DATC_05_200ms
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(54).unwrap()), mask: 0x7FF },   // DRIVE_MODE_STATUS
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(992).unwrap()), mask: 0x7FF },  // BCM_02_200ms
 ];
 
 // ── Vehicle Tasks ─────────────────────────────────────────────────────────────
@@ -206,6 +207,39 @@ fn gear(raw: m_can::DriveModeStatusGear) -> Option<crate::proto::advanced_state:
     }
 }
 
+/// The start button steps the BCM inputs through off, accessory and on; ready comes from
+/// DRIVE_MODE_STATUS, since the ignition inputs read the same when on and ready.
+fn power_state(accessory: bool, ignition: bool, ready: bool) -> crate::proto::advanced_state::PowerState {
+    use crate::proto::advanced_state::PowerState;
+    if ready {
+        PowerState::Ready
+    } else if ignition {
+        PowerState::On
+    } else if accessory {
+        PowerState::Accessory
+    } else {
+        PowerState::Off
+    }
+}
+
+/// Last (accessory, ignition) inputs and ready bit, which come in separate messages.
+static POWER: embassy_sync::blocking_mutex::Mutex<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    core::cell::Cell<(Option<(bool, bool)>, Option<bool>)>,
+> = embassy_sync::blocking_mutex::Mutex::new(core::cell::Cell::new((None, None)));
+
+/// Records new ignition inputs or a new ready bit and returns the power state once both are known.
+fn track_power(inputs: Option<(bool, bool)>, ready: Option<bool>) -> Option<crate::proto::advanced_state::PowerState> {
+    POWER.lock(|cell| {
+        let (mut i, mut r) = cell.get();
+        i = inputs.or(i);
+        r = ready.or(r);
+        cell.set((i, r));
+        let (accessory, ignition) = i?;
+        Some(power_state(accessory, ignition, r?))
+    })
+}
+
 /// Maps a `Window_*DetailOpnSta` raw value from BCM_15_200ms: 0 is closed, 1 to 3 are
 /// open by steps. `None` for Not_Available (7), which the EV6 reports for its rear windows.
 fn window_open(position: u8) -> Option<bool> {
@@ -236,9 +270,7 @@ pub async fn handle_can_frame(frame: CanFrame) {
                 state.is_frunk_open = Some(m.hood_open() != 0);
             }
             m_can::Messages::ClusterInfo428(m) => {
-                let speed = m.speed_kph() as i32;
-                state.speed = Some(speed);
-                state.is_driving = Some(speed > 0);
+                state.speed = Some(m.speed_kph() as i32);
             }
             m_can::Messages::ChargePortDoor(m) => {
                 if let Some(port) = track_charge(|t| t.on_door(m.port_open())) {
@@ -373,10 +405,19 @@ pub async fn handle_can_frame(frame: CanFrame) {
                 if let Some(gear) = gear(m.gear()) {
                     state.gear = Some(gear);
                 }
+                // Driving includes stops in traffic, so it doesn't come from the speed.
+                state.is_driving = Some(m.ready() && state.gear != Some(crate::proto::advanced_state::Gear::Park));
+                if let Some(power) = track_power(None, Some(m.ready())) {
+                    state.power_state = Some(power);
+                }
+            }
+            m_can::Messages::Bcm02200ms(m) => {
+                let inputs = (m.bcm_acc_in_sta() == 1, m.bcm_ign1_in_sta() == 1);
+                if let Some(power) = track_power(Some(inputs), None) {
+                    state.power_state = Some(power);
+                }
             }
             // TODO: Unmapped BasicState fields:
-            // - is_driving is derived from speed; a power-state signal (POWER_CAN_STATUS,
-            //   BO 1077) tells "car on" apart from "moving" if that distinction is needed
             // - is_rear_window_defrost_on (not on this bus; Rear_Defrost_State in BO 593 is noise)
             // - charge_port_state errors, DC negotiating and V2L
 
@@ -700,6 +741,31 @@ mod tests {
         assert_eq!(gear_of([0x0B, 0xEF, 0x0D, 0x51, 0x00, 0x00, 0x35, 0x05]), Some(Gear::Park));
         // Car off: bit 36 is set next to the gear, which still reads Park.
         assert_eq!(gear_of([0x3C, 0x3A, 0x8E, 0x01, 0x10, 0x00, 0x30, 0x05]), Some(Gear::Park));
+    }
+
+    /// log_09 from 4:03: off, accessory, on without the brake, then ready with it.
+    #[test]
+    fn power_state_follows_the_start_button() {
+        use crate::proto::advanced_state::{Gear, PowerState};
+        let state = || embassy_futures::block_on(CAR_STATE.lock()).clone();
+        // Not ready, in Park.
+        feed(54, [0x96, 0x4D, 0x62, 0x01, 0x10, 0x00, 0x30, 0x05]);
+        feed(992, [0xBC, 0xD0, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(state().power_state, Some(PowerState::Off));
+        feed(992, [0x27, 0xE0, 0x01, 0x00, 0x04, 0x02, 0x00, 0x00]);
+        assert_eq!(state().power_state, Some(PowerState::Accessory));
+        feed(992, [0xB0, 0x10, 0x01, 0x00, 0x54, 0x03, 0x00, 0x00]);
+        assert_eq!(state().power_state, Some(PowerState::On));
+        assert_eq!(state().is_driving, Some(false));
+
+        // Ready in Park is not driving; ready in Drive is, even when stopped.
+        feed(992, [0xCF, 0xD0, 0x01, 0x00, 0x54, 0x03, 0x00, 0x00]);
+        feed(54, [0x0B, 0xEF, 0x0D, 0x51, 0x00, 0x00, 0x35, 0x05]);
+        assert_eq!(state().power_state, Some(PowerState::Ready));
+        assert_eq!(state().is_driving, Some(false));
+        feed(54, [0xF1, 0x66, 0xDB, 0x51, 0x05, 0x00, 0x35, 0x05]);
+        assert_eq!(state().gear, Some(Gear::Drive));
+        assert_eq!(state().is_driving, Some(true));
     }
 
     #[test]

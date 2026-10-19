@@ -63,6 +63,7 @@ pub struct EgmpCarState {
     pub battery_maximum_temperature: Option<f32>,
     pub preconditioning_state: Option<proto::advanced_state::PreconditioningState>,
     pub gear: Option<proto::advanced_state::Gear>,
+    pub power_state: Option<proto::advanced_state::PowerState>,
 }
 
 impl EgmpCarState {
@@ -109,6 +110,7 @@ impl EgmpCarState {
             battery_maximum_temperature: None,
             preconditioning_state: None,
             gear: None,
+            power_state: None,
         }
     }
 
@@ -156,6 +158,7 @@ impl EgmpCarState {
             battery_maximum_temperature: Some(26.0),
             preconditioning_state: Some(proto::advanced_state::PreconditioningState::Off),
             gear: Some(proto::advanced_state::Gear::Park),
+            power_state: Some(proto::advanced_state::PowerState::Off),
         }
     }
 }
@@ -214,6 +217,7 @@ pub fn encode_state(state: &EgmpCarState) -> VehicleStatePayload {
         battery_maximum_temperature: state.battery_maximum_temperature,
         preconditioning_state: state.preconditioning_state.map(|s| s as i32),
         gear: state.gear.map(|g| g as i32),
+        power_state: state.power_state.map(|p| p as i32),
     };
     VehicleStatePayload {
         basic: basic.encode_to_vec(),
@@ -310,6 +314,7 @@ pub fn tick_simulation(state: &mut EgmpCarState, tick: u64) {
     state.speed = Some(0);
     state.is_driving = Some(false);
     state.gear = Some(proto::advanced_state::Gear::Park);
+    state.power_state = Some(proto::advanced_state::PowerState::Off);
     state.charge_port_state = Some(proto::basic_state::ChargePortState::Unspecified);
     state.power_flow_watt = Some(0);
     state.is_driver_door_open = Some(false);
@@ -337,6 +342,7 @@ pub fn tick_simulation(state: &mut EgmpCarState, tick: u64) {
         state.speed = Some(speed);
         state.is_driving = Some(speed > 0);
         state.gear = Some(if speed > 0 { proto::advanced_state::Gear::Drive } else { proto::advanced_state::Gear::Park });
+        state.power_state = Some(proto::advanced_state::PowerState::Ready);
         
         if speed > 0 {
             state.power_flow_watt = Some(-25000); // Discharging 25kW
@@ -498,6 +504,7 @@ mod tests {
             battery_maximum_temperature: Some(f32::MIN),
             preconditioning_state: Some(proto::advanced_state::PreconditioningState::Heating),
             gear: Some(Gear::Drive),
+            power_state: Some(proto::advanced_state::PowerState::Ready),
         };
 
         let msg = core_interface::ble_state_update(u64::MAX, u32::MAX, encode_state(&state));
