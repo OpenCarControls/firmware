@@ -43,6 +43,8 @@ pub const CAN_FILTERS: &[CanFilter] = &[
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(898).unwrap()), mask: 0x7FF },  // DATC_05_200ms
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(54).unwrap()), mask: 0x7FF },   // DRIVE_MODE_STATUS
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(992).unwrap()), mask: 0x7FF },  // BCM_02_200ms
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1174).unwrap()), mask: 0x7FF }, // DRIVER_SEAT_HEATING
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1141).unwrap()), mask: 0x7FF }, // PASSENGER_SEAT_HEATING
 ];
 
 // ── Vehicle Tasks ─────────────────────────────────────────────────────────────
@@ -240,6 +242,19 @@ fn track_power(inputs: Option<(bool, bool)>, ready: Option<bool>) -> Option<crat
     })
 }
 
+/// Maps a `*_Seat_Heating_Oper` raw value: 2 is off, 6 to 8 are levels 1 to 3. `None` for
+/// values not seen on a real car (3 to 5 may be ventilation), so they keep the last state.
+fn seat_climate(raw: u8) -> Option<crate::proto::basic_state::SeatClimate> {
+    use crate::proto::basic_state::SeatClimate;
+    match raw {
+        2 => Some(SeatClimate::Off),
+        6 => Some(SeatClimate::HeatLevel1),
+        7 => Some(SeatClimate::HeatLevel2),
+        8 => Some(SeatClimate::HeatLevel3),
+        _ => None,
+    }
+}
+
 /// Maps a `Window_*DetailOpnSta` raw value from BCM_15_200ms: 0 is closed, 1 to 3 are
 /// open by steps. `None` for Not_Available (7), which the EV6 reports for its rear windows.
 fn window_open(position: u8) -> Option<bool> {
@@ -409,6 +424,16 @@ pub async fn handle_can_frame(frame: CanFrame) {
                 state.is_driving = Some(m.ready() && state.gear != Some(crate::proto::advanced_state::Gear::Park));
                 if let Some(power) = track_power(None, Some(m.ready())) {
                     state.power_state = Some(power);
+                }
+            }
+            m_can::Messages::DriverSeatHeating(m) => {
+                if let Some(seat) = seat_climate(m.driver_seat_heating_oper_raw()) {
+                    state.driver_seat_climate = Some(seat);
+                }
+            }
+            m_can::Messages::PassengerSeatHeating(m) => {
+                if let Some(seat) = seat_climate(m.passenger_seat_heating_oper_raw()) {
+                    state.passenger_seat_climate = Some(seat);
                 }
             }
             m_can::Messages::Bcm02200ms(m) => {
@@ -766,6 +791,28 @@ mod tests {
         feed(54, [0xF1, 0x66, 0xDB, 0x51, 0x05, 0x00, 0x35, 0x05]);
         assert_eq!(state().gear, Some(Gear::Drive));
         assert_eq!(state().is_driving, Some(true));
+    }
+
+    /// log_10: each seat through levels 3, 2, 1 and off, as the button steps them.
+    #[test]
+    fn seat_heating_levels() {
+        use crate::proto::basic_state::SeatClimate;
+        let driver = |data: [u8; 8]| {
+            feed(1174, data);
+            embassy_futures::block_on(CAR_STATE.lock()).driver_seat_climate
+        };
+        assert_eq!(driver([0x42, 0, 0, 0, 0, 0, 0, 0]), Some(SeatClimate::HeatLevel3));
+        assert_eq!(driver([0x3A, 0, 0, 0, 0, 0, 0, 0]), Some(SeatClimate::HeatLevel2));
+        assert_eq!(driver([0x32, 0, 0, 0, 0, 0, 0, 0]), Some(SeatClimate::HeatLevel1));
+        assert_eq!(driver([0x12, 0, 0, 0, 0, 0, 0, 0]), Some(SeatClimate::Off));
+
+        feed(1141, [0x3A, 0, 0, 0, 0, 0, 0, 0]);
+        let state = embassy_futures::block_on(CAR_STATE.lock()).clone();
+        assert_eq!(state.passenger_seat_climate, Some(SeatClimate::HeatLevel2));
+        assert_eq!(state.driver_seat_climate, Some(SeatClimate::Off));
+
+        // A value never seen on the car keeps the last level.
+        assert_eq!(seat_climate(4), None);
     }
 
     #[test]

@@ -56,6 +56,8 @@ pub struct EgmpCarState {
     pub dc_charge_limit_percent: Option<u32>,
     pub time_to_80_percent_minutes: Option<u32>,
     pub temperature_unit: Option<proto::basic_state::TemperatureUnit>,
+    pub driver_seat_climate: Option<proto::basic_state::SeatClimate>,
+    pub passenger_seat_climate: Option<proto::basic_state::SeatClimate>,
 
     pub battery_voltage: Option<u32>,
     pub instantaneous_power_watt: Option<i32>,
@@ -104,6 +106,8 @@ impl EgmpCarState {
             dc_charge_limit_percent: None,
             time_to_80_percent_minutes: None,
             temperature_unit: None,
+            driver_seat_climate: None,
+            passenger_seat_climate: None,
             battery_voltage: None,
             instantaneous_power_watt: None,
             battery_minimum_temperature: None,
@@ -151,6 +155,8 @@ impl EgmpCarState {
             dc_charge_limit_percent: Some(100),
             time_to_80_percent_minutes: Some(0),
             temperature_unit: Some(proto::basic_state::TemperatureUnit::Celsius),
+            driver_seat_climate: Some(proto::basic_state::SeatClimate::Off),
+            passenger_seat_climate: Some(proto::basic_state::SeatClimate::Off),
 
             battery_voltage: Some(400),
             instantaneous_power_watt: Some(0),
@@ -209,6 +215,8 @@ pub fn encode_state(state: &EgmpCarState) -> VehicleStatePayload {
         dc_charge_limit_percent: state.dc_charge_limit_percent,
         time_to_80_percent_minutes: state.time_to_80_percent_minutes,
         temperature_unit: state.temperature_unit.map(|u| u as i32),
+        driver_seat_climate: state.driver_seat_climate.map(|s| s as i32),
+        passenger_seat_climate: state.passenger_seat_climate.map(|s| s as i32),
     };
     let advanced = proto::AdvancedState {
         battery_voltage: state.battery_voltage,
@@ -498,6 +506,8 @@ mod tests {
             dc_charge_limit_percent: Some(u32::MAX),
             time_to_80_percent_minutes: Some(u32::MAX),
             temperature_unit: Some(proto::basic_state::TemperatureUnit::Fahrenheit),
+            driver_seat_climate: Some(proto::basic_state::SeatClimate::HeatLevel3),
+            passenger_seat_climate: Some(proto::basic_state::SeatClimate::HeatLevel3),
             battery_voltage: Some(u32::MAX),
             instantaneous_power_watt: Some(i32::MIN),
             battery_minimum_temperature: Some(f32::MIN),
