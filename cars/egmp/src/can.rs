@@ -74,17 +74,19 @@ enum Charger {
 /// seconds on an AC charger too. The charger type is only taken once it is certain (AC
 /// reported, or a DC sequence stage that an AC charger never reaches) and kept until unplug,
 /// because the stage moves on once a DC session ends. Until then the state is `Connected`.
+/// On DC, stages 2 to 6 without energy flowing are the handshake with the charger.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ChargeTracker {
     door: Option<ChargePortState>,
     plugged: Option<bool>,
     charging: bool,
     charger: Option<Charger>,
+    dc_stage: u8,
 }
 
 impl ChargeTracker {
     const fn new() -> Self {
-        Self { door: None, plugged: None, charging: false, charger: None }
+        Self { door: None, plugged: None, charging: false, charger: None, dc_stage: 0 }
     }
 
     fn on_door(&mut self, port: m_can::ChargePortDoorPortOpen) {
@@ -98,6 +100,7 @@ impl ChargeTracker {
         if self.plugged != Some(plugged) {
             self.charger = None;
             self.charging = false;
+            self.dc_stage = 0;
         }
         self.plugged = Some(plugged);
     }
@@ -110,6 +113,7 @@ impl ChargeTracker {
         if self.plugged == Some(false) {
             return;
         }
+        self.dc_stage = dc_stage;
         match charger_type {
             m_can::ChargerSessionChargerType::Ac => self.charger = Some(Charger::Ac),
             m_can::ChargerSessionChargerType::Dc if (2..=6).contains(&dc_stage) => self.charger = Some(Charger::Dc),
@@ -125,6 +129,7 @@ impl ChargeTracker {
             (None, _) => ChargePortState::Connected,
             (Some(Charger::Ac), false) => ChargePortState::AcConnected,
             (Some(Charger::Ac), true) => ChargePortState::AcCharging,
+            (Some(Charger::Dc), false) if (2..=6).contains(&self.dc_stage) => ChargePortState::DcNegotiating,
             (Some(Charger::Dc), false) => ChargePortState::DcConnected,
             (Some(Charger::Dc), true) => ChargePortState::DcCharging,
         })
@@ -444,7 +449,7 @@ pub async fn handle_can_frame(frame: CanFrame) {
             }
             // TODO: Unmapped BasicState fields:
             // - is_rear_window_defrost_on (not on this bus; Rear_Defrost_State in BO 593 is noise)
-            // - charge_port_state errors, DC negotiating and V2L
+            // - charge_port_state errors and V2L
 
             // TODO: Unmapped AdvancedState fields:
             // - battery_minimum_temperature
@@ -552,7 +557,13 @@ mod tests {
         session(&mut t, [0x00, 0x12, 0x02, 0x14, 0x00, 0x00, 0x00, 0x00]);
         assert_eq!(t.state(), Some(ChargePortState::Connected));
         session(&mut t, [0x00, 0x12, 0x02, 0x24, 0x00, 0x00, 0x00, 0x00]);
-        assert_eq!(t.state(), Some(ChargePortState::DcConnected));
+        assert_eq!(t.state(), Some(ChargePortState::DcNegotiating));
+        // log_23: ready at stage 4, then stage 6 arrives 0.2 s before energy flows.
+        session(&mut t, [0x00, 0x12, 0x02, 0x44, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(t.state(), Some(ChargePortState::DcNegotiating));
+        t.on_charging(charging([0x20, 0x91, 0xBE, 0x10, 0x00, 0x00, 0x00, 0x00]));
+        session(&mut t, [0x00, 0x12, 0x02, 0x64, 0x00, 0x00, 0x00, 0x08]);
+        assert_eq!(t.state(), Some(ChargePortState::DcNegotiating));
 
         t.on_charging(charging([0xB6, 0x10, 0x00, 0x10, 0x01, 0x00, 0x00, 0x00]));
         session(&mut t, [0x00, 0x12, 0x02, 0x64, 0x00, 0x00, 0x00, 0x08]);
