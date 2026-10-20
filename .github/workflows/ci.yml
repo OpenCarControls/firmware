@@ -212,3 +212,27 @@ jobs:
 
       - name: Build Firmware via xtask
         run: cargo xtask build --board ${{ matrix.board }} --platform ${{ matrix.platform }}
+
+
+  # Branch protection can't require the matrix checks above: their names change with
+  # the platforms a change touches. Require this job instead, under its fixed name.
+  build-and-lint-result:
+    name: Build & Lint
+    needs: [format-and-lint, platforms, build-and-lint]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the build and lint results
+        run: |
+          echo "format-and-lint: ${{ needs.format-and-lint.result }}"
+          echo "platforms: ${{ needs.platforms.outputs.platforms }} (${{ needs.platforms.result }})"
+          echo "build-and-lint: ${{ needs.build-and-lint.result }}"
+          [ "${{ needs.format-and-lint.result }}" = success ] || exit 1
+          [ "${{ needs.platforms.result }}" = success ] || exit 1
+          # Skipped is only fine when no platform needed building; a skip caused by a
+          # failed dependency must fail this check.
+          if [ '${{ needs.platforms.outputs.platforms }}' = '[]' ]; then
+            [ "${{ needs.build-and-lint.result }}" = skipped ] || [ "${{ needs.build-and-lint.result }}" = success ]
+          else
+            [ "${{ needs.build-and-lint.result }}" = success ]
+          fi
