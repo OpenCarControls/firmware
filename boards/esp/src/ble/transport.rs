@@ -15,6 +15,32 @@
 //! - `source_device_id` in every accepted message is overwritten with the firmware-verified
 //!   BLE address so the vehicle layer always has a trustworthy caller identity.
 
+// ─── Device name helper ───────────────────────────────────────────────────────
+
+#[cfg_attr(not(feature = "hardware"), allow(dead_code))]
+fn build_ble_device_name(base: &str, mac: [u8; 6]) -> heapless::String<33> {
+    use core::fmt::Write as _;
+    let mut out = heapless::String::<33>::new();
+    let _ = write!(&mut out, "{}-{:02X}{:02X}", base, mac[4], mac[5]);
+    if out.is_empty() {
+        let _ = write!(&mut out, "OpenCar-{:02X}{:02X}", mac[4], mac[5]);
+    }
+    out
+}
+
+// ─── Address kind helper ──────────────────────────────────────────────────────
+
+#[cfg_attr(not(feature = "hardware"), allow(dead_code))]
+fn infer_addr_kind(bd_addr: &trouble_host::prelude::BdAddr) -> bt_hci::param::AddrKind {
+    // BdAddr raw bytes: index 5 is the most-significant byte.
+    // Random static addresses have bits 7:6 of MSB set to 0b11.
+    if (bd_addr.raw()[5] & 0xC0) == 0xC0 {
+        bt_hci::param::AddrKind::RANDOM
+    } else {
+        bt_hci::param::AddrKind::PUBLIC
+    }
+}
+
 #[cfg(feature = "hardware")]
 mod hardware {
     use alloc::vec::Vec;
@@ -33,6 +59,8 @@ mod hardware {
     use prost::Message as _;
     use trouble_host::prelude::*;
 
+    use super::{build_ble_device_name, infer_addr_kind};
+
     use bt_hci::cmd::le::{
         LeAddDeviceToFilterAcceptList, LeAddDeviceToResolvingList, LeClearFilterAcceptList,
         LeClearResolvingList, LeRemoveDeviceFromFilterAcceptList, LeRemoveDeviceFromResolvingList,
@@ -41,7 +69,15 @@ mod hardware {
     use bt_hci::controller::ControllerCmdSync;
 
     use crate::ble::store::BondStore;
-    use core_interface::ble::{GATT_RX_UUID, GATT_SERVICE_UUID, GATT_TX_UUID, mac_to_ble_address};
+    use core_interface::ble::{
+        BLE_ATT_MTU, BLE_MAX_MESSAGE_BYTES, GATT_RX_UUID, GATT_SERVICE_UUID, GATT_TX_UUID,
+        mac_to_ble_address,
+    };
+
+    // The stack answers an MTU exchange with at most its packet size minus the
+    // 4-byte L2CAP header, so the contract's ATT MTU (which the app requests)
+    // must fit in it.
+    const _: () = assert!(BLE_ATT_MTU as usize <= <DefaultPacketPool as PacketPool>::MTU - 4);
 
     const BLE_CONNECTIONS_MAX: usize = 1;
     const BLE_L2CAP_CHANNELS_MAX: usize = 3;
@@ -54,9 +90,9 @@ mod hardware {
     #[gatt_service(uuid = GATT_SERVICE_UUID)]
     struct OpenCarGattService {
         #[characteristic(uuid = GATT_RX_UUID, write, write_without_response, permissions(encrypted))]
-        rx: heapless::Vec<u8, 244>,
+        rx: heapless::Vec<u8, BLE_MAX_MESSAGE_BYTES>,
         #[characteristic(uuid = GATT_TX_UUID, notify, permissions(encrypted))]
-        tx: heapless::Vec<u8, 244>,
+        tx: heapless::Vec<u8, BLE_MAX_MESSAGE_BYTES>,
     }
 
     // ─── RNG wrapper ──────────────────────────────────────────────────────────────
@@ -83,18 +119,6 @@ mod hardware {
     }
 
     impl rand_core::CryptoRng for MyRng {}
-
-    // ─── Device name helper ───────────────────────────────────────────────────────
-
-    pub(super) fn build_ble_device_name(base: &str, mac: [u8; 6]) -> heapless::String<33> {
-        use core::fmt::Write as _;
-        let mut out = heapless::String::<33>::new();
-        let _ = write!(&mut out, "{}-{:02X}{:02X}", base, mac[4], mac[5]);
-        if out.is_empty() {
-            let _ = write!(&mut out, "OpenCar-{:02X}{:02X}", mac[4], mac[5]);
-        }
-        out
-    }
 
     // ─── Main BLE task ────────────────────────────────────────────────────────────
 
@@ -204,6 +228,7 @@ mod hardware {
                                 pairing_open_at_connect
                             );
                             let tx_auth = AtomicBool::new(false);
+                            crate::status_leds::set_flag(crate::status_leds::FLAG_BLE, true);
                             let _ = select(
                                 gatt_event_task(
                                     &server,
@@ -215,6 +240,7 @@ mod hardware {
                                 ble_tx_notify_task(&server, &conn, &tx_auth),
                             )
                             .await;
+                            crate::status_leds::set_flag(crate::status_leds::FLAG_BLE, false);
                             log::info!("BLE transport: connection closed, returning to advertise");
                         }
                         Ok(None) => {
@@ -307,18 +333,6 @@ mod hardware {
         {
             Either::First(result) => Ok(Some(result?.with_attribute_server(server)?)),
             Either::Second(_) => Ok(None),
-        }
-    }
-
-    // ─── Address kind helper ──────────────────────────────────────────────────────
-
-    fn infer_addr_kind(bd_addr: &BdAddr) -> bt_hci::param::AddrKind {
-        // BdAddr raw bytes: index 5 is the most-significant byte.
-        // Random static addresses have bits 7:6 of MSB set to 0b11.
-        if (bd_addr.raw()[5] & 0xC0) == 0xC0 {
-            bt_hci::param::AddrKind::RANDOM
-        } else {
-            bt_hci::param::AddrKind::PUBLIC
         }
     }
 
@@ -620,6 +634,8 @@ mod hardware {
                 if encrypted {
                     tx_auth.store(true, Ordering::Relaxed);
                     log::info!("BLE TX: link encrypted — tx_auth granted");
+                    // Wait for MTU exchange to complete before sending the first packet
+                    embassy_time::Timer::after(embassy_time::Duration::from_millis(500)).await;
                 } else {
                     if !tx_held_logged {
                         log::debug!("BLE TX: holding message — link not yet encrypted");
@@ -638,13 +654,14 @@ mod hardware {
                 continue;
             }
 
-            let payload = match heapless::Vec::<u8, 244>::from_slice(encoded.as_slice()) {
-                Ok(v) => v,
-                Err(_) => {
-                    log::warn!("BLE GATT TX message too large: {} bytes", encoded.len());
-                    continue;
-                }
-            };
+            let payload =
+                match heapless::Vec::<u8, BLE_MAX_MESSAGE_BYTES>::from_slice(encoded.as_slice()) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        log::warn!("BLE GATT TX message too large: {} bytes", encoded.len());
+                        continue;
+                    }
+                };
 
             if server.link.tx.notify(conn, &payload).await.is_err() {
                 break;
@@ -658,14 +675,6 @@ pub use hardware::*;
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
-#[cfg(all(test, not(feature = "hardware")))]
-fn build_ble_device_name(base: &str, mac: [u8; 6]) -> std::string::String {
-    use core::fmt::Write as _;
-    let mut out = std::string::String::new();
-    let _ = write!(&mut out, "{}-{:02X}{:02X}", base, mac[4], mac[5]);
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -675,5 +684,22 @@ mod tests {
         let mac = [0x10, 0x20, 0x30, 0x40, 0xAB, 0xCD];
         let name = build_ble_device_name("OpenCar", mac);
         assert_eq!(name.as_str(), "OpenCar-ABCD");
+    }
+
+    #[test]
+    fn ble_device_name_falls_back_when_base_is_too_long() {
+        let mac = [0x10, 0x20, 0x30, 0x40, 0xAB, 0xCD];
+        let name = build_ble_device_name("A name far too long to fit in the advertisement", mac);
+        assert_eq!(name.as_str(), "OpenCar-ABCD");
+    }
+
+    #[test]
+    fn random_static_addresses_are_detected() {
+        use trouble_host::prelude::BdAddr;
+        // Index 5 is the most significant byte; random static sets its top two bits.
+        let random = BdAddr::new([0x01, 0x02, 0x03, 0x04, 0x05, 0xC6]);
+        let public = BdAddr::new([0x01, 0x02, 0x03, 0x04, 0x05, 0x46]);
+        assert_eq!(infer_addr_kind(&random), bt_hci::param::AddrKind::RANDOM);
+        assert_eq!(infer_addr_kind(&public), bt_hci::param::AddrKind::PUBLIC);
     }
 }

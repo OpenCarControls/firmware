@@ -211,8 +211,11 @@ jobs:
       - name: Ensure tags are available
         run: git fetch --tags --force
 
+      # RISC-V ESP chips (the example config's ESP32-C3 profile) build on stable.
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv32imc-unknown-none-elf,riscv32imac-unknown-none-elf
 
       - name: Install Rust toolchain (Xtensa / ESP)
         uses: esp-rs/xtensa-toolchain@v1.6
@@ -263,13 +266,16 @@ jobs:
 
           cargo xtask build --board esp --platform "$PLATFORM"
 
-          MCU=$(grep -E '^\s*mcu\s*=' config.toml.example | head -n1 | sed 's/.*=\s*"\(.*\)"/\1/')
-          case "$MCU" in
-            esp32)   TRIPLE="xtensa-esp32-none-elf" ;;
-            esp32s3) TRIPLE="xtensa-esp32s3-none-elf" ;;
-            esp32c3) TRIPLE="riscv32imc-unknown-none-elf" ;;
-            esp32c6) TRIPLE="riscv32imac-unknown-none-elf" ;;
-            *)       echo "Unknown MCU: $MCU"; exit 1 ;;
+          # The MCU can come from a hardware profile, so read it from the target that
+          # was built rather than from config.toml.example.
+          ELF_BUILT=$(ls -t .app_build/target/*-none-elf/release/app-build | head -n1)
+          TRIPLE=$(basename "$(dirname "$(dirname "$ELF_BUILT")")")
+          case "$TRIPLE" in
+            xtensa-esp32-none-elf)        MCU=esp32 ;;
+            xtensa-esp32s3-none-elf)      MCU=esp32s3 ;;
+            riscv32imc-unknown-none-elf)  MCU=esp32c3 ;;
+            riscv32imac-unknown-none-elf) MCU=esp32c6 ;;
+            *)                            echo "Unknown target: $TRIPLE"; exit 1 ;;
           esac
 
           ELF=".app_build/target/${TRIPLE}/release/app-build"

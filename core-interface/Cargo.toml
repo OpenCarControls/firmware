@@ -12,6 +12,7 @@ embassy-time = { workspace = true }
 embassy-sync = { workspace = true }
 prost = { workspace = true }
 bytes = { workspace = true }
+portable-atomic = { workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true }

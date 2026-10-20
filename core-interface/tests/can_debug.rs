@@ -82,6 +82,59 @@ fn publish_batch_sends_to_ble_only() {
     );
 }
 
+/// A full batch (20 frames of 8 bytes) is far larger than one BLE message, so it
+/// must arrive split across several, none over the limit, with every frame in
+/// order and the dropped count reported once.
+#[test]
+fn publish_batch_splits_full_batch_to_fit_ble_messages() {
+    use core_interface::ble::BLE_MAX_MESSAGE_BYTES;
+    use prost::Message as _;
+
+    drain_tx_channels();
+    init(PLATFORM_ID);
+    let caps: Vec<CanRawCapture> = (0..20)
+        .map(|i| std_capture(1, 0x100 + i, &[0xAB; 8], u64::MAX))
+        .collect();
+    embassy_futures::block_on(publish_single_debug_batch(
+        &caps,
+        &[],
+        5,
+        PLATFORM_ID,
+        u64::MAX,
+    ));
+
+    let mut messages = Vec::new();
+    while let Ok(msg) = BLE_TX_CHANNEL.try_receive() {
+        messages.push(msg);
+    }
+    assert!(
+        messages.len() > 1,
+        "a full batch should need several messages"
+    );
+    for msg in &messages {
+        assert!(
+            msg.encoded_len() <= BLE_MAX_MESSAGE_BYTES,
+            "message is {} bytes, limit {BLE_MAX_MESSAGE_BYTES}",
+            msg.encoded_len()
+        );
+    }
+
+    let updates: Vec<proto::CanDebugUpdate> = messages
+        .into_iter()
+        .map(|msg| match msg.payload {
+            Some(proto::device_to_app::Payload::CanDebugUpdate(u)) => u,
+            other => panic!("expected CanDebugUpdate, got {:?}", other),
+        })
+        .collect();
+    let ids: Vec<u32> = updates
+        .iter()
+        .flat_map(|u| u.frames.iter().map(|f| f.can_id))
+        .collect();
+    assert_eq!(ids, (0x100..0x114).collect::<Vec<u32>>());
+    assert_eq!(updates[0].dropped_frames, 5);
+    assert!(updates[1..].iter().all(|u| u.dropped_frames == 0));
+}
+
 #[test]
 fn publish_batch_frame_fields_correct() {
     drain_tx_channels();

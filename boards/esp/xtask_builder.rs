@@ -1,6 +1,7 @@
 use crate::{
-    Config, TargetBuilder, escape_rust_string, load_transport_contract, parse_broker_url,
-    render_topic_from_template, validate_ble_transport_contract,
+    Config, LAUNCH_NAME_PREFIX, RustAnalyzerConfig, TargetBuilder, escape_rust_string,
+    firmware_dir, load_transport_contract, parse_broker_url, render_topic_from_template,
+    validate_ble_transport_contract,
 };
 use serde::Deserialize;
 use std::fs;
@@ -44,8 +45,8 @@ fn esp_dep_version(board_toml: &toml::Value, name: &str) -> String {
 struct EspBleConfig {
     #[serde(default)]
     device_name: Option<String>,
-    #[serde(default = "default_pairing_button_pin")]
-    pairing_button_pin: u8,
+    #[serde(default)]
+    pairing_button_pin: Option<i32>,
     #[serde(default = "default_pairing_button_hold_s")]
     pairing_button_hold_s: u32,
     #[serde(default = "default_max_bonded_phones")]
@@ -58,16 +59,12 @@ impl Default for EspBleConfig {
     fn default() -> Self {
         Self {
             device_name: None,
-            pairing_button_pin: default_pairing_button_pin(),
+            pairing_button_pin: None,
             pairing_button_hold_s: default_pairing_button_hold_s(),
             max_bonded_phones: default_max_bonded_phones(),
             controller_lease_ttl_s: default_controller_lease_ttl_s(),
         }
     }
-}
-
-fn default_pairing_button_pin() -> u8 {
-    0
 }
 
 fn default_pairing_button_hold_s() -> u32 {
@@ -97,13 +94,15 @@ fn mcu_to_target_arch(mcu: &str) -> &'static str {
 struct EspConfig {
     mcu: String,
     #[allow(dead_code)]
-    modem_tx_pin: u8,
+    modem_tx_pin: Option<u8>,
     #[allow(dead_code)]
-    modem_rx_pin: u8,
+    modem_rx_pin: Option<u8>,
     #[serde(default)]
     ble: EspBleConfig,
     #[serde(default)]
     can_buses: Vec<toml::Value>,
+    #[serde(default)]
+    status_leds: Vec<toml::Value>,
 }
 
 pub struct Builder;
@@ -130,6 +129,7 @@ impl Builder {
         }
 
         cmd.arg(cargo_cmd)
+            .env("ESP_LOG", "info")
             .current_dir(".app_build");
 
         if release {
@@ -158,12 +158,13 @@ impl TargetBuilder for Builder {
             eprintln!("Error: Unsupported ESP MCU '{}'. Supported MCUs are: {:?}", esp.mcu, supported_mcus);
             exit(1);
         }
-        if esp.ble.pairing_button_pin > 48 {
+        let pairing_pin = esp.ble.pairing_button_pin.unwrap_or(0);
+        if pairing_pin > 48 {
             eprintln!(
-                "Error: [hardware.esp.ble].pairing_button_pin={} is out of range.",
+                "Error: [hardware.esp.ble].pairing_button_pin={:?} is out of range.",
                 esp.ble.pairing_button_pin
             );
-            exit(1);
+            std::process::exit(1);
         }
         if esp.ble.pairing_button_hold_s == 0
             || esp.ble.max_bonded_phones == 0
@@ -174,6 +175,50 @@ impl TargetBuilder for Builder {
             );
             exit(1);
         }
+    }
+
+    fn rust_analyzer_config(&self, config: &Config) -> RustAnalyzerConfig {
+        let mcu = Self::get_esp_config(config).mcu;
+        let target = mcu_to_target_arch(&mcu);
+        let mut ra = RustAnalyzerConfig {
+            features: vec![mcu.clone()],
+            target: Some(target.to_string()),
+            // std-only crates can't be checked for a no_std target.
+            check_exclude: vec!["xtask".into(), "build-utils".into(), "board-pc".into()],
+            check_skip_tests: true,
+            ..Default::default()
+        };
+        // Xtensa has no prebuilt `core`: mirror the `+esp` toolchain and build-std
+        // that execute_cargo_command and .app_build/.cargo/config.toml use.
+        if target.starts_with("xtensa") {
+            ra.extra_env.push(("RUSTUP_TOOLCHAIN".into(), "esp".into()));
+            ra.extra_args.push("-Zbuild-std=core,alloc".into());
+        }
+        ra
+    }
+
+    fn debug_launch_config(&self, config: &Config) -> serde_json::Value {
+        let mcu = Self::get_esp_config(config).mcu;
+        let target = mcu_to_target_arch(&mcu);
+        // "esp32c3" -> "ESP32-C3", "esp32" -> "ESP32"
+        let variant = mcu.trim_start_matches("esp32").to_uppercase();
+        let chip_name = if variant.is_empty() { "ESP32".to_string() } else { format!("ESP32-{variant}") };
+        serde_json::json!({
+            "type": "probe-rs-debug",
+            "request": "launch",
+            "name": format!("{LAUNCH_NAME_PREFIX}debug {chip_name} (probe-rs)"),
+            "preLaunchTask": "Build: ESP firmware (debug)",
+            "chip": mcu,
+            "flashingConfig": {
+                "flashingEnabled": true,
+                "resetAfterFlashing": true,
+                "haltAfterReset": true
+            },
+            "coreConfigs": [{
+                "coreIndex": 0,
+                "programBinary": format!("{}/.app_build/target/{target}/debug/app-build", firmware_dir())
+            }]
+        })
     }
 
     fn generate_app_build(&self, config: &Config) {
@@ -214,9 +259,22 @@ impl TargetBuilder for Builder {
                         .unwrap_or_else(|| { eprintln!("\u{274c} TWAI bus {} missing 'tx_pin'", bus_id); exit(1); });
                     let rx = bus.get("rx_pin").and_then(|v| v.as_integer())
                         .unwrap_or_else(|| { eprintln!("\u{274c} TWAI bus {} missing 'rx_pin'", bus_id); exit(1); });
+                    let mut standby_init = String::new();
+                    if let Some(enable_pin) = bus.get("enable_pin").and_then(|v| v.as_integer()) {
+                        let enable_level = bus.get("enable_level").and_then(|v| v.as_str()).unwrap_or("high");
+                        let level_enum = if enable_level.eq_ignore_ascii_case("low") {
+                            "esp_hal::gpio::Level::Low"
+                        } else {
+                            "esp_hal::gpio::Level::High"
+                        };
+                        standby_init = format!(
+                            "    let _can_bus_{0}_enable = esp_hal::gpio::Output::new(peripherals.GPIO{1}, {2}, esp_hal::gpio::OutputConfig::default());\n",
+                            bus_id, enable_pin, level_enum
+                        );
+                    }
                     can_hardware_init.push_str(&format!(
-                        "    let can_bus_{0} = board_esp::init_twai(peripherals.TWAI0, peripherals.GPIO{2}, peripherals.GPIO{1}, {3});\n",
-                        bus_id, tx, rx, filters_expr
+                        "{4}    let can_bus_{0} = board_esp::init_twai(peripherals.TWAI0, peripherals.GPIO{2}, peripherals.GPIO{1}, {3});\n",
+                        bus_id, tx, rx, filters_expr, standby_init
                     ));
                     can_task_defs.push_str(&format!(
                         "#[embassy_executor::task]\nasync fn can_bus_{0}_task(driver: board_esp::TwaiDriver) {{\n    board_esp::run_twai_loop(driver, {0}, {1}).await;\n}}\n",
@@ -267,6 +325,23 @@ impl TargetBuilder for Builder {
                          );\n",
                         bus_id, spi, cs, clk, mosi, miso, filters_expr, int, can_speed_expr, mcp_speed_expr
                     ));
+                    // The MCP2515 has only 6 hardware RX filters, and `init_mcp2515` programs
+                    // the first 6 of this bus's filters with exact-match masks. Any filter past
+                    // the sixth would never match: its frames are rejected in hardware before
+                    // the software filter sees them, so the vehicle would silently miss those
+                    // signals (E-GMP has 33 filters on bus 0). Today those register writes
+                    // happen outside Configuration mode and have no effect, so the chip
+                    // accepts every frame (see docs/can.md); this check keeps a vehicle from
+                    // relying on that, since fixing the writes would start dropping frames.
+                    // The vehicle's filters are a Rust const, so xtask can't count them here;
+                    // instead the generated main.rs gets a compile-time check that fails the
+                    // build. Lifting the limit means accepting all frames in hardware (as CAN
+                    // debug mode does) and filtering in software, at the risk of RX overruns
+                    // on a busy bus.
+                    can_task_defs.push_str(&format!(
+                        "const _: () = assert!(\n    board_esp::bus_filter_count({1}, {0}) <= board_esp::MCP2515_HW_FILTERS,\n    \"CAN bus {0} is an MCP2515, which has 6 hardware RX filters, but the vehicle defines more than 6 CAN filters for this bus: the frames past the sixth would be silently dropped. Use a TWAI bus for this vehicle, or see the MCP2515 notes in boards/esp/xtask_builder.rs.\"\n);\n",
+                        bus_id, filters_expr
+                    ));
                     can_task_defs.push_str(&format!(
                         "#[embassy_executor::task]\nasync fn can_bus_{0}_task(driver: board_esp::Mcp2515Driver, int_pin: board_esp::CanIntPin) {{\n    board_esp::run_mcp2515_loop(driver, int_pin, {0}, {1}).await;\n}}\n",
                         bus_id, filters_expr
@@ -299,17 +374,22 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str(&format!("esp-hal = {{ version = \"{}\", features = [\"unstable\"] }}\n", ev("esp-hal")));
         cargo_toml.push_str(&format!("esp-rtos = {{ version = \"{}\", features = [\"embassy\", \"esp-radio\", \"esp-alloc\"] }}\n", ev("esp-rtos")));
         cargo_toml.push_str(&format!("esp-backtrace = {{ version = \"{}\", features = [\"panic-handler\", \"println\"] }}\n", ev("esp-backtrace")));
-        cargo_toml.push_str(&format!("esp-println = {{ version = \"{}\", features = [\"log-04\"] }}\n", ev("esp-println")));
+        // The classic ESP32 has no USB-Serial-JTAG peripheral; log over UART0 there.
+        let println_iface = if esp_hw.mcu == "esp32" { "uart" } else { "jtag-serial" };
+        cargo_toml.push_str(&format!("esp-println = {{ version = \"{}\", default-features = false, features = [\"log-04\", \"{}\"] }}\n", ev("esp-println"), println_iface));
         cargo_toml.push_str(&format!("esp-alloc = \"{}\"\n", ev("esp-alloc")));
         cargo_toml.push_str(&format!("embassy-executor = \"{}\"\n", v("embassy-executor")));
         cargo_toml.push_str(&format!("embassy-time = \"{}\"\n", v("embassy-time")));
         cargo_toml.push_str(&format!("static_cell = \"{}\"\n", ev("static_cell")));
+        cargo_toml.push_str(&format!("log = \"{}\"\n", v("log")));
         // Direct dep so we can forward the MCU chip feature via --features esp-radio/<mcu>
         cargo_toml.push_str(&format!("esp-radio = {{ version = \"{}\", features = [\"wifi\", \"ble\", \"unstable\"] }}\n", ev("esp-radio")));
         // Direct dep so we can forward the MCU chip feature via --features esp-storage/<mcu>
         cargo_toml.push_str(&format!("esp-storage = {{ version = \"{}\", features = [\"critical-section\"] }}\n", ev("esp-storage")));
         // App descriptor for the ESP-IDF 2nd stage bootloader (sets min_efuse_blk_rev_full to 0)
         cargo_toml.push_str(&format!("esp-bootloader-esp-idf = {{ version = \"{}\" }}\n", ev("esp-bootloader-esp-idf")));
+
+        cargo_toml.push_str(&crate::workspace_patch_section(config));
 
         // Debug-profile: optimize for size while keeping debug symbols so probe-rs can still
         // attach.  Without this, opt-level=0 leaves BLE/rand_chacha stack frames so large that
@@ -359,13 +439,16 @@ impl TargetBuilder for Builder {
 
         let ble_constants = format!(
             "const BLE_DEVICE_NAME_BASE: &str = \"{ble_name}\";\n\
-             const BLE_PAIRING_BUTTON_PIN: u8 = {pair_btn};\n\
+             const BLE_PAIRING_BUTTON_PIN: Option<u8> = {pair_btn};\n\
              const BLE_PAIRING_BUTTON_HOLD_S: u32 = {pair_hold};\n\
              const BLE_PAIRING_WINDOW_S: u32 = {pair_window};\n\
              const BLE_MAX_BONDED_PHONES: u8 = {max_bonds};\n\
              const BLE_CONTROLLER_LEASE_TTL_S: u32 = {lease_ttl};",
             ble_name = ble_device_name,
-            pair_btn = esp_hw.ble.pairing_button_pin,
+            pair_btn = match esp_hw.ble.pairing_button_pin {
+                Some(p) if p >= 0 => format!("Some({})", p),
+                _ => "None".to_string()
+            },
             pair_hold = esp_hw.ble.pairing_button_hold_s,
             pair_window = transport.ble.pairing.pairing_window_seconds,
             max_bonds = esp_hw.ble.max_bonded_phones,
@@ -439,19 +522,108 @@ impl TargetBuilder for Builder {
             "    // WiFi disabled: MQTT driver not spawned.\n".to_string()
         };
 
+        let is_dual_core = esp_hw.mcu == "esp32" || esp_hw.mcu == "esp32s3";
+        let heap_size = if is_dual_core { "160 * 1024" } else { "83 * 1024" };
+        // RAM used by the 2nd-stage bootloader is free once the app runs. On the RISC-V
+        // chips it is a separate ~64 KB region, so use it as extra heap for the WiFi/BLE
+        // stacks instead of taking more from the shared stack/heap SRAM.
+        let reclaimed_heap = if mcu_to_target_arch(&esp_hw.mcu).starts_with("riscv") {
+            "    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);\n"
+        } else {
+            ""
+        };
+
+        let can_driver_spawn = if is_dual_core {
+            format!(
+                "    static CORE1_STACK: static_cell::StaticCell<esp_hal::system::Stack<8192>> = static_cell::StaticCell::new();\n\
+                     static CORE1_EXECUTOR: static_cell::StaticCell<esp_rtos::embassy::Executor> = static_cell::StaticCell::new();\n\
+                 \n\
+                     esp_rtos::start_second_core(\n\
+                         peripherals.CPU_CTRL,\n\
+                         unsafe {{ esp_hal::interrupt::software::SoftwareInterrupt::<1>::steal() }},\n\
+                         CORE1_STACK.init(esp_hal::system::Stack::new()),\n\
+                         move || {{\n\
+                             CORE1_EXECUTOR.init(esp_rtos::embassy::Executor::new()).run(|s: embassy_executor::Spawner| {{\n\
+                 {0}            }});\n\
+                         }},\n\
+                     );\n",
+                can_task_spawns
+            )
+        } else {
+            can_task_spawns.replace("                s.spawn(", "    spawner.spawn(")
+        };
+
+        let mut idle_loop = String::new();
+        if esp_hw.status_leds.is_empty() {
+            idle_loop.push_str("    loop {\n        embassy_time::Timer::after(embassy_time::Duration::from_secs(1)).await;\n    }");
+        } else {
+            let mut init_block = String::new();
+            let mut loop_block = String::new();
+            loop_block.push_str("        let flags = board_esp::status_leds::get_flags();\n");
+
+            for led in &esp_hw.status_leds {
+                let typ = led.get("type").and_then(|v| v.as_str()).unwrap_or("gpio");
+                if typ == "gpio" {
+                    let pin = led.get("pin").and_then(|v| v.as_integer()).unwrap_or_else(|| { eprintln!("Status LED missing 'pin'"); exit(1); });
+                    let role = led.get("role").and_then(|v| v.as_str()).unwrap_or("power");
+                    let role_ident = role.replace('-', "_");
+                    
+                    let active_low = led.get("active_low").and_then(|v| v.as_bool()).unwrap_or(true);
+                    let (on_level, off_level) = if active_low {
+                        ("set_low", "set_high")
+                    } else {
+                        ("set_high", "set_low")
+                    };
+                    
+                    let init_level = if active_low { "High" } else { "Low" };
+                    init_block.push_str(&format!(
+                        "    let mut led_{0} = esp_hal::gpio::Output::new(peripherals.GPIO{1}, esp_hal::gpio::Level::{2}, esp_hal::gpio::OutputConfig::default());\n",
+                        role_ident, pin, init_level
+                    ));
+                    
+                    let flag_const = match role {
+                        "power" => "FLAG_POWER",
+                        "wireless" => "FLAG_WIRELESS",
+                        "can" => "FLAG_CAN",
+                        _ => "FLAG_POWER", // fallback
+                    };
+
+                    loop_block.push_str(&format!(
+                        "        if (flags & board_esp::status_leds::{1}) != 0 {{\n\
+                                     led_{0}.{2}();\n\
+                                 }} else {{\n\
+                                     led_{0}.{3}();\n\
+                                 }}\n",
+                        role_ident, flag_const, on_level, off_level
+                    ));
+                    if role == "can" {
+                        loop_block.push_str("        board_esp::status_leds::set_flag(board_esp::status_leds::FLAG_CAN, false);\n");
+                    }
+                }
+            }
+            loop_block.push_str("        embassy_time::Timer::after(embassy_time::Duration::from_millis(50)).await;\n");
+            idle_loop.push_str(&init_block);
+            idle_loop.push_str("    loop {\n");
+            idle_loop.push_str(&loop_block);
+            idle_loop.push_str("    }");
+        }
+
         let template = fs::read_to_string("boards/esp/main.template.rs")
             .expect("\u{274c} Could not read boards/esp/main.template.rs");
         let main_rs = template
             .replace("{PLATFORM_ID}", &format!("0x{:08X}", platform_id))
             .replace("{VEHICLE_CRATE_IDENT}", &vehicle_crate_ident)
+            .replace("{HEAP_SIZE}", heap_size)
+            .replace("{RECLAIMED_HEAP}", reclaimed_heap)
             .replace("{CAN_HARDWARE_INIT}", &can_hardware_init)
-            .replace("{CORE1_CAN_TASK_DEFS}", &can_task_defs)
-            .replace("{CORE1_TASK_SPAWNS}", &can_task_spawns)
+            .replace("{CAN_TASK_DEFS}", &can_task_defs)
+            .replace("{CAN_DRIVER_SPAWN}", &can_driver_spawn)
             .replace("{MTLS_CERTS}", &mtls_certs)
             .replace("{NETWORK_CONSTANTS}", &network_constants)
             .replace("{NETWORK_HARDWARE_INIT}", &network_hardware_init)
             .replace("{BLE_DRIVER_SPAWN}", &ble_driver_spawn)
-            .replace("{MQTT_DRIVER_SPAWN}", &mqtt_driver_spawn);
+            .replace("{MQTT_DRIVER_SPAWN}", &mqtt_driver_spawn)
+            .replace("{IDLE_LOOP}", &idle_loop);
 
         let target_arch = mcu_to_target_arch(&esp_hw.mcu);
         let cargo_config = if target_arch.starts_with("xtensa") {
@@ -474,6 +646,9 @@ impl TargetBuilder for Builder {
         fs::write(".app_build/Cargo.toml", cargo_toml).expect("Failed to write .app_build/Cargo.toml");
         fs::write(".app_build/.cargo/config.toml", cargo_config).expect("Failed to write .app_build/.cargo/config.toml");
         fs::write(".app_build/src/main.rs", main_rs).expect("Failed to write .app_build/src/main.rs");
+        
+        // Remove stale Cargo.lock so the bitvec patch is correctly applied
+        let _ = fs::remove_file(".app_build/Cargo.lock");
     }
 
     fn compile(&self, config: &Config, release: bool) {
@@ -587,6 +762,8 @@ impl TargetBuilder for Builder {
         // embedded-test requires harness = false for the binary target.
         cargo_toml.push_str("\n[[bin]]\nname = \"app-test-build\"\ntest = true\nharness = false\n");
 
+        cargo_toml.push_str(&crate::workspace_patch_section(config));
+
         // Generate main.rs from template
         let template = fs::read_to_string("boards/esp/tests.template.rs")
             .expect("\u{274c} Could not read boards/esp/tests.template.rs");
@@ -599,6 +776,10 @@ impl TargetBuilder for Builder {
             .expect("Failed to write .app_test_build/Cargo.toml");
         fs::write(".app_test_build/src/main.rs", main_rs)
             .expect("Failed to write .app_test_build/src/main.rs");
+            
+        // Remove stale Cargo.lock so the bitvec patch is correctly applied
+        let _ = fs::remove_file(".app_test_build/Cargo.lock");
+        
         println!(".app_test_build/ generated for {} ({})", mcu, config.target.platform);
     }
 

@@ -3,7 +3,8 @@ members = [
     "core-interface",
     "cars/*",
     "boards/*",
-    "xtask"
+    "xtask",
+    "build-utils"
 ]
 exclude = [
     ".app_build"
@@ -20,8 +21,8 @@ core-interface = { path = "core-interface" }
 prost = { version = "0.14.3", default-features = false, features = [ "derive" ]}
 prost-build = "0.14.3"
 toml = "1.1.0"
-bytes = { version = "=1.11.1", default-features = false }
-
+bytes = { version = "=1.11.1", default-features = false, features = ["extra-platforms"] }
+portable-atomic = { version = "1.3", default-features = false }
 embedded-can = "0.4.1"
 embedded-hal = "1.0.0"
 embedded-io-async = { version = "0.7", default-features = false }
@@ -34,3 +35,9 @@ embassy-futures = "0.1.2"
 critical-section = { version = "1.2.0", features = ["std"] }
 rust-mqtt = { version = "0.5.1", default-features = false, features = ["v5", "alloc"] }
 log = "0.4.29"
+
+# bitvec 1.0's `radium` dependency doesn't build for Xtensa (no 64-bit atomics).
+# Kept at the workspace root so rust-analyzer's check matches the real build;
+# xtask copies this table into the generated .app_build/.app_test_build crates.
+[patch.crates-io]
+bitvec = { git = "https://github.com/ferrilab/ferrilab.git", rev = "6af4ab0a33233573326f4b27f0193a2c956aada5" }

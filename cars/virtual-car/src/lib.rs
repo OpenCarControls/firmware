@@ -9,8 +9,8 @@ use embedded_can::{Id, StandardId};
 use prost::Message;
 
 use core_interface::{
-    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, CAN_RX_CHANNEL, CAN_TX_CHANNEL, CMD_RESP_CHANNEL,
-    CanFilter, CanFrame, VEHICLE_STATE_CHANNEL, VehicleStatePayload,
+    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, CAN_RX_CHANNEL, CMD_RESP_CHANNEL, CanFilter, CanFrame,
+    VEHICLE_STATE_CHANNEL, VehicleStatePayload,
 };
 
 pub mod proto {
@@ -55,6 +55,7 @@ impl VirtualCarState {
 ///
 /// `odometer` increments by 1 km at tick 19 (end of each full cycle).
 /// `are_doors_locked` is intentionally untouched — it is command-controlled only.
+#[cfg(debug_assertions)]
 pub fn tick_simulation(state: &mut VirtualCarState, tick: u64) {
     let phase = (tick % 20) as i32;
     let speed = match phase {
@@ -183,15 +184,13 @@ async fn send_can_request(id: StandardId, data: &[u8]) {
     let mut buf = [0u8; 8];
     let dlc = data.len().min(8) as u8;
     buf[..dlc as usize].copy_from_slice(&data[..dlc as usize]);
-    CAN_TX_CHANNEL
-        .sender()
-        .send(CanFrame {
-            bus_id: 0,
-            id: Id::Standard(id),
-            data: buf,
-            dlc,
-        })
-        .await;
+    core_interface::send_can_frame(CanFrame {
+        bus_id: 0,
+        id: Id::Standard(id),
+        data: buf,
+        dlc,
+    })
+    .await;
 }
 
 /// state update to `VEHICLE_STATE_CHANNEL`, and sends a `CommandResponse` to
@@ -288,8 +287,12 @@ pub async fn state_update_task() {
     loop {
         Timer::after(Duration::from_secs(5)).await;
         let payload = {
+            #[allow(unused_mut)]
             let mut state = CAR_STATE.lock().await;
-            tick_simulation(&mut state, tick);
+            #[cfg(debug_assertions)]
+            if core_interface::is_simulation_enabled() {
+                tick_simulation(&mut state, tick);
+            }
             encode_state(&state)
         };
         tick = tick.wrapping_add(1);
@@ -370,5 +373,31 @@ mod tests {
         assert_eq!(basic.are_doors_locked, Some(false));
         assert_eq!(advanced.speed, Some(0));
         assert_eq!(advanced.gear, Some(0));
+    }
+
+    /// The largest state update this vehicle can produce must fit in one BLE
+    /// message: BLE messages aren't fragmented, and an oversized update is
+    /// dropped on the device. Every field is set to the value with the longest
+    /// protobuf encoding (negative ints take 10 bytes). The struct is built
+    /// without `..` on purpose: a new state field won't compile until it's
+    /// covered here.
+    #[test]
+    fn worst_case_state_update_fits_one_ble_message() {
+        let state = VirtualCarState {
+            odometer: Some(u32::MAX),
+            is_driving: Some(true),
+            are_doors_locked: Some(true),
+            speed: Some(i32::MIN),
+            gear: Some(i32::MIN),
+            custom_state1: Some(true),
+        };
+
+        let msg = core_interface::ble_state_update(u64::MAX, u32::MAX, encode_state(&state));
+        let limit = core_interface::ble::BLE_MAX_MESSAGE_BYTES;
+        assert!(
+            msg.encoded_len() <= limit,
+            "worst-case virtual car state update is {} bytes, BLE limit is {limit}",
+            msg.encoded_len()
+        );
     }
 }

@@ -12,11 +12,13 @@ mod dispatch;
 mod lifecycle;
 mod pairing;
 mod routing;
+#[cfg(debug_assertions)]
+mod simulation;
 mod types;
 
 pub mod ble;
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use portable_atomic::{AtomicU32, Ordering};
 
 // ── Platform ID ───────────────────────────────────────────────────────────────
 
@@ -46,12 +48,14 @@ pub use types::{
 // Channels
 pub use channels::{
     ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, BLE_RX_CHANNEL, BLE_TX_CHANNEL, CAN_DEBUG_RX_CHANNEL,
-    CAN_RX_CHANNEL, CAN_TX_CHANNEL, CMD_RESP_CHANNEL, MQTT_RX_CHANNEL, MQTT_TX_CHANNEL,
-    SYSTEM_COMMAND_CHANNEL, VEHICLE_STATE_CHANNEL,
+    CAN_RX_CHANNEL, CAN_TX_CHANNELS, CMD_RESP_CHANNEL, MAX_CAN_BUSES, MQTT_RX_CHANNEL,
+    MQTT_TX_CHANNEL, SYSTEM_COMMAND_CHANNEL, VEHICLE_STATE_CHANNEL, can_tx_channel, send_can_frame,
 };
 
 // CAN filter & read-only
-pub use can::{is_can_read_only, passes_filter, set_can_read_only};
+pub use can::{
+    CanReadOnlyReceiver, can_read_only_receiver, is_can_read_only, passes_filter, set_can_read_only,
+};
 
 // CAN debug
 pub use can_debug::{
@@ -76,6 +80,10 @@ pub use dispatch::{
 
 // Routing tasks
 pub use routing::{
-    publish_single_state, publish_state_task, record_mqtt_activity, reset_mqtt_throttle_for_tests,
-    route_responses_task, route_single_response,
+    ble_state_update, publish_single_state, publish_state_task, record_mqtt_activity,
+    reset_mqtt_throttle_for_tests, route_responses_task, route_single_response,
 };
+
+// Simulation
+#[cfg(debug_assertions)]
+pub use simulation::{is_simulation_enabled, set_simulation_enabled};

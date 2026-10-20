@@ -1,0 +1,40 @@
+# =======================================================
+#    MeatPi WiCAN (ESP32-C3) Hardware Configuration
+# =======================================================
+# Copy the [hardware.esp] section into your config.toml
+# to use this board.
+
+[target]
+board = "esp"
+
+[hardware.esp]
+mcu = "esp32c3"
+
+[[hardware.esp.status_leds]]
+type = "gpio"
+pin = 7
+role = "power"
+active_low = false
+
+[[hardware.esp.status_leds]]
+type = "gpio"
+pin = 8
+role = "wireless"
+active_low = true
+
+[[hardware.esp.status_leds]]
+type = "gpio"
+pin = 9
+role = "can"
+active_low = true
+
+[hardware.esp.ble]
+pairing_button_pin = -1
+
+# CAN bus definitions
+[[hardware.esp.can_buses]]
+interface = "twai"
+tx_pin = 0
+rx_pin = 3
+enable_pin = 6       
+enable_level = "low"

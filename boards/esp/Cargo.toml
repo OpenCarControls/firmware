@@ -4,14 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-# Enables all ESP HAL and peripheral driver dependencies.
-# Required for firmware builds; omit when running host-side unit tests
-# (e.g. `cargo test -p board-esp` or `cargo xtask test`).
+# Enables the ESP HAL, radio and peripheral driver code. Those crates only
+# compile for ESP chips, so this stays off for host-side unit tests
+# (`cargo test -p board-esp`, `cargo xtask test`) and pure logic lives outside
+# `#[cfg(feature = "hardware")]` blocks. Firmware builds enable it via xtask.
 hardware = [
     "dep:embassy-executor",
     "dep:embassy-futures",
     "dep:embassy-net",
-    "dep:embassy-sync",
     "dep:embassy-time",
     "dep:embedded-hal-bus",
     "dep:embedded-hal",
@@ -22,24 +22,20 @@ hardware = [
     "dep:esp-radio",
     "dep:esp-rtos",
     "dep:esp-storage",
-    "dep:heapless",
     "dep:log",
     "dep:mcp2515",
     "dep:nb",
     "dep:prost",
     "dep:rust-mqtt",
     "dep:static_cell",
-    "dep:bt-hci",
-    "dep:trouble-host",
-    "dep:sequential-storage",
     "dep:embassy-embedded-hal",
     "dep:embedded-storage-async",
     "dep:rand_core",
 ]
 
-# Development features — enable hardware + a specific chip for rust-analyzer IDE support.
-# Usage: set rust-analyzer.cargo.features = ["dev-esp32s3"] in .vscode/settings.json.
-dev-esp32   = [
+# Chip features — `hardware` plus the chip on every ESP dependency, for rust-analyzer.
+# Selected automatically by `cargo xtask ide` from the MCU in config.toml.
+esp32 = [
     "hardware",
     "esp-hal/esp32",
     "esp-println/esp32", "esp-println/auto",
@@ -47,7 +43,7 @@ dev-esp32   = [
     "esp-rtos/esp32",
     "esp-storage/esp32",
 ]
-dev-esp32s3 = [
+esp32s3 = [
     "hardware",
     "esp-hal/esp32s3",
     "esp-println/esp32s3", "esp-println/auto",
@@ -55,15 +51,15 @@ dev-esp32s3 = [
     "esp-rtos/esp32s3",
     "esp-storage/esp32s3",
 ]
-dev-esp32c3 = [
+esp32c3 = [
     "hardware",
     "esp-hal/esp32c3",
-    "esp-println/esp32c3", "esp-println/auto",
+    "esp-println/esp32c3", "esp-println/jtag-serial",
     "esp-radio/esp32c3",
     "esp-rtos/esp32c3",
     "esp-storage/esp32c3",
 ]
-dev-esp32c6 = [
+esp32c6 = [
     "hardware",
     "esp-hal/esp32c6",
     "esp-println/esp32c6", "esp-println/auto",
@@ -77,7 +73,7 @@ core-interface = { workspace = true }
 embassy-executor = { workspace = true, optional = true }
 embassy-futures = { workspace = true, optional = true }
 embassy-net = { version = "0.9.0", features = ["tcp", "dhcpv4", "medium-ethernet"], optional = true }
-embassy-sync = { workspace = true, optional = true }
+embassy-sync = { workspace = true }
 embassy-time = { workspace = true, optional = true }
 embedded-can = { workspace = true }
 embedded-hal = { workspace = true, optional = true }
@@ -86,25 +82,22 @@ embedded-io-async = { workspace = true, optional = true }
 embedded-storage = { version = "0.3.1", optional = true }
 esp-hal = { version = "=1.1.0", default-features = false, features = ["unstable"], optional = true }
 esp-println = { version = "0.17.0", default-features = false, features = ["log-04"], optional = true }
-esp-radio = { version = "0.18.0", default-features = false, features = ["wifi", "ble", "unstable"], optional = true }
+esp-radio = { version = "0.18.0", default-features = false, features = ["wifi", "ble", "coex", "unstable"], optional = true }
 esp-rtos = { version = "0.3.0", default-features = false, features = ["embassy", "esp-radio", "esp-alloc"], optional = true }
 esp-storage = { version = "0.9.0", default-features = false, features = ["critical-section"], optional = true }
-heapless = { version = "0.9.2", optional = true }
+heapless = { version = "0.9.2" }
 log = { workspace = true, optional = true }
 mcp2515 = { version = "0.3.0", optional = true }
 nb = { version = "1.1.0", optional = true }
 prost = { workspace = true, optional = true }
 rust-mqtt = { workspace = true, optional = true }
 static_cell = { version = "2.1.1", optional = true }
-bt-hci = { version = "0.8.1", default-features = false, optional = true }
-trouble-host = { version = "0.6.0", features = ["derive", "security", "default-packet-pool-mtu-255"], optional = true }
-sequential-storage = { version = "4", optional = true }
+bt-hci = { version = "0.8.1", default-features = false }
+trouble-host = { version = "0.6.0", features = ["derive", "security", "default-packet-pool-mtu-255"] }
+sequential-storage = { version = "4" }
 embassy-embedded-hal = { version = "0.6.0", optional = true }
 embedded-storage-async = { version = "0.4", optional = true }
 rand_core = { version = "0.6", default-features = false, optional = true }
-
-[dev-dependencies]
-prost = { workspace = true }
 
 # Versions for crates injected into generated .app_build / .app_test_build by xtask.
 # These are not direct dependencies of board-esp itself.

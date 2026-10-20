@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicU32, Ordering};
+use portable_atomic::{AtomicU32, Ordering};
 
 static PAIRING_WINDOW_UNTIL_S: AtomicU32 = AtomicU32::new(0);
 

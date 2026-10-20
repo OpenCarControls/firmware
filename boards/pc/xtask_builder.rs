@@ -1,6 +1,7 @@
 use crate::{
-    Config, TargetBuilder, escape_rust_string, load_transport_contract, parse_broker_url,
-    render_topic_from_template, validate_ble_transport_contract,
+    Config, LAUNCH_NAME_PREFIX, RustAnalyzerConfig, TargetBuilder, escape_rust_string,
+    firmware_dir, load_transport_contract, parse_broker_url, render_topic_from_template,
+    validate_ble_transport_contract,
 };
 use serde::Deserialize;
 use std::fs;
@@ -86,6 +87,25 @@ impl TargetBuilder for Builder {
         }
     }
 
+    fn rust_analyzer_config(&self, _config: &Config) -> RustAnalyzerConfig {
+        // board-pc has no features to enable; the host target is the default.
+        RustAnalyzerConfig::default()
+    }
+
+    fn debug_launch_config(&self, _config: &Config) -> serde_json::Value {
+        let fw = firmware_dir();
+        serde_json::json!({
+            "type": "lldb",
+            "request": "launch",
+            "name": format!("{LAUNCH_NAME_PREFIX}debug PC board"),
+            "preLaunchTask": "Build: PC firmware (debug)",
+            "program": format!("{fw}/.app_build/target/debug/app-build"),
+            "args": [],
+            "cwd": fw,
+            "env": { "RUST_LOG": "info" }
+        })
+    }
+
     fn generate_app_build(&self, config: &Config) {
         let transport = load_transport_contract();
         validate_ble_transport_contract(&transport);
@@ -119,7 +139,7 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str("[package]\nname = \"app-build\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n");
         cargo_toml.push_str("[dependencies]\n");
         cargo_toml.push_str("core-interface = { path = \"../core-interface\" }\n");
-        cargo_toml.push_str("board-pc = { path = \"../boards/pc\", features = [\"hardware\"] }\n");
+        cargo_toml.push_str("board-pc = { path = \"../boards/pc\" }\n");
         cargo_toml.push_str(&format!(
             "{} = {{ path = \"../cars/{}\" }}\n",
             vehicle_crate_name, vehicle_platform
@@ -129,6 +149,7 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str(&format!("embassy-time = {{ version = \"{}\", features = [\"std\"] }}\n", v("embassy-time")));
         cargo_toml.push_str(&format!("critical-section = {{ version = \"{}\", features = [\"std\"] }}\n", v("critical-section")));
         cargo_toml.push_str("env_logger = \"0.11\"\n");
+        cargo_toml.push_str(&format!("log = \"{}\"\n", v("log")));
 
         // Build .app_build/src/main.rs from template
         let mtls_certs = crate::generate_mtls_certs(config);
