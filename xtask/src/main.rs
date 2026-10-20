@@ -460,8 +460,13 @@ fn main() {
             merge_toml(&mut base_hw, &config.hardware);
             config.hardware = base_hw;
         }
-        if let Some(tgt) = profile_toml.get("target") {
-            if let Some(board) = tgt.get("board").and_then(|v| v.as_str()) {
+        // Like the hardware settings, a board set in the config wins over the profile's.
+        if config.target.board.is_none() {
+            if let Some(board) = profile_toml
+                .get("target")
+                .and_then(|t| t.get("board"))
+                .and_then(|v| v.as_str())
+            {
                 config.target.board = Some(board.to_string());
             }
         }

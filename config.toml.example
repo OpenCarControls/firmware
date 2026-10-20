@@ -44,8 +44,10 @@ http_port = 4242
 max_bonded_phones = 8
 paired_phones_file = "/tmp/opencar-paired-phones.txt"
 
-# [[hardware.pc.can_buses]]
-# interface = "vcan0"
+# CAN bus definitions — order determines bus_id (0-based).
+# Each entry maps to a SocketCAN network interface (real or virtual).
+[[hardware.pc.can_buses]]
+interface = "vcan0"
 
 # ===========================
 #    NETWORK CONFIGURATION
