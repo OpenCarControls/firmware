@@ -132,7 +132,10 @@ pub struct TransportBleCharacteristic {
 pub fn workspace_patch_section(config: &Config) -> String {
     let mut root = toml::Table::new();
     root.insert("patch".into(), config.workspace_patch.clone());
-    format!("\n{}", toml::to_string(&root).expect("Failed to serialize [patch] table"))
+    format!(
+        "\n{}",
+        toml::to_string(&root).expect("Failed to serialize [patch] table")
+    )
 }
 
 /// Returns the version string for a `[workspace.dependencies]` entry.
@@ -441,7 +444,10 @@ fn main() {
     let ws_toml: toml::Value =
         toml::from_str(&ws_toml_str).expect("Failed to parse workspace Cargo.toml");
     config.workspace_deps = ws_toml["workspace"]["dependencies"].clone();
-    config.workspace_patch = ws_toml.get("patch").cloned().unwrap_or_else(default_empty_toml_table);
+    config.workspace_patch = ws_toml
+        .get("patch")
+        .cloned()
+        .unwrap_or_else(default_empty_toml_table);
 
     if let Some(profile) = &config.target.hardware_profile {
         let profile_path = format!("hardware-profiles/{}.toml", profile);
@@ -553,15 +559,22 @@ fn write_vscode_config(board: &str, ra: &RustAnalyzerConfig, launch: serde_json:
         settings.insert("rust-analyzer.cargo.target".into(), json!(target));
     }
     if !ra.extra_env.is_empty() {
-        let env: serde_json::Map<String, Value> =
-            ra.extra_env.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+        let env: serde_json::Map<String, Value> = ra
+            .extra_env
+            .iter()
+            .map(|(k, v)| (k.clone(), json!(v)))
+            .collect();
         settings.insert("rust-analyzer.cargo.extraEnv".into(), Value::Object(env));
     }
     if !ra.extra_args.is_empty() {
         settings.insert("rust-analyzer.cargo.extraArgs".into(), json!(ra.extra_args));
     }
     if !ra.check_exclude.is_empty() {
-        let args: Vec<&str> = ra.check_exclude.iter().flat_map(|p| ["--exclude", p.as_str()]).collect();
+        let args: Vec<&str> = ra
+            .check_exclude
+            .iter()
+            .flat_map(|p| ["--exclude", p.as_str()])
+            .collect();
         settings.insert("rust-analyzer.check.extraArgs".into(), json!(args));
     }
     if ra.check_skip_tests {
@@ -576,7 +589,9 @@ fn write_vscode_config(board: &str, ra: &RustAnalyzerConfig, launch: serde_json:
         _ => Vec::new(),
     };
     configurations.retain(|c| {
-        !c.get("name").and_then(Value::as_str).is_some_and(|n| n.starts_with(LAUNCH_NAME_PREFIX))
+        !c.get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|n| n.starts_with(LAUNCH_NAME_PREFIX))
     });
     let launch_name = launch["name"].as_str().unwrap_or_default().to_string();
     configurations.insert(0, launch);
@@ -584,8 +599,14 @@ fn write_vscode_config(board: &str, ra: &RustAnalyzerConfig, launch: serde_json:
     launch_json.insert("configurations".into(), Value::Array(configurations));
     write_vscode_json(&launch_path, launch_json);
 
-    let target = ra.target.as_deref().map(|t| format!(", {t}")).unwrap_or_default();
-    println!("✅ VS Code now targets the '{board}' board{target}: rust-analyzer settings and the \"{launch_name}\" debug config ({dir}/).");
+    let target = ra
+        .target
+        .as_deref()
+        .map(|t| format!(", {t}"))
+        .unwrap_or_default();
+    println!(
+        "✅ VS Code now targets the '{board}' board{target}: rust-analyzer settings and the \"{launch_name}\" debug config ({dir}/)."
+    );
 }
 
 fn read_vscode_json(path: &str) -> serde_json::Map<String, serde_json::Value> {
@@ -593,7 +614,9 @@ fn read_vscode_json(path: &str) -> serde_json::Map<String, serde_json::Value> {
         Ok(s) if !s.trim().is_empty() => match serde_json::from_str(&s) {
             Ok(serde_json::Value::Object(map)) => map,
             _ => {
-                eprintln!("Error: {path} isn't plain JSON (comments aren't supported); fix or delete it and re-run.");
+                eprintln!(
+                    "Error: {path} isn't plain JSON (comments aren't supported); fix or delete it and re-run."
+                );
                 exit(1);
             }
         },

@@ -4,15 +4,16 @@
 extern crate alloc;
 
 pub mod can;
-pub use can::{CAN_FILTERS, can_rx_task};
 use alloc::string::String;
+pub use can::{CAN_FILTERS, can_rx_task};
+use core_interface::{
+    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, CMD_RESP_CHANNEL, VEHICLE_STATE_CHANNEL,
+    VehicleStatePayload,
+};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer, with_timeout};
-use core_interface::{
-    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, CMD_RESP_CHANNEL, VEHICLE_STATE_CHANNEL, VehicleStatePayload,
-};
 use prost::Message;
 
 pub mod proto {
@@ -209,7 +210,8 @@ impl EgmpCarState {
     }
 }
 
-pub(crate) static CAR_STATE: Mutex<CriticalSectionRawMutex, EgmpCarState> = Mutex::new(EgmpCarState::new());
+pub(crate) static CAR_STATE: Mutex<CriticalSectionRawMutex, EgmpCarState> =
+    Mutex::new(EgmpCarState::new());
 
 /// Raised by the CAN handler whenever `CAR_STATE` changes. `state_update_task` coalesces
 /// these so a busy bus produces at most one publish per `STATE_MIN_PUBLISH_INTERVAL`.
@@ -277,8 +279,6 @@ pub fn encode_state(state: &EgmpCarState) -> VehicleStatePayload {
     }
 }
 
-
-
 #[embassy_executor::task]
 pub async fn handle_basic_commands_task() {
     loop {
@@ -304,21 +304,11 @@ pub async fn handle_basic_commands_task() {
 pub async fn process_basic_command(bytes: &[u8]) -> Result<(), &'static str> {
     let cmd = proto::BasicCommand::decode(bytes).map_err(|_| "Failed to decode BasicCommand")?;
     match cmd.action {
-        Some(proto::basic_command::Action::DoorLockCommand(_)) => {
-            Err("Not implemented")
-        }
-        Some(proto::basic_command::Action::ChargePortCommand(_)) => {
-            Err("Not implemented")
-        }
-        Some(proto::basic_command::Action::FlashLightsCommand(_)) => {
-            Err("Not implemented")
-        }
-        Some(proto::basic_command::Action::ClimateControlCommand(_)) => {
-            Err("Not implemented")
-        }
-        Some(proto::basic_command::Action::WindowCommand(_)) => {
-            Err("Not implemented")
-        }
+        Some(proto::basic_command::Action::DoorLockCommand(_)) => Err("Not implemented"),
+        Some(proto::basic_command::Action::ChargePortCommand(_)) => Err("Not implemented"),
+        Some(proto::basic_command::Action::FlashLightsCommand(_)) => Err("Not implemented"),
+        Some(proto::basic_command::Action::ClimateControlCommand(_)) => Err("Not implemented"),
+        Some(proto::basic_command::Action::WindowCommand(_)) => Err("Not implemented"),
         None => Err("No action in BasicCommand"),
     }
 }
@@ -376,10 +366,14 @@ pub fn tick_simulation(state: &mut EgmpCarState, tick: u64) {
 
     if phase < 15 {
         // 0-14: Parked, doors sequence
-        if phase > 1 && phase < 13 { state.is_driver_door_open = Some(true); }
-        if phase > 3 && phase < 11 { state.is_passenger_door_open = Some(true); }
-        if phase > 5 && phase < 9 { 
-            state.is_rear_left_door_open = Some(true); 
+        if phase > 1 && phase < 13 {
+            state.is_driver_door_open = Some(true);
+        }
+        if phase > 3 && phase < 11 {
+            state.is_passenger_door_open = Some(true);
+        }
+        if phase > 5 && phase < 9 {
+            state.is_rear_left_door_open = Some(true);
             state.is_rear_right_door_open = Some(true);
         }
     } else if phase < 50 {
@@ -393,9 +387,13 @@ pub fn tick_simulation(state: &mut EgmpCarState, tick: u64) {
         };
         state.speed = Some(speed);
         state.is_driving = Some(speed > 0);
-        state.gear = Some(if speed > 0 { proto::advanced_state::Gear::Drive } else { proto::advanced_state::Gear::Park });
+        state.gear = Some(if speed > 0 {
+            proto::advanced_state::Gear::Drive
+        } else {
+            proto::advanced_state::Gear::Park
+        });
         state.power_state = Some(proto::advanced_state::PowerState::Ready);
-        
+
         if speed > 0 {
             state.power_flow_watt = Some(-25000); // Discharging 25kW
             if drive_phase % 4 == 0 {
@@ -405,7 +403,7 @@ pub fn tick_simulation(state: &mut EgmpCarState, tick: u64) {
                 }
             }
         }
-        
+
         if drive_phase == 34 {
             state.odometer = Some(state.odometer.unwrap_or(0).saturating_add(2));
         }
@@ -502,7 +500,10 @@ mod tests {
         assert_eq!(basic.are_doors_locked, Some(false));
 
         assert_eq!(advanced.battery_voltage, Some(400));
-        assert_eq!(advanced.gear, Some(proto::advanced_state::Gear::Park as i32));
+        assert_eq!(
+            advanced.gear,
+            Some(proto::advanced_state::Gear::Park as i32)
+        );
     }
 
     /// The largest state update this vehicle can produce must fit in one BLE

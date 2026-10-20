@@ -21,8 +21,7 @@ static CAN_READ_ONLY_WATCH: Watch<CriticalSectionRawMutex, bool, MAX_CAN_BUSES> 
     Watch::new_with(true);
 
 /// Receiver type returned by [`can_read_only_receiver`].
-pub type CanReadOnlyReceiver =
-    Receiver<'static, CriticalSectionRawMutex, bool, MAX_CAN_BUSES>;
+pub type CanReadOnlyReceiver = Receiver<'static, CriticalSectionRawMutex, bool, MAX_CAN_BUSES>;
 
 /// Returns a receiver whose `changed()` resolves whenever `set_can_read_only` is called.
 /// One receiver per CAN bus driver; `None` if more than `MAX_CAN_BUSES` are requested.

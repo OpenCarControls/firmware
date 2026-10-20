@@ -9,8 +9,8 @@ use embedded_can::{Id, StandardId};
 use prost::Message;
 
 use core_interface::{
-    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, CAN_RX_CHANNEL, CMD_RESP_CHANNEL,
-    CanFilter, CanFrame, VEHICLE_STATE_CHANNEL, VehicleStatePayload,
+    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, CAN_RX_CHANNEL, CMD_RESP_CHANNEL, CanFilter, CanFrame,
+    VEHICLE_STATE_CHANNEL, VehicleStatePayload,
 };
 
 pub mod proto {

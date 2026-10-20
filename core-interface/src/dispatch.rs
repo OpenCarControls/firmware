@@ -12,8 +12,7 @@ use crate::types::{CanDebugFilter, InboundCommand, Transport};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 
-static BLE_CONTROLLER_LEASE_TTL_S: portable_atomic::AtomicU32 =
-    portable_atomic::AtomicU32::new(15);
+static BLE_CONTROLLER_LEASE_TTL_S: portable_atomic::AtomicU32 = portable_atomic::AtomicU32::new(15);
 
 #[derive(Default)]
 struct BleControllerLease {

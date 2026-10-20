@@ -89,8 +89,11 @@ mod hardware {
         } else {
             // No button pin defined: open the pairing window automatically on startup
             core_interface::open_pairing_window_for(window_s);
-            log::info!("No pairing button defined; BLE pairing window automatically opened for {}s on boot", window_s);
-            
+            log::info!(
+                "No pairing button defined; BLE pairing window automatically opened for {}s on boot",
+                window_s
+            );
+
             let mut pairing_was_open = core_interface::is_pairing_window_open();
             loop {
                 let pairing_open = core_interface::is_pairing_window_open();

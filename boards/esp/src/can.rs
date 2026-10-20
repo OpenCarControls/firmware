@@ -97,7 +97,10 @@ mod hardware {
 
     /// Builds a TWAI configuration in `mode` with an accept-all hardware filter; actual
     /// frame selection is done in software inside `run_twai_session`.
-    fn configure_twai(driver: &mut TwaiDriver, mode: TwaiMode) -> TwaiConfiguration<'_, esp_hal::Blocking> {
+    fn configure_twai(
+        driver: &mut TwaiDriver,
+        mode: TwaiMode,
+    ) -> TwaiConfiguration<'_, esp_hal::Blocking> {
         // Mask = 0 in esp-hal TWAI means "don't care" for every bit -> accept all.
         let accept_all = twai::filter::SingleStandardFilter::new_from_code_mask(
             unsafe { twai::StandardId::new_unchecked(0) },
@@ -132,7 +135,11 @@ mod hardware {
         let mut next_report = embassy_time::Instant::now() + RX_STATS_INTERVAL;
         loop {
             let listen_only = core_interface::is_can_read_only();
-            let mode = if listen_only { TwaiMode::ListenOnly } else { TwaiMode::Normal };
+            let mode = if listen_only {
+                TwaiMode::ListenOnly
+            } else {
+                TwaiMode::Normal
+            };
             log::info!(
                 "CAN bus {}: TWAI started in {} mode",
                 bus_id,
@@ -174,8 +181,8 @@ mod hardware {
         use embassy_futures::select::{Either4, select4};
         use embassy_time::{Duration, Instant, Timer};
 
-        let tx_channel = core_interface::can_tx_channel(bus_id)
-            .expect("CAN bus id exceeds MAX_CAN_BUSES");
+        let tx_channel =
+            core_interface::can_tx_channel(bus_id).expect("CAN bus id exceeds MAX_CAN_BUSES");
 
         loop {
             if core_interface::is_can_read_only() != listen_only {
@@ -203,7 +210,10 @@ mod hardware {
                 }
                 Either4::First(Err(EspTwaiError::BusOff)) => {
                     stats.record_bus_off();
-                    log::warn!("CAN bus {}: TWAI bus-off, restarting controller in 1s", bus_id);
+                    log::warn!(
+                        "CAN bus {}: TWAI bus-off, restarting controller in 1s",
+                        bus_id
+                    );
                     Timer::after(Duration::from_secs(1)).await;
                     return;
                 }
@@ -251,11 +261,25 @@ mod hardware {
         match stats.last_error {
             Some(e) => log::info!(
                 "CAN bus {} ({}), last {}s: {} frames, {} matched filters, {} RX errors (last: {:?}), {} overruns, {} bus-offs",
-                bus_id, mode, secs, stats.received, stats.matched, stats.errors, e, stats.overruns, stats.bus_offs
+                bus_id,
+                mode,
+                secs,
+                stats.received,
+                stats.matched,
+                stats.errors,
+                e,
+                stats.overruns,
+                stats.bus_offs
             ),
             None => log::info!(
                 "CAN bus {} ({}), last {}s: {} frames, {} matched filters, 0 RX errors, {} overruns, {} bus-offs",
-                bus_id, mode, secs, stats.received, stats.matched, stats.overruns, stats.bus_offs
+                bus_id,
+                mode,
+                secs,
+                stats.received,
+                stats.matched,
+                stats.overruns,
+                stats.bus_offs
             ),
         }
     }
@@ -359,8 +383,8 @@ mod hardware {
         use embassy_futures::select::select4;
         use embassy_time::{Duration, Timer};
 
-        let tx_channel = core_interface::can_tx_channel(bus_id)
-            .expect("CAN bus id exceeds MAX_CAN_BUSES");
+        let tx_channel =
+            core_interface::can_tx_channel(bus_id).expect("CAN bus id exceeds MAX_CAN_BUSES");
         let mut read_only_changed = core_interface::can_read_only_receiver()
             .expect("more CAN bus drivers than MAX_CAN_BUSES");
 
@@ -430,7 +454,11 @@ mod hardware {
 
     /// Switches the MCP2515 between listen-only (CAN read-only mode) and normal mode.
     fn set_mcp_operating_mode(driver: &mut Mcp2515Driver, bus_id: u8, listen_only: bool) {
-        let mode = if listen_only { OpMode::ListenOnly } else { OpMode::Normal };
+        let mode = if listen_only {
+            OpMode::ListenOnly
+        } else {
+            OpMode::Normal
+        };
         match driver.set_mode(mode) {
             Ok(()) => log::info!(
                 "CAN bus {}: MCP2515 in {} mode",
@@ -509,7 +537,14 @@ pub(crate) struct RxStats<E> {
 #[cfg_attr(not(feature = "hardware"), allow(dead_code))]
 impl<E> RxStats<E> {
     pub const fn new() -> Self {
-        Self { received: 0, matched: 0, errors: 0, overruns: 0, bus_offs: 0, last_error: None }
+        Self {
+            received: 0,
+            matched: 0,
+            errors: 0,
+            overruns: 0,
+            bus_offs: 0,
+            last_error: None,
+        }
     }
 
     pub fn record_frame(&mut self, matched: bool) {
@@ -673,7 +708,10 @@ mod tests {
 
     impl EmbeddedFrame for TestFrame {
         fn new(id: impl Into<Id>, data: &[u8]) -> Option<Self> {
-            Some(Self { id: id.into(), data: heapless::Vec::from_slice(data).ok()? })
+            Some(Self {
+                id: id.into(),
+                data: heapless::Vec::from_slice(data).ok()?,
+            })
         }
         fn new_remote(_id: impl Into<Id>, _dlc: usize) -> Option<Self> {
             None

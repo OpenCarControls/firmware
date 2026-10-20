@@ -27,7 +27,8 @@ fn main() {
                 let builder_file = path.join("xtask_builder.rs");
 
                 if builder_file.exists() {
-                    let abs_path = format!("{manifest_dir}/../boards/{board_name}/xtask_builder.rs");
+                    let abs_path =
+                        format!("{manifest_dir}/../boards/{board_name}/xtask_builder.rs");
                     println!("cargo:rerun-if-changed={abs_path}");
 
                     // Must be absolute: inside the include!d registry, a relative

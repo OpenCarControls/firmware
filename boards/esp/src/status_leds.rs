@@ -1,11 +1,12 @@
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::blocking_mutex::Mutex;
 use core::cell::Cell;
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 // Bit 0: Power/Booted
 // Bit 1: Wireless Connected
 // Bit 2: CAN Activity
-pub static SYSTEM_STATUS_FLAGS: Mutex<CriticalSectionRawMutex, Cell<u32>> = Mutex::new(Cell::new(0));
+pub static SYSTEM_STATUS_FLAGS: Mutex<CriticalSectionRawMutex, Cell<u32>> =
+    Mutex::new(Cell::new(0));
 
 pub const FLAG_POWER: u32 = 1 << 0;
 pub const FLAG_WIFI: u32 = 1 << 1;

@@ -10,7 +10,7 @@
 
 use sequential_storage::map::{SerializationError, Value};
 use trouble_host::connection::SecurityLevel;
-use trouble_host::prelude::{BondInformation, BdAddr, Identity, IdentityResolvingKey, LongTermKey};
+use trouble_host::prelude::{BdAddr, BondInformation, Identity, IdentityResolvingKey, LongTermKey};
 
 /// `BondInformation` wrapper that implements `sequential_storage::map::Value`
 /// so it can be written/read directly to/from flash.
@@ -209,7 +209,10 @@ mod tests {
     #[test]
     fn serialized_layout_matches_documented_format() {
         let buf = serialize(bond(Some(0xFF), SecurityLevel::EncryptedAuthenticated));
-        assert_eq!(buf[0..16], 0x0011_2233_4455_6677_8899_AABB_CCDD_EEFFu128.to_le_bytes());
+        assert_eq!(
+            buf[0..16],
+            0x0011_2233_4455_6677_8899_AABB_CCDD_EEFFu128.to_le_bytes()
+        );
         assert_eq!(buf[16..22], [0x01, 0x02, 0x03, 0x04, 0x05, 0xC6]);
         assert_eq!(buf[22], 1);
         assert_eq!(buf[23..39], 0xFFu128.to_le_bytes());
@@ -227,7 +230,10 @@ mod tests {
             let bytes = serialize(bond(irk, level));
             let StoredBond(restored) = StoredBond::deserialize_from(&bytes).unwrap();
             assert_eq!(restored.ltk.0, 0x0011_2233_4455_6677_8899_AABB_CCDD_EEFF);
-            assert_eq!(restored.identity.bd_addr.raw(), [0x01, 0x02, 0x03, 0x04, 0x05, 0xC6]);
+            assert_eq!(
+                restored.identity.bd_addr.raw(),
+                [0x01, 0x02, 0x03, 0x04, 0x05, 0xC6]
+            );
             assert_eq!(restored.identity.irk.map(|k| k.0), irk);
             assert!(restored.is_bonded);
             assert_eq!(serialize(restored), bytes);

@@ -8,53 +8,185 @@
 
 include!(concat!(env!("OUT_DIR"), "/messages.rs"));
 
-use embedded_can::{Id, StandardId};
 use core_interface::{CAN_RX_CHANNEL, CanFilter, CanFrame};
+use embedded_can::{Id, StandardId};
 
 // ── CAN Configuration ─────────────────────────────────────────────────────────
 
 // Only signals checked on a real car are decoded (the DBC comments say how each was checked),
 // so the app never gets a guessed value.
 pub const CAN_FILTERS: &[CanFilter] = &[
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1041).unwrap()), mask: 0x7FF }, // BODY_STATUS
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(428).unwrap()), mask: 0x7FF },  // CLUSTER_INFO428
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(938).unwrap()), mask: 0x7FF },  // CHARGE_PORT_DOOR
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1044).unwrap()), mask: 0x7FF }, // TRUNK_STATUS
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(764).unwrap()), mask: 0x7FF },  // BATTERY_INFO764
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(550).unwrap()), mask: 0x7FF },  // AMBIENT_TEMPERATURE
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(551).unwrap()), mask: 0x7FF },  // ODOMETER
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(685).unwrap()), mask: 0x7FF },  // BMS_PRECOND_STATUS
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(896).unwrap()), mask: 0x7FF },  // CLIMATE_TEMPERATURE
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(899).unwrap()), mask: 0x7FF },  // DATC_06_200ms
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1048).unwrap()), mask: 0x7FF }, // ICU_08_200ms
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(782).unwrap()), mask: 0x7FF },  // CHARGING_POWER
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1124).unwrap()), mask: 0x7FF }, // BCM15200ms
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1050).unwrap()), mask: 0x7FF }, // BCM07200ms
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1043).unwrap()), mask: 0x7FF }, // BLINKERS
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(780).unwrap()), mask: 0x7FF },  // CHARGE_INLET
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(806).unwrap()), mask: 0x7FF },  // CHARGING_STATUS
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(413).unwrap()), mask: 0x7FF },  // CHARGER_SESSION
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(567).unwrap()), mask: 0x7FF },  // BATTERY_INFO567
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(695).unwrap()), mask: 0x7FF },  // CLUSTER_RANGE
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(818).unwrap()), mask: 0x7FF },  // CHARGE_TIME_ESTIMATE
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(504).unwrap()), mask: 0x7FF },  // CHARGING_TIME
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(337).unwrap()), mask: 0x7FF },  // CHARGE_LIMITS
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(435).unwrap()), mask: 0x7FF },  // CABIN_TEMPERATURE
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(898).unwrap()), mask: 0x7FF },  // DATC_05_200ms
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(54).unwrap()), mask: 0x7FF },   // DRIVE_MODE_STATUS
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(992).unwrap()), mask: 0x7FF },  // BCM_02_200ms
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1174).unwrap()), mask: 0x7FF }, // DRIVER_SEAT_HEATING
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1141).unwrap()), mask: 0x7FF }, // PASSENGER_SEAT_HEATING
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(427).unwrap()), mask: 0x7FF },  // CLUSTER_DISPLAY_UNITS
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(738).unwrap()), mask: 0x7FF },  // REGEN_STATUS
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(739).unwrap()), mask: 0x7FF },  // I_PEDAL_STATUS
-    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(929).unwrap()), mask: 0x7FF },  // TIRE_PRESSURES
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(1041).unwrap()),
+        mask: 0x7FF,
+    }, // BODY_STATUS
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(428).unwrap()),
+        mask: 0x7FF,
+    }, // CLUSTER_INFO428
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(938).unwrap()),
+        mask: 0x7FF,
+    }, // CHARGE_PORT_DOOR
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(1044).unwrap()),
+        mask: 0x7FF,
+    }, // TRUNK_STATUS
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(764).unwrap()),
+        mask: 0x7FF,
+    }, // BATTERY_INFO764
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(550).unwrap()),
+        mask: 0x7FF,
+    }, // AMBIENT_TEMPERATURE
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(551).unwrap()),
+        mask: 0x7FF,
+    }, // ODOMETER
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(685).unwrap()),
+        mask: 0x7FF,
+    }, // BMS_PRECOND_STATUS
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(896).unwrap()),
+        mask: 0x7FF,
+    }, // CLIMATE_TEMPERATURE
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(899).unwrap()),
+        mask: 0x7FF,
+    }, // DATC_06_200ms
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(1048).unwrap()),
+        mask: 0x7FF,
+    }, // ICU_08_200ms
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(782).unwrap()),
+        mask: 0x7FF,
+    }, // CHARGING_POWER
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(1124).unwrap()),
+        mask: 0x7FF,
+    }, // BCM15200ms
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(1050).unwrap()),
+        mask: 0x7FF,
+    }, // BCM07200ms
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(1043).unwrap()),
+        mask: 0x7FF,
+    }, // BLINKERS
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(780).unwrap()),
+        mask: 0x7FF,
+    }, // CHARGE_INLET
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(806).unwrap()),
+        mask: 0x7FF,
+    }, // CHARGING_STATUS
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(413).unwrap()),
+        mask: 0x7FF,
+    }, // CHARGER_SESSION
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(567).unwrap()),
+        mask: 0x7FF,
+    }, // BATTERY_INFO567
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(695).unwrap()),
+        mask: 0x7FF,
+    }, // CLUSTER_RANGE
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(818).unwrap()),
+        mask: 0x7FF,
+    }, // CHARGE_TIME_ESTIMATE
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(504).unwrap()),
+        mask: 0x7FF,
+    }, // CHARGING_TIME
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(337).unwrap()),
+        mask: 0x7FF,
+    }, // CHARGE_LIMITS
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(435).unwrap()),
+        mask: 0x7FF,
+    }, // CABIN_TEMPERATURE
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(898).unwrap()),
+        mask: 0x7FF,
+    }, // DATC_05_200ms
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(54).unwrap()),
+        mask: 0x7FF,
+    }, // DRIVE_MODE_STATUS
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(992).unwrap()),
+        mask: 0x7FF,
+    }, // BCM_02_200ms
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(1174).unwrap()),
+        mask: 0x7FF,
+    }, // DRIVER_SEAT_HEATING
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(1141).unwrap()),
+        mask: 0x7FF,
+    }, // PASSENGER_SEAT_HEATING
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(427).unwrap()),
+        mask: 0x7FF,
+    }, // CLUSTER_DISPLAY_UNITS
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(738).unwrap()),
+        mask: 0x7FF,
+    }, // REGEN_STATUS
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(739).unwrap()),
+        mask: 0x7FF,
+    }, // I_PEDAL_STATUS
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(929).unwrap()),
+        mask: 0x7FF,
+    }, // TIRE_PRESSURES
 ];
 
 // ── Vehicle Tasks ─────────────────────────────────────────────────────────────
 
-use crate::{CAR_STATE, STATE_CHANGED};
 use crate::proto::basic_state::ChargePortState;
+use crate::{CAR_STATE, STATE_CHANGED};
 
 /// `None` for values the DBC doesn't define, so an unknown value never overwrites a known
 /// state. CHARGE_PORT_DOOR only reports the door; `ChargeTracker` adds the cable.
@@ -90,7 +222,13 @@ struct ChargeTracker {
 
 impl ChargeTracker {
     const fn new() -> Self {
-        Self { door: None, plugged: None, charging: false, charger: None, dc_stage: 0 }
+        Self {
+            door: None,
+            plugged: None,
+            charging: false,
+            charger: None,
+            dc_stage: 0,
+        }
     }
 
     fn on_door(&mut self, port: m_can::ChargePortDoorPortOpen) {
@@ -120,7 +258,9 @@ impl ChargeTracker {
         self.dc_stage = dc_stage;
         match charger_type {
             m_can::ChargerSessionChargerType::Ac => self.charger = Some(Charger::Ac),
-            m_can::ChargerSessionChargerType::Dc if (2..=6).contains(&dc_stage) => self.charger = Some(Charger::Dc),
+            m_can::ChargerSessionChargerType::Dc if (2..=6).contains(&dc_stage) => {
+                self.charger = Some(Charger::Dc)
+            }
             _ => {}
         }
     }
@@ -133,7 +273,9 @@ impl ChargeTracker {
             (None, _) => ChargePortState::Connected,
             (Some(Charger::Ac), false) => ChargePortState::AcConnected,
             (Some(Charger::Ac), true) => ChargePortState::AcCharging,
-            (Some(Charger::Dc), false) if (2..=6).contains(&self.dc_stage) => ChargePortState::DcNegotiating,
+            (Some(Charger::Dc), false) if (2..=6).contains(&self.dc_stage) => {
+                ChargePortState::DcNegotiating
+            }
             (Some(Charger::Dc), false) => ChargePortState::DcConnected,
             (Some(Charger::Dc), true) => ChargePortState::DcCharging,
         })
@@ -161,7 +303,10 @@ fn is_ac_charging(state: &crate::EgmpCarState) -> bool {
 /// CHARGE_TIME_ESTIMATE is the car's estimate for a DC fast charge and is sent all the time,
 /// also on AC, so its time to 80% is only taken while a DC charger is plugged in.
 fn is_dc_plugged_in(state: &crate::EgmpCarState) -> bool {
-    matches!(state.charge_port_state, Some(ChargePortState::DcConnected | ChargePortState::DcCharging))
+    matches!(
+        state.charge_port_state,
+        Some(ChargePortState::DcConnected | ChargePortState::DcCharging)
+    )
 }
 
 /// "On" is when the battery heater switches on (and the cluster shows the battery icon), about
@@ -220,7 +365,11 @@ fn gear(raw: m_can::DriveModeStatusGear) -> Option<crate::proto::advanced_state:
 
 /// The start button steps the BCM inputs through off, accessory and on; ready comes from
 /// DRIVE_MODE_STATUS, since the ignition inputs read the same when on and ready.
-fn power_state(accessory: bool, ignition: bool, ready: bool) -> crate::proto::advanced_state::PowerState {
+fn power_state(
+    accessory: bool,
+    ignition: bool,
+    ready: bool,
+) -> crate::proto::advanced_state::PowerState {
     use crate::proto::advanced_state::PowerState;
     if ready {
         PowerState::Ready
@@ -240,7 +389,10 @@ static POWER: embassy_sync::blocking_mutex::Mutex<
 > = embassy_sync::blocking_mutex::Mutex::new(core::cell::Cell::new((None, None)));
 
 /// Records new ignition inputs or a new ready bit and returns the power state once both are known.
-fn track_power(inputs: Option<(bool, bool)>, ready: Option<bool>) -> Option<crate::proto::advanced_state::PowerState> {
+fn track_power(
+    inputs: Option<(bool, bool)>,
+    ready: Option<bool>,
+) -> Option<crate::proto::advanced_state::PowerState> {
     POWER.lock(|cell| {
         let (mut i, mut r) = cell.get();
         i = inputs.or(i);
@@ -371,7 +523,9 @@ pub async fn handle_can_frame(frame: CanFrame) {
                 }
             }
             m_can::Messages::ChargerSession(m) => {
-                if let Some(port) = track_charge(|t| t.on_session(m.charger_type(), m.dc_sequence_stage())) {
+                if let Some(port) =
+                    track_charge(|t| t.on_session(m.charger_type(), m.dc_sequence_stage()))
+                {
                     state.charge_port_state = Some(port);
                 }
             }
@@ -383,7 +537,9 @@ pub async fn handle_can_frame(frame: CanFrame) {
                 state.battery_minimum_temperature = Some(m.battery_min_temperature() as f32);
                 state.battery_maximum_temperature = Some(m.battery_max_temperature() as f32);
                 // Not_Available for a frame while the car switches off.
-                if let m_can::BatteryInfo764AuxBatteryVoltage::_Other(volts) = m.aux_battery_voltage() {
+                if let m_can::BatteryInfo764AuxBatteryVoltage::_Other(volts) =
+                    m.aux_battery_voltage()
+                {
                     state.auxiliary_battery_voltage = Some(volts);
                 }
                 if let Some(power) = track_battery(None, Some(m.battery_current())) {
@@ -405,13 +561,17 @@ pub async fn handle_can_frame(frame: CanFrame) {
             }
             m_can::Messages::AmbientTemperature(m) => {
                 // Not_Available while the car displays Fahrenheit; ODOMETER has it then.
-                if let m_can::AmbientTemperatureOutdoorTemperature::_Other(celsius) = m.outdoor_temperature() {
+                if let m_can::AmbientTemperatureOutdoorTemperature::_Other(celsius) =
+                    m.outdoor_temperature()
+                {
                     state.outdoor_temperature = Some(celsius);
                 }
             }
             m_can::Messages::Odometer(m) => {
                 state.odometer = Some(m.odometer() as u32);
-                if let m_can::OdometerOutdoorTemperatureF::_Other(fahrenheit) = m.outdoor_temperature_f() {
+                if let m_can::OdometerOutdoorTemperatureF::_Other(fahrenheit) =
+                    m.outdoor_temperature_f()
+                {
                     state.outdoor_temperature = Some((fahrenheit - 32.0) / 1.8);
                 }
             }
@@ -421,8 +581,12 @@ pub async fn handle_can_frame(frame: CanFrame) {
             m_can::Messages::Datc05200ms(m) => {
                 use crate::proto::basic_state::TemperatureUnit;
                 match m.datc_temp_disp_unit_sta() {
-                    m_can::Datc05200msDatcTempDispUnitSta::Celsius => state.temperature_unit = Some(TemperatureUnit::Celsius),
-                    m_can::Datc05200msDatcTempDispUnitSta::Fahrenheit => state.temperature_unit = Some(TemperatureUnit::Fahrenheit),
+                    m_can::Datc05200msDatcTempDispUnitSta::Celsius => {
+                        state.temperature_unit = Some(TemperatureUnit::Celsius)
+                    }
+                    m_can::Datc05200msDatcTempDispUnitSta::Fahrenheit => {
+                        state.temperature_unit = Some(TemperatureUnit::Fahrenheit)
+                    }
                     _ => {}
                 }
             }
@@ -438,20 +602,27 @@ pub async fn handle_can_frame(frame: CanFrame) {
                     _ => {}
                 }
                 match m.datc_fr_dfg_sta() {
-                    m_can::Datc06200msDatcFrDfgSta::On => state.is_windshield_defrost_on = Some(true),
-                    m_can::Datc06200msDatcFrDfgSta::Off => state.is_windshield_defrost_on = Some(false),
+                    m_can::Datc06200msDatcFrDfgSta::On => {
+                        state.is_windshield_defrost_on = Some(true)
+                    }
+                    m_can::Datc06200msDatcFrDfgSta::Off => {
+                        state.is_windshield_defrost_on = Some(false)
+                    }
                     _ => {}
                 }
             }
-            m_can::Messages::Icu08200ms(m) => {
-                match m.hsws_sys_wrng_sta_icu() {
-                    m_can::Icu08200msHswsSysWrngStaIcu::On => state.is_steering_wheel_heater_on = Some(true),
-                    m_can::Icu08200msHswsSysWrngStaIcu::Off => state.is_steering_wheel_heater_on = Some(false),
-                    _ => {}
+            m_can::Messages::Icu08200ms(m) => match m.hsws_sys_wrng_sta_icu() {
+                m_can::Icu08200msHswsSysWrngStaIcu::On => {
+                    state.is_steering_wheel_heater_on = Some(true)
                 }
-            }
+                m_can::Icu08200msHswsSysWrngStaIcu::Off => {
+                    state.is_steering_wheel_heater_on = Some(false)
+                }
+                _ => {}
+            },
             m_can::Messages::BmsPrecondStatus(m) => {
-                state.preconditioning_state = Some(preconditioning_state(m.battery_precond_state()));
+                state.preconditioning_state =
+                    Some(preconditioning_state(m.battery_precond_state()));
             }
             m_can::Messages::ClimateTemperature(m) => {
                 // OFF is also sent with the car off; keep the last set temperature then.
@@ -478,10 +649,14 @@ pub async fn handle_can_frame(frame: CanFrame) {
                 }
             }
             m_can::Messages::Bcm15200ms(m) => {
-                state.driver_window_position = window_position(m.window_drvr_sd_wdw_detail_opn_sta_raw());
-                state.passenger_window_position = window_position(m.window_asst_sd_wdw_detail_opn_sta_raw());
-                state.is_rear_left_window_open = window_open(m.window_rr_lft_wdw_detail_opn_sta_raw());
-                state.is_rear_right_window_open = window_open(m.window_rr_rt_wdw_detail_opn_sta_raw());
+                state.driver_window_position =
+                    window_position(m.window_drvr_sd_wdw_detail_opn_sta_raw());
+                state.passenger_window_position =
+                    window_position(m.window_asst_sd_wdw_detail_opn_sta_raw());
+                state.is_rear_left_window_open =
+                    window_open(m.window_rr_lft_wdw_detail_opn_sta_raw());
+                state.is_rear_right_window_open =
+                    window_open(m.window_rr_rt_wdw_detail_opn_sta_raw());
             }
             m_can::Messages::Bcm07200ms(m) => {
                 state.are_lights_on = Some(m.lamp_hd_lmp_lo_on_req() != 0);
@@ -495,7 +670,8 @@ pub async fn handle_can_frame(frame: CanFrame) {
                     state.gear = Some(gear);
                 }
                 // Driving includes stops in traffic, so it doesn't come from the speed.
-                state.is_driving = Some(m.ready() && state.gear != Some(crate::proto::advanced_state::Gear::Park));
+                state.is_driving =
+                    Some(m.ready() && state.gear != Some(crate::proto::advanced_state::Gear::Park));
                 if let Some(power) = track_power(None, Some(m.ready())) {
                     state.power_state = Some(power);
                 }
@@ -538,14 +714,14 @@ pub async fn handle_can_frame(frame: CanFrame) {
             }
             m_can::Messages::TirePressures(m) => {
                 // Front right and rear right are assumed from the usual order (see the DBC).
-                state.front_left_tire_pressure_kpa =
-                    tire_pressure_kpa(m.tire_pressure_fl_raw()).or(state.front_left_tire_pressure_kpa);
-                state.front_right_tire_pressure_kpa =
-                    tire_pressure_kpa(m.tire_pressure_fr_raw()).or(state.front_right_tire_pressure_kpa);
-                state.rear_left_tire_pressure_kpa =
-                    tire_pressure_kpa(m.tire_pressure_rl_raw()).or(state.rear_left_tire_pressure_kpa);
-                state.rear_right_tire_pressure_kpa =
-                    tire_pressure_kpa(m.tire_pressure_rr_raw()).or(state.rear_right_tire_pressure_kpa);
+                state.front_left_tire_pressure_kpa = tire_pressure_kpa(m.tire_pressure_fl_raw())
+                    .or(state.front_left_tire_pressure_kpa);
+                state.front_right_tire_pressure_kpa = tire_pressure_kpa(m.tire_pressure_fr_raw())
+                    .or(state.front_right_tire_pressure_kpa);
+                state.rear_left_tire_pressure_kpa = tire_pressure_kpa(m.tire_pressure_rl_raw())
+                    .or(state.rear_left_tire_pressure_kpa);
+                state.rear_right_tire_pressure_kpa = tire_pressure_kpa(m.tire_pressure_rr_raw())
+                    .or(state.rear_right_tire_pressure_kpa);
             }
             // TODO: Unmapped BasicState fields:
             // - is_rear_window_defrost_on (not on this bus; Rear_Defrost_State in BO 593 is noise)
@@ -593,10 +769,19 @@ mod tests {
 
     #[test]
     fn charge_port_door_maps_open_and_closed() {
-        let open = m_can::ChargePortDoor::try_from(&[0xD3, 0xE0, 0x00, 0x02, 0x52, 0x00, 0x00, 0x00][..]).ok().unwrap();
-        let closed = m_can::ChargePortDoor::try_from(&[0xB2, 0x90, 0x00, 0x02, 0x54, 0x00, 0x00, 0x00][..]).ok().unwrap();
+        let open =
+            m_can::ChargePortDoor::try_from(&[0xD3, 0xE0, 0x00, 0x02, 0x52, 0x00, 0x00, 0x00][..])
+                .ok()
+                .unwrap();
+        let closed =
+            m_can::ChargePortDoor::try_from(&[0xB2, 0x90, 0x00, 0x02, 0x54, 0x00, 0x00, 0x00][..])
+                .ok()
+                .unwrap();
         assert_eq!(door_state(open.port_open()), Some(ChargePortState::Open));
-        assert_eq!(door_state(closed.port_open()), Some(ChargePortState::Closed));
+        assert_eq!(
+            door_state(closed.port_open()),
+            Some(ChargePortState::Closed)
+        );
     }
 
     #[test]
@@ -605,7 +790,10 @@ mod tests {
     }
 
     fn inlet(data: [u8; 8]) -> bool {
-        m_can::ChargeInlet::try_from(&data[..]).ok().unwrap().plug_connected()
+        m_can::ChargeInlet::try_from(&data[..])
+            .ok()
+            .unwrap()
+            .plug_connected()
     }
 
     fn session(t: &mut ChargeTracker, data: [u8; 8]) {
@@ -614,7 +802,10 @@ mod tests {
     }
 
     fn charging(data: [u8; 8]) -> bool {
-        m_can::ChargingStatus::try_from(&data[..]).ok().unwrap().charging()
+        m_can::ChargingStatus::try_from(&data[..])
+            .ok()
+            .unwrap()
+            .charging()
     }
 
     /// The L2 start capture: the car reports DC first, gives up on it, then reports AC.
@@ -701,47 +892,107 @@ mod tests {
     #[test]
     fn front_windows_decode_and_rear_windows_are_not_available() {
         use crate::proto::basic_state::WindowPosition;
-        let closed = m_can::Bcm15200ms::try_from(&[0xF5, 0xE0, 0x00, 0xFF, 0x00, 0x3F, 0x05, 0x00][..]).ok().unwrap();
-        assert_eq!(window_position(closed.window_drvr_sd_wdw_detail_opn_sta_raw()), Some(WindowPosition::Closed));
-        assert_eq!(window_position(closed.window_asst_sd_wdw_detail_opn_sta_raw()), Some(WindowPosition::Closed));
-        assert_eq!(window_open(closed.window_rr_lft_wdw_detail_opn_sta_raw()), None);
-        assert_eq!(window_open(closed.window_rr_rt_wdw_detail_opn_sta_raw()), None);
+        let closed =
+            m_can::Bcm15200ms::try_from(&[0xF5, 0xE0, 0x00, 0xFF, 0x00, 0x3F, 0x05, 0x00][..])
+                .ok()
+                .unwrap();
+        assert_eq!(
+            window_position(closed.window_drvr_sd_wdw_detail_opn_sta_raw()),
+            Some(WindowPosition::Closed)
+        );
+        assert_eq!(
+            window_position(closed.window_asst_sd_wdw_detail_opn_sta_raw()),
+            Some(WindowPosition::Closed)
+        );
+        assert_eq!(
+            window_open(closed.window_rr_lft_wdw_detail_opn_sta_raw()),
+            None
+        );
+        assert_eq!(
+            window_open(closed.window_rr_rt_wdw_detail_opn_sta_raw()),
+            None
+        );
 
         // log_07 from 0:06.57: the driver window opening through each step.
         let driver_steps = [
-            ([0x3E, 0x00, 0x01, 0xFF, 0x01, 0x3F, 0x05, 0x00], WindowPosition::SlightlyOpen),
-            ([0x3D, 0x10, 0x01, 0xFF, 0x02, 0x3F, 0x05, 0x00], WindowPosition::PartlyOpen),
-            ([0x76, 0x20, 0x01, 0xFF, 0x03, 0x3F, 0x05, 0x00], WindowPosition::FullyOpen),
+            (
+                [0x3E, 0x00, 0x01, 0xFF, 0x01, 0x3F, 0x05, 0x00],
+                WindowPosition::SlightlyOpen,
+            ),
+            (
+                [0x3D, 0x10, 0x01, 0xFF, 0x02, 0x3F, 0x05, 0x00],
+                WindowPosition::PartlyOpen,
+            ),
+            (
+                [0x76, 0x20, 0x01, 0xFF, 0x03, 0x3F, 0x05, 0x00],
+                WindowPosition::FullyOpen,
+            ),
         ];
         for (data, position) in driver_steps {
             let m = m_can::Bcm15200ms::try_from(&data[..]).ok().unwrap();
-            assert_eq!(window_position(m.window_drvr_sd_wdw_detail_opn_sta_raw()), Some(position));
-            assert_eq!(window_position(m.window_asst_sd_wdw_detail_opn_sta_raw()), Some(WindowPosition::Closed));
+            assert_eq!(
+                window_position(m.window_drvr_sd_wdw_detail_opn_sta_raw()),
+                Some(position)
+            );
+            assert_eq!(
+                window_position(m.window_asst_sd_wdw_detail_opn_sta_raw()),
+                Some(WindowPosition::Closed)
+            );
         }
 
-        let passenger_open = m_can::Bcm15200ms::try_from(&[0x37, 0xC0, 0x10, 0xFF, 0x18, 0x3F, 0x05, 0x00][..]).ok().unwrap();
-        assert_eq!(window_position(passenger_open.window_drvr_sd_wdw_detail_opn_sta_raw()), Some(WindowPosition::Closed));
-        assert_eq!(window_position(passenger_open.window_asst_sd_wdw_detail_opn_sta_raw()), Some(WindowPosition::FullyOpen));
+        let passenger_open =
+            m_can::Bcm15200ms::try_from(&[0x37, 0xC0, 0x10, 0xFF, 0x18, 0x3F, 0x05, 0x00][..])
+                .ok()
+                .unwrap();
+        assert_eq!(
+            window_position(passenger_open.window_drvr_sd_wdw_detail_opn_sta_raw()),
+            Some(WindowPosition::Closed)
+        );
+        assert_eq!(
+            window_position(passenger_open.window_asst_sd_wdw_detail_opn_sta_raw()),
+            Some(WindowPosition::FullyOpen)
+        );
     }
 
     #[test]
     fn battery_voltage_current_and_power() {
         // log_15 at 1:43.6, a hard launch: discharging.
-        let v = m_can::BatteryInfo567::try_from(&[0x00, 0x15, 0x65, 0x00, 0x00, 0x07, 0x1B, 0x00][..]).ok().unwrap();
-        let i = m_can::BatteryInfo764::try_from(&[0xBC, 0x07, 0x18, 0x1A, 0x00, 0x00, 0x8D, 0x63][..]).ok().unwrap();
+        let v =
+            m_can::BatteryInfo567::try_from(&[0x00, 0x15, 0x65, 0x00, 0x00, 0x07, 0x1B, 0x00][..])
+                .ok()
+                .unwrap();
+        let i =
+            m_can::BatteryInfo764::try_from(&[0xBC, 0x07, 0x18, 0x1A, 0x00, 0x00, 0x8D, 0x63][..])
+                .ok()
+                .unwrap();
         assert!((v.battery_voltage() - 691.9).abs() < 0.05);
         assert!((i.battery_current() - 198.0).abs() < 0.05);
-        assert!((battery_power_watt(v.battery_voltage(), i.battery_current()) + 136_996).abs() <= 1);
+        assert!(
+            (battery_power_watt(v.battery_voltage(), i.battery_current()) + 136_996).abs() <= 1
+        );
 
         // log_21 at 3:30, DC charging at 177-178 kW: negative current, positive power.
-        let v = m_can::BatteryInfo567::try_from(&[0x00, 0x25, 0x63, 0x00, 0x00, 0x75, 0x1D, 0x00][..]).ok().unwrap();
-        let i = m_can::BatteryInfo764::try_from(&[0xC9, 0xF6, 0x1B, 0x1D, 0x00, 0x00, 0x8C, 0x61][..]).ok().unwrap();
+        let v =
+            m_can::BatteryInfo567::try_from(&[0x00, 0x25, 0x63, 0x00, 0x00, 0x75, 0x1D, 0x00][..])
+                .ok()
+                .unwrap();
+        let i =
+            m_can::BatteryInfo764::try_from(&[0xC9, 0xF6, 0x1B, 0x1D, 0x00, 0x00, 0x8C, 0x61][..])
+                .ok()
+                .unwrap();
         assert!((i.battery_current() + 235.9).abs() < 0.05);
-        assert!((battery_power_watt(v.battery_voltage(), i.battery_current()) - 177_892).abs() <= 1);
+        assert!(
+            (battery_power_watt(v.battery_voltage(), i.battery_current()) - 177_892).abs() <= 1
+        );
     }
 
     fn feed(id: u16, data: [u8; 8]) {
-        let frame = CanFrame { bus_id: 0, id: Id::Standard(StandardId::new(id).unwrap()), data, dlc: 8 };
+        let frame = CanFrame {
+            bus_id: 0,
+            id: Id::Standard(StandardId::new(id).unwrap()),
+            data,
+            dlc: 8,
+        };
         embassy_futures::block_on(handle_can_frame(frame));
     }
 
@@ -769,7 +1020,10 @@ mod tests {
     #[test]
     fn cluster_range() {
         // log_03 at 18:13, in Sport: the cluster showed 263 km.
-        let m = m_can::ClusterRange::try_from(&[0x07, 0x01, 0x86, 0x24, 0x00, 0x04, 0x00, 0x00][..]).ok().unwrap();
+        let m =
+            m_can::ClusterRange::try_from(&[0x07, 0x01, 0x86, 0x24, 0x00, 0x04, 0x00, 0x00][..])
+                .ok()
+                .unwrap();
         assert_eq!(m.range(), 263);
     }
 
@@ -823,7 +1077,10 @@ mod tests {
         // ODOMETER carries 44.5 F.
         feed(898, [0x66, 0x64, 0xC5, 0x08, 0x00, 0x05, 0x08, 0x00]);
         feed(550, [0xF3, 0x44, 0xDD, 0xFF, 0x4F, 0xD1, 0x30, 0x41]);
-        assert_eq!(embassy_futures::block_on(CAR_STATE.lock()).outdoor_temperature, Some(7.0));
+        assert_eq!(
+            embassy_futures::block_on(CAR_STATE.lock()).outdoor_temperature,
+            Some(7.0)
+        );
         feed(551, [0x14, 0x30, 0x7F, 0x03, 0x00, 0xF1, 0xA7, 0x02]);
         let state = embassy_futures::block_on(CAR_STATE.lock()).clone();
         assert_eq!(state.temperature_unit, Some(TemperatureUnit::Fahrenheit));
@@ -860,12 +1117,29 @@ mod tests {
     fn preconditioning_states() {
         use crate::proto::advanced_state::PreconditioningState;
         let state = |data: [u8; 8]| {
-            preconditioning_state(m_can::BmsPrecondStatus::try_from(&data[..]).ok().unwrap().battery_precond_state())
+            preconditioning_state(
+                m_can::BmsPrecondStatus::try_from(&data[..])
+                    .ok()
+                    .unwrap()
+                    .battery_precond_state(),
+            )
         };
-        assert_eq!(state([0x00, 0x41, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x0F]), PreconditioningState::Off);
-        assert_eq!(state([0x00, 0x45, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x0F]), PreconditioningState::Preparing);
-        assert_eq!(state([0x00, 0x55, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x0F]), PreconditioningState::Heating);
-        assert_eq!(state([0x00, 0x42, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x0F]), PreconditioningState::Unspecified);
+        assert_eq!(
+            state([0x00, 0x41, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x0F]),
+            PreconditioningState::Off
+        );
+        assert_eq!(
+            state([0x00, 0x45, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x0F]),
+            PreconditioningState::Preparing
+        );
+        assert_eq!(
+            state([0x00, 0x55, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x0F]),
+            PreconditioningState::Heating
+        );
+        assert_eq!(
+            state([0x00, 0x42, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x0F]),
+            PreconditioningState::Unspecified
+        );
     }
 
     /// log_09: shifts with the brake held, then the car switched off.
@@ -876,12 +1150,27 @@ mod tests {
             feed(54, data);
             embassy_futures::block_on(CAR_STATE.lock()).gear
         };
-        assert_eq!(gear_of([0xF1, 0x66, 0xDB, 0x51, 0x05, 0x00, 0x35, 0x05]), Some(Gear::Drive));
-        assert_eq!(gear_of([0x7D, 0xB9, 0x3E, 0x51, 0x07, 0x00, 0x35, 0x05]), Some(Gear::Reverse));
-        assert_eq!(gear_of([0xFE, 0xC8, 0xD1, 0x51, 0x06, 0x00, 0x35, 0x05]), Some(Gear::Neutral));
-        assert_eq!(gear_of([0x0B, 0xEF, 0x0D, 0x51, 0x00, 0x00, 0x35, 0x05]), Some(Gear::Park));
+        assert_eq!(
+            gear_of([0xF1, 0x66, 0xDB, 0x51, 0x05, 0x00, 0x35, 0x05]),
+            Some(Gear::Drive)
+        );
+        assert_eq!(
+            gear_of([0x7D, 0xB9, 0x3E, 0x51, 0x07, 0x00, 0x35, 0x05]),
+            Some(Gear::Reverse)
+        );
+        assert_eq!(
+            gear_of([0xFE, 0xC8, 0xD1, 0x51, 0x06, 0x00, 0x35, 0x05]),
+            Some(Gear::Neutral)
+        );
+        assert_eq!(
+            gear_of([0x0B, 0xEF, 0x0D, 0x51, 0x00, 0x00, 0x35, 0x05]),
+            Some(Gear::Park)
+        );
         // Car off: bit 36 is set next to the gear, which still reads Park.
-        assert_eq!(gear_of([0x3C, 0x3A, 0x8E, 0x01, 0x10, 0x00, 0x30, 0x05]), Some(Gear::Park));
+        assert_eq!(
+            gear_of([0x3C, 0x3A, 0x8E, 0x01, 0x10, 0x00, 0x30, 0x05]),
+            Some(Gear::Park)
+        );
     }
 
     /// log_09 from 4:03: off, accessory, on without the brake, then ready with it.
@@ -917,9 +1206,18 @@ mod tests {
             feed(1174, data);
             embassy_futures::block_on(CAR_STATE.lock()).driver_seat_climate
         };
-        assert_eq!(driver([0x42, 0, 0, 0, 0, 0, 0, 0]), Some(SeatClimate::HeatLevel3));
-        assert_eq!(driver([0x3A, 0, 0, 0, 0, 0, 0, 0]), Some(SeatClimate::HeatLevel2));
-        assert_eq!(driver([0x32, 0, 0, 0, 0, 0, 0, 0]), Some(SeatClimate::HeatLevel1));
+        assert_eq!(
+            driver([0x42, 0, 0, 0, 0, 0, 0, 0]),
+            Some(SeatClimate::HeatLevel3)
+        );
+        assert_eq!(
+            driver([0x3A, 0, 0, 0, 0, 0, 0, 0]),
+            Some(SeatClimate::HeatLevel2)
+        );
+        assert_eq!(
+            driver([0x32, 0, 0, 0, 0, 0, 0, 0]),
+            Some(SeatClimate::HeatLevel1)
+        );
         assert_eq!(driver([0x12, 0, 0, 0, 0, 0, 0, 0]), Some(SeatClimate::Off));
 
         feed(1141, [0x3A, 0, 0, 0, 0, 0, 0, 0]);
@@ -954,8 +1252,14 @@ mod tests {
             feed(427, data);
             embassy_futures::block_on(CAR_STATE.lock()).distance_unit
         };
-        assert_eq!(unit([0x7F, 0x09, 0xD2, 0x40, 0x70, 0x60, 0x00, 0x00]), Some(DistanceUnit::Miles));
-        assert_eq!(unit([0xA8, 0x87, 0x97, 0x00, 0x70, 0x60, 0x00, 0x00]), Some(DistanceUnit::Kilometers));
+        assert_eq!(
+            unit([0x7F, 0x09, 0xD2, 0x40, 0x70, 0x60, 0x00, 0x00]),
+            Some(DistanceUnit::Miles)
+        );
+        assert_eq!(
+            unit([0xA8, 0x87, 0x97, 0x00, 0x70, 0x60, 0x00, 0x00]),
+            Some(DistanceUnit::Kilometers)
+        );
     }
 
     /// log_32: the paddles through levels, i-Pedal and Auto, with a video of the cluster.
@@ -1006,13 +1310,21 @@ mod tests {
         assert!((s.rear_right_tire_pressure_kpa.unwrap() - 241.3).abs() < 0.1);
 
         feed(929, [0x65, 0x2C, 0x05, 0x00, 0xFF, 0xFF, 0xFF, 0xFF]);
-        assert_eq!(state().front_left_tire_pressure_kpa, s.front_left_tire_pressure_kpa);
+        assert_eq!(
+            state().front_left_tire_pressure_kpa,
+            s.front_left_tire_pressure_kpa
+        );
     }
 
     #[test]
     fn blinkers_hazard_bit() {
-        let on = m_can::Blinkers::try_from(&[0xCD, 0x65, 0x50, 0x04, 0x00, 0x00, 0x00, 0x00][..]).ok().unwrap();
-        let left_only = m_can::Blinkers::try_from(&[0xF0, 0x01, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00][..]).ok().unwrap();
+        let on = m_can::Blinkers::try_from(&[0xCD, 0x65, 0x50, 0x04, 0x00, 0x00, 0x00, 0x00][..])
+            .ok()
+            .unwrap();
+        let left_only =
+            m_can::Blinkers::try_from(&[0xF0, 0x01, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00][..])
+                .ok()
+                .unwrap();
         assert!(on.hazard_on());
         assert!(!left_only.hazard_on());
         assert!(left_only.left_stalk());
