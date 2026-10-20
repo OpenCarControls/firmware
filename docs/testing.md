@@ -31,3 +31,5 @@ The `test` job in `.github/workflows/ci.yml` uses git diff to detect which crate
 *   Changes to `boards/pc/` trigger `board-pc` tests.
 *   Changes to `boards/esp/` trigger `board-esp` tests.
 *   Changes to `core-interface/` trigger all four crates.
+
+The `build-and-lint` job runs `cargo xtask clippy` and `cargo xtask build` for each board (`esp`, `pc`) and each affected vehicle platform, using `config.toml.example`. A platform is affected when its `cars/<platform>/` directory changed. Changes to shared code (`core-interface/`, `boards/`, `build-utils/`, `xtask/`, `hardware-profiles/`, the `contracts` pin, the workspace `Cargo.toml`/`Cargo.lock`, `config.toml.example` or `ci.yml`) check every platform.

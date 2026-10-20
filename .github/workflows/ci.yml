@@ -124,25 +124,70 @@ jobs:
         run: echo "No testable crates affected by this change — skipping."
 
 
+  platforms:
+    name: Determine platforms to build
+    runs-on: ubuntu-latest
+    outputs:
+      platforms: ${{ steps.platforms.outputs.platforms }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0   # full history needed for git diff
+
+      - name: Determine platforms
+        id: platforms
+        run: |
+          # Same base as the test job: the merge base on a PR, the previous commit on main.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE=${{ github.event.pull_request.base.sha }}
+          else
+            BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-parse --root)
+          fi
+
+          CHANGED=$(git diff --name-only "$BASE" HEAD)
+          ALL=$(find cars -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+
+          # Anything shared by every platform (core, boards, build tooling, contracts,
+          # the example config and its hardware profiles, this workflow) checks them all.
+          if echo "$CHANGED" | grep -qE '^(core-interface/|boards/|build-utils/|xtask/|hardware-profiles/|contracts$|Cargo\.(toml|lock)$|config\.toml\.example$|\.github/workflows/ci\.yml$)'; then
+            echo "Shared code changed — checking every platform"
+            PLATFORMS="$ALL"
+          else
+            PLATFORMS=""
+            for P in $ALL; do
+              if echo "$CHANGED" | grep -q "^cars/$P/"; then
+                PLATFORMS="$PLATFORMS $P"
+              fi
+            done
+          fi
+
+          JSON=$(echo $PLATFORMS | tr ' ' '\n' | grep -v '^$' | python3 -c "import json,sys; print(json.dumps(sys.stdin.read().split()))")
+          echo "Platforms to build: $JSON"
+          echo "platforms=$JSON" >> "$GITHUB_OUTPUT"
+
+
   build-and-lint:
-    name: Build & Lint (${{ matrix.board }})
-    needs: format-and-lint
+    name: Build & Lint (${{ matrix.board }}, ${{ matrix.platform }})
+    needs: [format-and-lint, platforms]
+    if: needs.platforms.outputs.platforms != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         board: [esp, pc]
+        platform: ${{ fromJson(needs.platforms.outputs.platforms) }}
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: true
-      
+
+      # RISC-V ESP chips (the example config's ESP32-C3 profile) build on stable.
       - name: Install Rust toolchain (Standard)
-        if: matrix.board == 'pc'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-          
+          targets: ${{ matrix.board == 'esp' && 'riscv32imc-unknown-none-elf,riscv32imac-unknown-none-elf' || '' }}
+
       - name: Install Rust toolchain (ESP Xtensa)
         if: matrix.board == 'esp'
         uses: esp-rs/xtensa-toolchain@v1.6
@@ -154,20 +199,16 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: build-lint-${{ matrix.board }}
+          key: build-lint-${{ matrix.board }}-${{ matrix.platform }}
 
       - name: Install protoc
         run: sudo apt-get update -y && sudo apt-get install -y protobuf-compiler
-      
+
       - name: Create config.toml from example
         run: cp config.toml.example config.toml
 
-      - name: Override board config
-        run: sed -i 's/^board\s*=\s*".*"/board = "${{ matrix.board }}"/' config.toml
-        
       - name: Run Clippy via xtask
-        run: cargo xtask clippy
-        
-      - name: Build Firmware via xtask
-        run: cargo xtask build
+        run: cargo xtask clippy --board ${{ matrix.board }} --platform ${{ matrix.platform }}
 
+      - name: Build Firmware via xtask
+        run: cargo xtask build --board ${{ matrix.board }} --platform ${{ matrix.platform }}

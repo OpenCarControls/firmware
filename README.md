@@ -127,7 +127,7 @@ When running `cargo test -p <crate>` directly, pass `-- --test-threads=1`: the c
 
 ## 📦 Releases
 
-CI runs `fmt`, `clippy`, diff-based host tests, and full builds for both `esp` and `pc`. Versioning will be managed by `release-plz` with `car-<brand>-v<semver>` tags (not yet active), and release builds attach the firmware binary to a GitHub Release. CI also publishes a static OTA `manifest.json` with a `min_app_version` compatibility matrix.
+CI runs `fmt`, diff-based host tests, and `clippy` plus full builds for both `esp` and `pc` on every affected vehicle platform. Versioning will be managed by `release-plz` with `car-<brand>-v<semver>` tags (not yet active), and release builds attach the firmware binary to a GitHub Release. CI also publishes a static OTA `manifest.json` with a `min_app_version` compatibility matrix.
 
 To produce a flashable `.bin` yourself, or for the details of versioning and OTA, see [Releases, flash images & OTA](docs/releases.md).
 
