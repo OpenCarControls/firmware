@@ -15,6 +15,9 @@ mod can;
 mod network;
 pub mod status_leds;
 
+// `const` helpers the generated `main.rs` uses to check the vehicle's CAN filters.
+pub use can::{MCP2515_HW_FILTERS, bus_filter_count};
+
 #[cfg(feature = "hardware")]
 mod hardware {
     use super::{ble, can, network, status_leds};

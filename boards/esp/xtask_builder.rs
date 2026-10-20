@@ -325,6 +325,23 @@ impl TargetBuilder for Builder {
                          );\n",
                         bus_id, spi, cs, clk, mosi, miso, filters_expr, int, can_speed_expr, mcp_speed_expr
                     ));
+                    // The MCP2515 has only 6 hardware RX filters, and `init_mcp2515` programs
+                    // the first 6 of this bus's filters with exact-match masks. Any filter past
+                    // the sixth would never match: its frames are rejected in hardware before
+                    // the software filter sees them, so the vehicle would silently miss those
+                    // signals (E-GMP has 33 filters on bus 0). Today those register writes
+                    // happen outside Configuration mode and have no effect, so the chip
+                    // accepts every frame (see docs/can.md); this check keeps a vehicle from
+                    // relying on that, since fixing the writes would start dropping frames.
+                    // The vehicle's filters are a Rust const, so xtask can't count them here;
+                    // instead the generated main.rs gets a compile-time check that fails the
+                    // build. Lifting the limit means accepting all frames in hardware (as CAN
+                    // debug mode does) and filtering in software, at the risk of RX overruns
+                    // on a busy bus.
+                    can_task_defs.push_str(&format!(
+                        "const _: () = assert!(\n    board_esp::bus_filter_count({1}, {0}) <= board_esp::MCP2515_HW_FILTERS,\n    \"CAN bus {0} is an MCP2515, which has 6 hardware RX filters, but the vehicle defines more than 6 CAN filters for this bus: the frames past the sixth would be silently dropped. Use a TWAI bus for this vehicle, or see the MCP2515 notes in boards/esp/xtask_builder.rs.\"\n);\n",
+                        bus_id, filters_expr
+                    ));
                     can_task_defs.push_str(&format!(
                         "#[embassy_executor::task]\nasync fn can_bus_{0}_task(driver: board_esp::Mcp2515Driver, int_pin: board_esp::CanIntPin) {{\n    board_esp::run_mcp2515_loop(driver, int_pin, {0}, {1}).await;\n}}\n",
                         bus_id, filters_expr

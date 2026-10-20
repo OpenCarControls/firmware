@@ -586,6 +586,24 @@ impl<E> RxStats<E> {
     }
 }
 
+/// Number of RX acceptance filters in the MCP2515 hardware.
+pub const MCP2515_HW_FILTERS: usize = 6;
+
+/// Number of `filters` that apply to `bus_id`. `const` so the generated `main.rs` can
+/// refuse to build an MCP2515 bus with more filters than the chip has (see
+/// `xtask_builder.rs`).
+pub const fn bus_filter_count(filters: &[CanFilter], bus_id: u8) -> usize {
+    let mut count = 0;
+    let mut i = 0;
+    while i < filters.len() {
+        if filters[i].bus_id == bus_id {
+            count += 1;
+        }
+        i += 1;
+    }
+    count
+}
+
 /// Computes the two combined RX buffer masks required by the MCP2515 from a
 /// `CanFilter` slice for a specific `bus_id`.
 ///
@@ -769,5 +787,17 @@ mod tests {
     fn to_core_frame_drops_remote_frames() {
         let id = Id::Standard(StandardId::new(1041).unwrap());
         assert!(to_core_frame(TestFrame::new_remote(id, 8).unwrap(), 0).is_none());
+    }
+
+    #[test]
+    fn bus_filter_count_counts_only_that_bus() {
+        let filters = [
+            filter(0, 0x100, 0x7FF),
+            filter(1, 0x200, 0x7FF),
+            filter(0, 0x300, 0x7FF),
+        ];
+        assert_eq!(bus_filter_count(&filters, 0), 2);
+        assert_eq!(bus_filter_count(&filters, 1), 1);
+        assert_eq!(bus_filter_count(&filters, 2), 0);
     }
 }
