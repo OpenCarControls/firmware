@@ -479,12 +479,6 @@ fn window_position(raw: u8) -> Option<crate::proto::basic_state::WindowPosition>
     }
 }
 
-/// `window_position` as open or closed, for the rear windows: the proto only carries a bool
-/// for them.
-fn window_open(raw: u8) -> Option<bool> {
-    window_position(raw).map(|p| p != crate::proto::basic_state::WindowPosition::Closed)
-}
-
 pub async fn handle_can_frame(frame: CanFrame) {
     let id = match frame.id {
         Id::Standard(id) => id.as_raw() as u32,
@@ -653,10 +647,10 @@ pub async fn handle_can_frame(frame: CanFrame) {
                     window_position(m.window_drvr_sd_wdw_detail_opn_sta_raw());
                 state.passenger_window_position =
                     window_position(m.window_asst_sd_wdw_detail_opn_sta_raw());
-                state.is_rear_left_window_open =
-                    window_open(m.window_rr_lft_wdw_detail_opn_sta_raw());
-                state.is_rear_right_window_open =
-                    window_open(m.window_rr_rt_wdw_detail_opn_sta_raw());
+                state.rear_left_window_position =
+                    window_position(m.window_rr_lft_wdw_detail_opn_sta_raw());
+                state.rear_right_window_position =
+                    window_position(m.window_rr_rt_wdw_detail_opn_sta_raw());
             }
             m_can::Messages::Bcm07200ms(m) => {
                 state.are_lights_on = Some(m.lamp_hd_lmp_lo_on_req() != 0);
@@ -905,11 +899,11 @@ mod tests {
             Some(WindowPosition::Closed)
         );
         assert_eq!(
-            window_open(closed.window_rr_lft_wdw_detail_opn_sta_raw()),
+            window_position(closed.window_rr_lft_wdw_detail_opn_sta_raw()),
             None
         );
         assert_eq!(
-            window_open(closed.window_rr_rt_wdw_detail_opn_sta_raw()),
+            window_position(closed.window_rr_rt_wdw_detail_opn_sta_raw()),
             None
         );
 
