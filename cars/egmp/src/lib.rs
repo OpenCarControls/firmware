@@ -21,6 +21,18 @@ pub mod proto {
 
 // ── Vehicle State ─────────────────────────────────────────────────────────────
 
+/// How the regenerative braking level is chosen. Tracked for a later feature that sets the
+/// regen from the app; not in the proto yet, so it isn't published.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RegenMode {
+    /// A fixed level chosen with the paddles.
+    Manual,
+    /// The car adjusts the level to the traffic ahead.
+    Auto,
+    /// One-pedal driving, at the maximum level.
+    IPedal,
+}
+
 #[derive(Clone, PartialEq)]
 pub struct EgmpCarState {
     pub odometer: Option<u32>,
@@ -58,6 +70,14 @@ pub struct EgmpCarState {
     pub temperature_unit: Option<proto::basic_state::TemperatureUnit>,
     pub driver_seat_climate: Option<proto::basic_state::SeatClimate>,
     pub passenger_seat_climate: Option<proto::basic_state::SeatClimate>,
+    pub distance_unit: Option<proto::basic_state::DistanceUnit>,
+    // Not published yet: they don't fit one BLE message until state updates can be
+    // fragmented (see docs/ble.md).
+    pub auxiliary_battery_voltage: Option<f32>,
+    pub front_left_tire_pressure_kpa: Option<f32>,
+    pub front_right_tire_pressure_kpa: Option<f32>,
+    pub rear_left_tire_pressure_kpa: Option<f32>,
+    pub rear_right_tire_pressure_kpa: Option<f32>,
 
     pub battery_voltage: Option<u32>,
     pub instantaneous_power_watt: Option<i32>,
@@ -66,6 +86,10 @@ pub struct EgmpCarState {
     pub preconditioning_state: Option<proto::advanced_state::PreconditioningState>,
     pub gear: Option<proto::advanced_state::Gear>,
     pub power_state: Option<proto::advanced_state::PowerState>,
+    // Not published (see `RegenMode`).
+    pub regen_mode: Option<RegenMode>,
+    /// 0 to 3 for the paddle levels, 4 for the maximum.
+    pub regen_level: Option<u32>,
 }
 
 impl EgmpCarState {
@@ -108,6 +132,12 @@ impl EgmpCarState {
             temperature_unit: None,
             driver_seat_climate: None,
             passenger_seat_climate: None,
+            distance_unit: None,
+            auxiliary_battery_voltage: None,
+            front_left_tire_pressure_kpa: None,
+            front_right_tire_pressure_kpa: None,
+            rear_left_tire_pressure_kpa: None,
+            rear_right_tire_pressure_kpa: None,
             battery_voltage: None,
             instantaneous_power_watt: None,
             battery_minimum_temperature: None,
@@ -115,6 +145,8 @@ impl EgmpCarState {
             preconditioning_state: None,
             gear: None,
             power_state: None,
+            regen_mode: None,
+            regen_level: None,
         }
     }
 
@@ -157,6 +189,12 @@ impl EgmpCarState {
             temperature_unit: Some(proto::basic_state::TemperatureUnit::Celsius),
             driver_seat_climate: Some(proto::basic_state::SeatClimate::Off),
             passenger_seat_climate: Some(proto::basic_state::SeatClimate::Off),
+            distance_unit: Some(proto::basic_state::DistanceUnit::Kilometers),
+            auxiliary_battery_voltage: Some(12.6),
+            front_left_tire_pressure_kpa: Some(241.0),
+            front_right_tire_pressure_kpa: Some(241.0),
+            rear_left_tire_pressure_kpa: Some(241.0),
+            rear_right_tire_pressure_kpa: Some(241.0),
 
             battery_voltage: Some(400),
             instantaneous_power_watt: Some(0),
@@ -165,6 +203,8 @@ impl EgmpCarState {
             preconditioning_state: Some(proto::advanced_state::PreconditioningState::Off),
             gear: Some(proto::advanced_state::Gear::Park),
             power_state: Some(proto::advanced_state::PowerState::Off),
+            regen_mode: Some(RegenMode::Manual),
+            regen_level: Some(3),
         }
     }
 }
@@ -217,6 +257,7 @@ pub fn encode_state(state: &EgmpCarState) -> VehicleStatePayload {
         temperature_unit: state.temperature_unit.map(|u| u as i32),
         driver_seat_climate: state.driver_seat_climate.map(|s| s as i32),
         passenger_seat_climate: state.passenger_seat_climate.map(|s| s as i32),
+        distance_unit: state.distance_unit.map(|u| u as i32),
     };
     let advanced = proto::AdvancedState {
         battery_voltage: state.battery_voltage,
@@ -508,6 +549,12 @@ mod tests {
             temperature_unit: Some(proto::basic_state::TemperatureUnit::Fahrenheit),
             driver_seat_climate: Some(proto::basic_state::SeatClimate::HeatLevel3),
             passenger_seat_climate: Some(proto::basic_state::SeatClimate::HeatLevel3),
+            distance_unit: Some(proto::basic_state::DistanceUnit::Miles),
+            auxiliary_battery_voltage: Some(f32::MIN),
+            front_left_tire_pressure_kpa: Some(f32::MIN),
+            front_right_tire_pressure_kpa: Some(f32::MIN),
+            rear_left_tire_pressure_kpa: Some(f32::MIN),
+            rear_right_tire_pressure_kpa: Some(f32::MIN),
             battery_voltage: Some(u32::MAX),
             instantaneous_power_watt: Some(i32::MIN),
             battery_minimum_temperature: Some(f32::MIN),
@@ -515,6 +562,8 @@ mod tests {
             preconditioning_state: Some(proto::advanced_state::PreconditioningState::Heating),
             gear: Some(Gear::Drive),
             power_state: Some(proto::advanced_state::PowerState::Ready),
+            regen_mode: Some(RegenMode::IPedal),
+            regen_level: Some(u32::MAX),
         };
 
         let msg = core_interface::ble_state_update(u64::MAX, u32::MAX, encode_state(&state));

@@ -18,6 +18,8 @@ What keeps messages within the limit:
 *   **CAN debug batches:** `publish_single_debug_batch` splits each batch (up to 20 frames) into as many `CanDebugUpdate` messages as needed. A single 8-byte frame takes 20–30 bytes, so a full batch needs two or three messages.
 *   Anything larger is dropped on the device with a `BLE GATT TX message too large` warning.
 
+**Planned: fragmentation.** The E-GMP worst-case state update is close to the limit, and the 12 V battery voltage and the four tire pressures (6 bytes each: a 4-byte float with a 2-byte tag) would push it over. They are decoded into `EgmpCarState` but kept out of the proto until state updates can be split over several BLE messages, which needs a reassembly protocol in the firmware and the app. Larger MTUs aren't a substitute: iOS picks its own MTU.
+
 ## Device name
 Configurable base name via `[hardware.esp.ble] device_name` in `config.toml` (default `"OpenCar"`). At runtime `ble_transport_task` appends a 2-byte MAC suffix using `build_ble_device_name(base, mac)` → `"{base}-{mac[4]:02X}{mac[5]:02X}"` (e.g. `"OpenCar-ABCD"`). The result is stored in a `StaticCell<heapless::String<33>>` for the `'static` lifetime required by `PeripheralConfig`.
 

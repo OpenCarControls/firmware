@@ -45,6 +45,10 @@ pub const CAN_FILTERS: &[CanFilter] = &[
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(992).unwrap()), mask: 0x7FF },  // BCM_02_200ms
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1174).unwrap()), mask: 0x7FF }, // DRIVER_SEAT_HEATING
     CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(1141).unwrap()), mask: 0x7FF }, // PASSENGER_SEAT_HEATING
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(427).unwrap()), mask: 0x7FF },  // CLUSTER_DISPLAY_UNITS
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(738).unwrap()), mask: 0x7FF },  // REGEN_STATUS
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(739).unwrap()), mask: 0x7FF },  // I_PEDAL_STATUS
+    CanFilter { bus_id: 0, id: Id::Standard(StandardId::new(929).unwrap()), mask: 0x7FF },  // TIRE_PRESSURES
 ];
 
 // ── Vehicle Tasks ─────────────────────────────────────────────────────────────
@@ -247,6 +251,56 @@ fn track_power(inputs: Option<(bool, bool)>, ready: Option<bool>) -> Option<crat
     })
 }
 
+/// Auto takes precedence: the i-Pedal bit reads 0 in Auto, but checking Auto first keeps the
+/// mode right if it ever lags behind.
+fn regen_mode(auto: bool, i_pedal: bool) -> crate::RegenMode {
+    use crate::RegenMode;
+    if auto {
+        RegenMode::Auto
+    } else if i_pedal {
+        RegenMode::IPedal
+    } else {
+        RegenMode::Manual
+    }
+}
+
+/// Last Auto bit and i-Pedal bit, which come in separate messages.
+static REGEN: embassy_sync::blocking_mutex::Mutex<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    core::cell::Cell<(Option<bool>, Option<bool>)>,
+> = embassy_sync::blocking_mutex::Mutex::new(core::cell::Cell::new((None, None)));
+
+/// Records a new Auto or i-Pedal bit and returns the regen mode once both are known.
+fn track_regen(auto: Option<bool>, i_pedal: Option<bool>) -> Option<crate::RegenMode> {
+    REGEN.lock(|cell| {
+        let (mut a, mut p) = cell.get();
+        a = auto.or(a);
+        p = i_pedal.or(p);
+        cell.set((a, p));
+        Some(regen_mode(a?, p?))
+    })
+}
+
+/// The car's level is a 0-4 strength that moves smoothly between the steps in Auto, so it is
+/// rounded to the nearest step. `None` for Not_Available (car off, smart cruise driving).
+fn regen_level(raw: m_can::RegenStatusRegenLevel) -> Option<u32> {
+    match raw {
+        m_can::RegenStatusRegenLevel::_Other(level) if level <= 4.0 => Some((level + 0.5) as u32),
+        _ => None,
+    }
+}
+
+const KPA_PER_PSI: f32 = 6.894_757;
+
+/// Maps a `Tire_Pressure_*` raw value in whole psi. `None` for Not_Available (255), sent until
+/// the tire sensors report a minute or two into a drive, so the last known pressure is kept.
+fn tire_pressure_kpa(psi: u8) -> Option<f32> {
+    match psi {
+        255 => None,
+        psi => Some(psi as f32 * KPA_PER_PSI),
+    }
+}
+
 /// Maps a `*_Seat_Heating_Oper` raw value: 2 is off, 6 to 8 are levels 1 to 3. `None` for
 /// values not seen on a real car (3 to 5 may be ventilation), so they keep the last state.
 fn seat_climate(raw: u8) -> Option<crate::proto::basic_state::SeatClimate> {
@@ -317,6 +371,12 @@ pub async fn handle_can_frame(frame: CanFrame) {
             }
             m_can::Messages::BatteryInfo764(m) => {
                 state.battery_soc = Some(m.state_of_charge() as u32);
+                state.battery_minimum_temperature = Some(m.battery_min_temperature() as f32);
+                state.battery_maximum_temperature = Some(m.battery_max_temperature() as f32);
+                // Not_Available for a frame while the car switches off.
+                if let m_can::BatteryInfo764AuxBatteryVoltage::_Other(volts) = m.aux_battery_voltage() {
+                    state.auxiliary_battery_voltage = Some(volts);
+                }
                 if let Some(power) = track_battery(None, Some(m.battery_current())) {
                     state.instantaneous_power_watt = Some(power);
                     if is_ac_charging(&state) {
@@ -447,13 +507,40 @@ pub async fn handle_can_frame(frame: CanFrame) {
                     state.power_state = Some(power);
                 }
             }
+            m_can::Messages::ClusterDisplayUnits(m) => {
+                use crate::proto::basic_state::DistanceUnit;
+                state.distance_unit = Some(match m.distance_unit() {
+                    m_can::ClusterDisplayUnitsDistanceUnit::Miles => DistanceUnit::Miles,
+                    _ => DistanceUnit::Kilometers,
+                });
+            }
+            m_can::Messages::RegenStatus(m) => {
+                if let Some(level) = regen_level(m.regen_level()) {
+                    state.regen_level = Some(level);
+                }
+                if let Some(mode) = track_regen(Some(m.regen_auto()), None) {
+                    state.regen_mode = Some(mode);
+                }
+            }
+            m_can::Messages::IPedalStatus(m) => {
+                if let Some(mode) = track_regen(None, Some(m.i_pedal())) {
+                    state.regen_mode = Some(mode);
+                }
+            }
+            m_can::Messages::TirePressures(m) => {
+                // Front right and rear right are assumed from the usual order (see the DBC).
+                state.front_left_tire_pressure_kpa =
+                    tire_pressure_kpa(m.tire_pressure_fl_raw()).or(state.front_left_tire_pressure_kpa);
+                state.front_right_tire_pressure_kpa =
+                    tire_pressure_kpa(m.tire_pressure_fr_raw()).or(state.front_right_tire_pressure_kpa);
+                state.rear_left_tire_pressure_kpa =
+                    tire_pressure_kpa(m.tire_pressure_rl_raw()).or(state.rear_left_tire_pressure_kpa);
+                state.rear_right_tire_pressure_kpa =
+                    tire_pressure_kpa(m.tire_pressure_rr_raw()).or(state.rear_right_tire_pressure_kpa);
+            }
             // TODO: Unmapped BasicState fields:
             // - is_rear_window_defrost_on (not on this bus; Rear_Defrost_State in BO 593 is noise)
             // - charge_port_state errors and V2L
-
-            // TODO: Unmapped AdvancedState fields:
-            // - battery_minimum_temperature
-            // - battery_maximum_temperature
             _ => {}
         }
 
@@ -824,6 +911,84 @@ mod tests {
 
         // A value never seen on the car keeps the last level.
         assert_eq!(seat_climate(4), None);
+    }
+
+    /// log_31: Car Scanner showed 12 C and 13 C for the battery minimum and maximum, then the
+    /// car was switched off.
+    #[test]
+    fn battery_temperatures_and_12v() {
+        let state = || embassy_futures::block_on(CAR_STATE.lock()).clone();
+        feed(764, [0x37, 0x00, 0x0C, 0x0D, 0x00, 0x00, 0x88, 0x93]);
+        assert_eq!(state().battery_minimum_temperature, Some(12.0));
+        assert_eq!(state().battery_maximum_temperature, Some(13.0));
+        assert!((state().auxiliary_battery_voltage.unwrap() - 13.6).abs() < 0.01);
+
+        // The single 0 frame while switching off keeps the last voltage.
+        feed(764, [0x08, 0x00, 0x0C, 0x0D, 0x00, 0x00, 0x00, 0x93]);
+        assert!((state().auxiliary_battery_voltage.unwrap() - 13.6).abs() < 0.01);
+    }
+
+    /// log_30: the display switched from km to miles and back.
+    #[test]
+    fn distance_unit_follows_the_display() {
+        use crate::proto::basic_state::DistanceUnit;
+        let unit = |data: [u8; 8]| {
+            feed(427, data);
+            embassy_futures::block_on(CAR_STATE.lock()).distance_unit
+        };
+        assert_eq!(unit([0x7F, 0x09, 0xD2, 0x40, 0x70, 0x60, 0x00, 0x00]), Some(DistanceUnit::Miles));
+        assert_eq!(unit([0xA8, 0x87, 0x97, 0x00, 0x70, 0x60, 0x00, 0x00]), Some(DistanceUnit::Kilometers));
+    }
+
+    /// log_32: the paddles through levels, i-Pedal and Auto, with a video of the cluster.
+    #[test]
+    fn regen_mode_and_level() {
+        use crate::RegenMode;
+        let state = || embassy_futures::block_on(CAR_STATE.lock()).clone();
+        const NOT_I_PEDAL: [u8; 8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x72, 0x01];
+        const I_PEDAL: [u8; 8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x72, 0x03];
+
+        feed(739, NOT_I_PEDAL);
+        feed(738, [0xFF, 0x00, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x08]);
+        assert_eq!(state().regen_mode, Some(RegenMode::Manual));
+        assert_eq!(state().regen_level, Some(3));
+        feed(738, [0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08]);
+        assert_eq!(state().regen_level, Some(0));
+
+        feed(738, [0xFF, 0x00, 0x00, 0x00, 0x00, 0x50, 0x00, 0x08]);
+        feed(739, I_PEDAL);
+        assert_eq!(state().regen_mode, Some(RegenMode::IPedal));
+        assert_eq!(state().regen_level, Some(4));
+
+        // Auto, at its lowest step (the cluster's Auto 1): 0.1 rounds to 0.
+        feed(739, NOT_I_PEDAL);
+        feed(738, [0xFF, 0x00, 0x00, 0x04, 0x00, 0x02, 0x00, 0x08]);
+        assert_eq!(state().regen_mode, Some(RegenMode::Auto));
+        assert_eq!(state().regen_level, Some(0));
+        // Between steps (1.9).
+        feed(738, [0xFF, 0x00, 0x00, 0x04, 0x00, 0x26, 0x00, 0x08]);
+        assert_eq!(state().regen_level, Some(2));
+
+        // log_31, car off: Not_Available keeps the last level.
+        feed(738, [0xDE, 0x00, 0x00, 0x00, 0x00, 0x7E, 0x00, 0x08]);
+        assert_eq!(state().regen_level, Some(2));
+        assert_eq!(state().regen_mode, Some(RegenMode::Manual));
+    }
+
+    /// log_33: only the front left tire deflated to 32 psi; log_03 before the sensors report.
+    #[test]
+    fn tire_pressures() {
+        let state = || embassy_futures::block_on(CAR_STATE.lock()).clone();
+        feed(929, [0x3A, 0x5F, 0x9F, 0x00, 0x23, 0x23, 0x23, 0x23]);
+        feed(929, [0x99, 0xF8, 0x7C, 0x00, 0x20, 0x23, 0x23, 0x23]);
+        let s = state();
+        assert!((s.front_left_tire_pressure_kpa.unwrap() - 220.6).abs() < 0.1);
+        assert!((s.front_right_tire_pressure_kpa.unwrap() - 241.3).abs() < 0.1);
+        assert!((s.rear_left_tire_pressure_kpa.unwrap() - 241.3).abs() < 0.1);
+        assert!((s.rear_right_tire_pressure_kpa.unwrap() - 241.3).abs() < 0.1);
+
+        feed(929, [0x65, 0x2C, 0x05, 0x00, 0xFF, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(state().front_left_tire_pressure_kpa, s.front_left_tire_pressure_kpa);
     }
 
     #[test]
