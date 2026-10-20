@@ -52,9 +52,9 @@ pub struct EgmpCarState {
     pub time_remaining_minutes: Option<u32>,
     pub are_doors_locked: Option<bool>,
     pub is_driver_door_open: Option<bool>,
-    pub is_driver_window_open: Option<bool>,
+    pub driver_window_position: Option<proto::basic_state::WindowPosition>,
     pub is_passenger_door_open: Option<bool>,
-    pub is_passenger_window_open: Option<bool>,
+    pub passenger_window_position: Option<proto::basic_state::WindowPosition>,
     pub is_rear_left_door_open: Option<bool>,
     pub is_rear_left_window_open: Option<bool>,
     pub is_rear_right_door_open: Option<bool>,
@@ -114,9 +114,9 @@ impl EgmpCarState {
             time_remaining_minutes: None,
             are_doors_locked: None,
             is_driver_door_open: None,
-            is_driver_window_open: None,
+            driver_window_position: None,
             is_passenger_door_open: None,
-            is_passenger_window_open: None,
+            passenger_window_position: None,
             is_rear_left_door_open: None,
             is_rear_left_window_open: None,
             is_rear_right_door_open: None,
@@ -171,9 +171,9 @@ impl EgmpCarState {
             time_remaining_minutes: Some(0),
             are_doors_locked: Some(false),
             is_driver_door_open: Some(false),
-            is_driver_window_open: Some(false),
+            driver_window_position: Some(proto::basic_state::WindowPosition::Closed),
             is_passenger_door_open: Some(false),
-            is_passenger_window_open: Some(false),
+            passenger_window_position: Some(proto::basic_state::WindowPosition::Closed),
             is_rear_left_door_open: Some(false),
             is_rear_left_window_open: Some(false),
             is_rear_right_door_open: Some(false),
@@ -220,6 +220,7 @@ const STATE_MIN_PUBLISH_INTERVAL: Duration = Duration::from_millis(250);
 /// State is re-published at this interval even when nothing changed.
 const STATE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
+#[allow(deprecated)] // the front window bools, replaced by the window positions
 pub fn encode_state(state: &EgmpCarState) -> VehicleStatePayload {
     let basic = proto::BasicState {
         odometer: state.odometer,
@@ -239,9 +240,9 @@ pub fn encode_state(state: &EgmpCarState) -> VehicleStatePayload {
         time_remaining_minutes: state.time_remaining_minutes,
         are_doors_locked: state.are_doors_locked,
         is_driver_door_open: state.is_driver_door_open,
-        is_driver_window_open: state.is_driver_window_open,
+        is_driver_window_open: None,
         is_passenger_door_open: state.is_passenger_door_open,
-        is_passenger_window_open: state.is_passenger_window_open,
+        is_passenger_window_open: None,
         is_rear_left_door_open: state.is_rear_left_door_open,
         is_rear_left_window_open: state.is_rear_left_window_open,
         is_rear_right_door_open: state.is_rear_right_door_open,
@@ -258,6 +259,8 @@ pub fn encode_state(state: &EgmpCarState) -> VehicleStatePayload {
         driver_seat_climate: state.driver_seat_climate.map(|s| s as i32),
         passenger_seat_climate: state.passenger_seat_climate.map(|s| s as i32),
         distance_unit: state.distance_unit.map(|u| u as i32),
+        driver_window_position: state.driver_window_position.map(|p| p as i32),
+        passenger_window_position: state.passenger_window_position.map(|p| p as i32),
     };
     let advanced = proto::AdvancedState {
         battery_voltage: state.battery_voltage,
@@ -531,9 +534,9 @@ mod tests {
             time_remaining_minutes: Some(u32::MAX),
             are_doors_locked: Some(true),
             is_driver_door_open: Some(true),
-            is_driver_window_open: Some(true),
+            driver_window_position: Some(proto::basic_state::WindowPosition::FullyOpen),
             is_passenger_door_open: Some(true),
-            is_passenger_window_open: Some(true),
+            passenger_window_position: Some(proto::basic_state::WindowPosition::FullyOpen),
             is_rear_left_door_open: Some(true),
             is_rear_left_window_open: Some(true),
             is_rear_right_door_open: Some(true),

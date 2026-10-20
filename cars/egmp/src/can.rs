@@ -316,12 +316,21 @@ fn seat_climate(raw: u8) -> Option<crate::proto::basic_state::SeatClimate> {
 
 /// Maps a `Window_*DetailOpnSta` raw value from BCM_15_200ms: 0 is closed, 1 to 3 are
 /// open by steps. `None` for Not_Available (7), which the EV6 reports for its rear windows.
-fn window_open(position: u8) -> Option<bool> {
-    match position {
-        0 => Some(false),
-        1..=3 => Some(true),
+fn window_position(raw: u8) -> Option<crate::proto::basic_state::WindowPosition> {
+    use crate::proto::basic_state::WindowPosition;
+    match raw {
+        0 => Some(WindowPosition::Closed),
+        1 => Some(WindowPosition::SlightlyOpen),
+        2 => Some(WindowPosition::PartlyOpen),
+        3 => Some(WindowPosition::FullyOpen),
         _ => None,
     }
+}
+
+/// `window_position` as open or closed, for the rear windows: the proto only carries a bool
+/// for them.
+fn window_open(raw: u8) -> Option<bool> {
+    window_position(raw).map(|p| p != crate::proto::basic_state::WindowPosition::Closed)
 }
 
 pub async fn handle_can_frame(frame: CanFrame) {
@@ -469,8 +478,8 @@ pub async fn handle_can_frame(frame: CanFrame) {
                 }
             }
             m_can::Messages::Bcm15200ms(m) => {
-                state.is_driver_window_open = window_open(m.window_drvr_sd_wdw_detail_opn_sta_raw());
-                state.is_passenger_window_open = window_open(m.window_asst_sd_wdw_detail_opn_sta_raw());
+                state.driver_window_position = window_position(m.window_drvr_sd_wdw_detail_opn_sta_raw());
+                state.passenger_window_position = window_position(m.window_asst_sd_wdw_detail_opn_sta_raw());
                 state.is_rear_left_window_open = window_open(m.window_rr_lft_wdw_detail_opn_sta_raw());
                 state.is_rear_right_window_open = window_open(m.window_rr_rt_wdw_detail_opn_sta_raw());
             }
@@ -691,19 +700,28 @@ mod tests {
 
     #[test]
     fn front_windows_decode_and_rear_windows_are_not_available() {
+        use crate::proto::basic_state::WindowPosition;
         let closed = m_can::Bcm15200ms::try_from(&[0xF5, 0xE0, 0x00, 0xFF, 0x00, 0x3F, 0x05, 0x00][..]).ok().unwrap();
-        assert_eq!(window_open(closed.window_drvr_sd_wdw_detail_opn_sta_raw()), Some(false));
-        assert_eq!(window_open(closed.window_asst_sd_wdw_detail_opn_sta_raw()), Some(false));
+        assert_eq!(window_position(closed.window_drvr_sd_wdw_detail_opn_sta_raw()), Some(WindowPosition::Closed));
+        assert_eq!(window_position(closed.window_asst_sd_wdw_detail_opn_sta_raw()), Some(WindowPosition::Closed));
         assert_eq!(window_open(closed.window_rr_lft_wdw_detail_opn_sta_raw()), None);
         assert_eq!(window_open(closed.window_rr_rt_wdw_detail_opn_sta_raw()), None);
 
-        let driver_open = m_can::Bcm15200ms::try_from(&[0x76, 0x20, 0x01, 0xFF, 0x03, 0x3F, 0x05, 0x00][..]).ok().unwrap();
-        assert_eq!(window_open(driver_open.window_drvr_sd_wdw_detail_opn_sta_raw()), Some(true));
-        assert_eq!(window_open(driver_open.window_asst_sd_wdw_detail_opn_sta_raw()), Some(false));
+        // log_07 from 0:06.57: the driver window opening through each step.
+        let driver_steps = [
+            ([0x3E, 0x00, 0x01, 0xFF, 0x01, 0x3F, 0x05, 0x00], WindowPosition::SlightlyOpen),
+            ([0x3D, 0x10, 0x01, 0xFF, 0x02, 0x3F, 0x05, 0x00], WindowPosition::PartlyOpen),
+            ([0x76, 0x20, 0x01, 0xFF, 0x03, 0x3F, 0x05, 0x00], WindowPosition::FullyOpen),
+        ];
+        for (data, position) in driver_steps {
+            let m = m_can::Bcm15200ms::try_from(&data[..]).ok().unwrap();
+            assert_eq!(window_position(m.window_drvr_sd_wdw_detail_opn_sta_raw()), Some(position));
+            assert_eq!(window_position(m.window_asst_sd_wdw_detail_opn_sta_raw()), Some(WindowPosition::Closed));
+        }
 
         let passenger_open = m_can::Bcm15200ms::try_from(&[0x37, 0xC0, 0x10, 0xFF, 0x18, 0x3F, 0x05, 0x00][..]).ok().unwrap();
-        assert_eq!(window_open(passenger_open.window_drvr_sd_wdw_detail_opn_sta_raw()), Some(false));
-        assert_eq!(window_open(passenger_open.window_asst_sd_wdw_detail_opn_sta_raw()), Some(true));
+        assert_eq!(window_position(passenger_open.window_drvr_sd_wdw_detail_opn_sta_raw()), Some(WindowPosition::Closed));
+        assert_eq!(window_position(passenger_open.window_asst_sd_wdw_detail_opn_sta_raw()), Some(WindowPosition::FullyOpen));
     }
 
     #[test]
