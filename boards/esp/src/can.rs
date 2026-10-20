@@ -14,19 +14,29 @@ use embedded_can::Frame as EmbeddedFrame;
 
 /// Converts any [`EmbeddedFrame`]-implementing hardware frame into the
 /// crate-shared [`CanFrame`] type. Used by both the TWAI and MCP2515 drivers.
+///
+/// Returns `None` for remote (RTR) frames. A remote frame asks another node to send
+/// the frame with that ID: it has a DLC but no data, so passed on it would look like
+/// a data frame full of zeros and be decoded as real values (doors locked, speed 0).
+/// `CanFrame` has no RTR flag, so they are dropped here. They could still be useful
+/// later, e.g. to record every frame in CAN logging; that needs an RTR flag on
+/// `CanFrame` (and `CanRawCapture`) first.
 #[cfg_attr(not(feature = "hardware"), allow(dead_code))]
-fn to_core_frame<F: EmbeddedFrame>(frame: F, bus_id: u8) -> CanFrame {
+fn to_core_frame<F: EmbeddedFrame>(frame: F, bus_id: u8) -> Option<CanFrame> {
+    if frame.is_remote_frame() {
+        return None;
+    }
     let id = frame.id();
     let dlc = frame.dlc() as u8;
     let raw = frame.data();
     let mut data = [0u8; 8];
     data[..raw.len()].copy_from_slice(raw);
-    CanFrame {
+    Some(CanFrame {
         bus_id,
         id,
         data,
         dlc,
-    }
+    })
 }
 
 #[cfg(feature = "hardware")]
@@ -200,7 +210,9 @@ mod hardware {
             {
                 Either4::First(Ok(frame)) => {
                     crate::status_leds::pulse_can();
-                    let core_frame = to_core_frame(frame, bus_id);
+                    let Some(core_frame) = to_core_frame(frame, bus_id) else {
+                        continue;
+                    };
                     try_send_can_debug_capture(bus_id, &core_frame);
                     let matched = core_interface::passes_filter(&core_frame, filters);
                     stats.record_frame(matched);
@@ -427,7 +439,9 @@ mod hardware {
                 match driver.read_message() {
                     Ok(frame) => {
                         crate::status_leds::pulse_can();
-                        let core_frame = to_core_frame(frame, bus_id);
+                        let Some(core_frame) = to_core_frame(frame, bus_id) else {
+                            continue;
+                        };
                         try_send_can_debug_capture(bus_id, &core_frame);
                         if core_interface::passes_filter(&core_frame, filters) {
                             CAN_RX_CHANNEL.sender().send(core_frame).await;
@@ -704,6 +718,8 @@ mod tests {
     struct TestFrame {
         id: Id,
         data: heapless::Vec<u8, 8>,
+        /// Set for remote frames, which have a DLC but no data.
+        remote_dlc: Option<usize>,
     }
 
     impl EmbeddedFrame for TestFrame {
@@ -711,22 +727,27 @@ mod tests {
             Some(Self {
                 id: id.into(),
                 data: heapless::Vec::from_slice(data).ok()?,
+                remote_dlc: None,
             })
         }
-        fn new_remote(_id: impl Into<Id>, _dlc: usize) -> Option<Self> {
-            None
+        fn new_remote(id: impl Into<Id>, dlc: usize) -> Option<Self> {
+            Some(Self {
+                id: id.into(),
+                data: heapless::Vec::new(),
+                remote_dlc: Some(dlc),
+            })
         }
         fn is_extended(&self) -> bool {
             matches!(self.id, Id::Extended(_))
         }
         fn is_remote_frame(&self) -> bool {
-            false
+            self.remote_dlc.is_some()
         }
         fn id(&self) -> Id {
             self.id
         }
         fn dlc(&self) -> usize {
-            self.data.len()
+            self.remote_dlc.unwrap_or(self.data.len())
         }
         fn data(&self) -> &[u8] {
             &self.data
@@ -736,10 +757,17 @@ mod tests {
     #[test]
     fn to_core_frame_copies_id_and_pads_short_payloads() {
         let id = Id::Standard(StandardId::new(0x123).unwrap());
-        let frame = to_core_frame(TestFrame::new(id, &[0xAA, 0xBB, 0xCC]).unwrap(), 2);
+        let frame = to_core_frame(TestFrame::new(id, &[0xAA, 0xBB, 0xCC]).unwrap(), 2).unwrap();
         assert_eq!(frame.bus_id, 2);
         assert_eq!(frame.id, id);
         assert_eq!(frame.dlc, 3);
         assert_eq!(frame.data, [0xAA, 0xBB, 0xCC, 0, 0, 0, 0, 0]);
+    }
+
+    /// A remote frame on BODY_STATUS must not become an all-zero data frame.
+    #[test]
+    fn to_core_frame_drops_remote_frames() {
+        let id = Id::Standard(StandardId::new(1041).unwrap());
+        assert!(to_core_frame(TestFrame::new_remote(id, 8).unwrap(), 0).is_none());
     }
 }
