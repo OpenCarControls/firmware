@@ -852,8 +852,14 @@ mod can_bus_tests {
         assert_eq!(
             buses,
             vec![
-                VehicleCanBus { bitrate: 500_000, fd: false },
-                VehicleCanBus { bitrate: 500_000, fd: true },
+                VehicleCanBus {
+                    bitrate: 500_000,
+                    fd: false
+                },
+                VehicleCanBus {
+                    bitrate: 500_000,
+                    fd: true
+                },
             ]
         );
     }
@@ -865,7 +871,10 @@ mod can_bus_tests {
 
     #[test]
     fn bitrate_mismatch_is_rejected() {
-        let expected = VehicleCanBus { bitrate: 500_000, fd: false };
+        let expected = VehicleCanBus {
+            bitrate: 500_000,
+            fd: false,
+        };
         assert!(check_can_bitrate(0, 500_000, Some(&expected)).is_ok());
         assert!(check_can_bitrate(0, 250_000, Some(&expected)).is_err());
         assert!(check_can_bitrate(0, 250_000, None).is_ok());
@@ -874,9 +883,18 @@ mod can_bus_tests {
     #[test]
     fn fd_declarations_cover_only_used_fd_buses() {
         let buses = [
-            VehicleCanBus { bitrate: 500_000, fd: false },
-            VehicleCanBus { bitrate: 500_000, fd: true },
-            VehicleCanBus { bitrate: 500_000, fd: true },
+            VehicleCanBus {
+                bitrate: 500_000,
+                fd: false,
+            },
+            VehicleCanBus {
+                bitrate: 500_000,
+                fd: true,
+            },
+            VehicleCanBus {
+                bitrate: 500_000,
+                fd: true,
+            },
         ];
         assert_eq!(
             generate_fd_bus_declarations(&buses, 2),
