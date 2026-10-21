@@ -13,7 +13,7 @@ const DEVICE_ID_PREFIX: &[u8] = b"ble:";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(not(feature = "hardware"), allow(dead_code))]
-pub(in crate::ble) enum BondOp {
+pub(crate) enum BondOp {
     Remove([u8; 6]),
     Clear,
 }
