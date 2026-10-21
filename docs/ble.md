@@ -52,6 +52,15 @@ Both RX and TX GATT characteristics declare `permissions(encrypted)` in the `#[c
 
 Encryption is checked via a per-connection `tx_auth: AtomicBool` (initialized `false`). On each retry while `tx_auth` is `false`, `ble_tx_notify_task` calls `conn.raw().security_level()` — if the result is `Encrypted`, it sets `tx_auth = true` (cached for all subsequent messages) and sends immediately. This single check covers both the first-pair path (encryption established during `PairingComplete`) and the reconnect path (re-encryption via stored LTK, which never fires `PairingComplete` on iOS). `gatt_event_task` does not touch `tx_auth`.
 
+## Removing phones
+`RemovePairedPhone` / `ClearPairedPhones` (only accepted while the pairing window is open) queue a `BondOp` for the BLE task, which owns the bonds. It removes each bond from the stack, the `BondStore` flash, the controller's filter accept and resolving lists, and the paired-phone registry in `core-interface`, and disconnects the phone if it is connected. A removed phone can no longer reconnect. The `device_id` is `ble:` followed by the phone's 6-byte address (the same stamp as `source_device_id`).
+
+The registry only mirrors the bonds (restored from flash at startup, updated on pairing and removal), so `ListPairedPhones` reports real bonds. `UpsertPairedPhone` is ignored on ESP: phones enter by pairing.
+
+`max_bonded_phones` applies to BLE bonds: while that many phones are bonded, a new phone is disconnected even with the pairing window open (a bonded phone can still re-pair). The flash store holds at most 8 bonds regardless.
+
+A normal disconnect by the phone never touches its bond. While the pairing window is open, a disconnect that signals broken keys (`PIN_OR_KEY_MISSING`, `AUTHENTICATION_FAILURE`, `CONN_TERMINATED_DUE_TO_MIC_FAILURE`) wipes that phone's bond so it can pair afresh.
+
 ## Pairing events
 Passkey display/confirm/input and pairing-complete/failure events are handled in the BLE event loop. On `PairingComplete`, new bond data is persisted to flash and added to the controller filter lists. A warning is logged if `security_level` is not encrypted. `tx_auth` is not touched here — TX unblocking is handled entirely by `ble_tx_notify_task`.
 

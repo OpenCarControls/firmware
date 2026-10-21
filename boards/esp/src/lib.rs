@@ -77,31 +77,30 @@ mod hardware {
                     if !pairing_window_open_or_warn("remove paired phone") {
                         continue;
                     }
-                    let removed = core_interface::remove_paired_phone(&req.device_id).await;
-                    log::debug!(
-                        "SYSTEM: remove paired phone requested, removed={}, device_id_len={}",
-                        removed,
-                        req.device_id.len(),
-                    );
+                    let Some(addr) = ble::bond_ops::parse_phone_device_id(&req.device_id) else {
+                        log::warn!("SYSTEM: remove paired phone: not a BLE device id");
+                        continue;
+                    };
+                    // The BLE task removes the bond and then the registry entry.
+                    ble::bond_ops::BOND_OPS
+                        .send(ble::bond_ops::BondOp::Remove(addr))
+                        .await;
+                    log::info!("SYSTEM: remove paired phone queued");
                 }
                 Some(core_interface::proto::system_command::Action::ClearPairedPhones(_)) => {
                     if !pairing_window_open_or_warn("clear paired phones") {
                         continue;
                     }
-                    let removed = core_interface::clear_paired_phones().await;
-                    log::info!(
-                        "SYSTEM: clear paired phones requested, removed={} (ESP runtime)",
-                        removed
-                    );
+                    ble::bond_ops::BOND_OPS
+                        .send(ble::bond_ops::BondOp::Clear)
+                        .await;
+                    log::info!("SYSTEM: clear paired phones queued");
                 }
                 Some(core_interface::proto::system_command::Action::UpsertPairedPhone(req)) => {
-                    if !pairing_window_open_or_warn("add paired phone") {
-                        continue;
-                    }
-                    let added = core_interface::add_paired_phone(&req.device_id).await;
-                    log::debug!(
-                        "SYSTEM: upsert paired phone requested, accepted={}, device_id_len={}",
-                        added,
+                    // Phones enter the registry by bonding, never by command: a registry
+                    // entry without a bond would list a phone that cannot connect.
+                    log::warn!(
+                        "SYSTEM: upsert paired phone ignored on ESP, device_id_len={}",
                         req.device_id.len(),
                     );
                 }
