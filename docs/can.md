@@ -51,7 +51,20 @@ In `xtask_builder.rs` per board:
 *   For each entry emits peripheral/pin construction code + an `init_*` call into `{CAN_HARDWARE_INIT}`.
 *   Emits the corresponding `s.spawn(run_*_loop(...))` call into `{CORE1_TASK_SPAWNS}` (ESP) or `spawner.spawn(socket_can_task(...))` (PC).
 *   MCP2515 entries require `interface = "mcp2515"`, `cs_pin`, `clk_pin`, `mosi_pin`, `miso_pin`, `int_pin`, `can_speed`, and `mcp_speed`. The SPI peripheral is auto-assigned by xtask (starting from SPI2).
-*   TWAI entries require `interface = "twai"`, `tx_pin`, and `rx_pin`. The TWAI peripheral is hardcoded as `TWAI0`. Pin mapping matches config field names directly: `rx_pin` is passed as RX and `tx_pin` as TX to `board_esp::init_twai(...)`.
+*   TWAI entries require `interface = "twai"`, `tx_pin`, and `rx_pin`, and take an optional `bitrate` in bit/s (125000, 250000, 500000 (default) or 1000000). The TWAI peripheral is hardcoded as `TWAI0`. Pin mapping matches config field names directly: `rx_pin` is passed as RX and `tx_pin` as TX to `board_esp::init_twai(...)`.
+
+## Bitrate and CAN-FD
+A vehicle declares what it expects of each bus in its `Cargo.toml`, one `[[package.metadata.opencar.can_buses]]` entry per bus in bus order:
+
+```toml
+[[package.metadata.opencar.can_buses]]
+bitrate = 500000   # bit/s
+fd = false         # optional; true for a CAN-FD bus
+```
+
+xtask compares `bitrate` with the board config (`bitrate` for TWAI, `can_speed` for MCP2515) and fails the build on a mismatch, so a wrong bitrate is caught before it reaches a car. PC/SocketCAN buses aren't checked: their bitrate is set on the Linux interface. A vehicle that declares nothing gets no check.
+
+The TWAI and MCP2515 are classic-CAN controllers: in normal mode they would error-frame every CAN-FD frame. A bus declared `fd = true` therefore **never leaves listen-only mode**, even after `set_can_read_only(false)`: xtask emits `core_interface::declare_can_fd_bus(bus_id)` at boot, and the board drivers use `is_can_bus_read_only(bus_id)` for both the controller mode and the TX drop. Vehicle code that unlocks the other buses needs no special case; frames queued for an FD bus are dropped.
 
 ## Read-only mode
 

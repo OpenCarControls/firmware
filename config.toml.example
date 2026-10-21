@@ -35,6 +35,7 @@ controller_lease_ttl_s = 15
 # rx_pin = 3
 # enable_pin = 6
 # enable_level = "low"
+# bitrate = 500000  # TWAI only: 125000, 250000, 500000 (default) or 1000000. xtask checks it against the vehicle.
 
 # [hardware.pc]
 

@@ -54,7 +54,8 @@ pub use channels::{
 
 // CAN filter & read-only
 pub use can::{
-    CanReadOnlyReceiver, can_read_only_receiver, is_can_read_only, passes_filter, set_can_read_only,
+    CanReadOnlyReceiver, can_read_only_receiver, declare_can_fd_bus, is_can_bus_read_only,
+    is_can_fd_bus, is_can_read_only, passes_filter, set_can_read_only,
 };
 
 // CAN debug

@@ -195,6 +195,83 @@ pub fn load_vehicle_crate_info(platform: &str) -> (String, String) {
     (name, ident)
 }
 
+/// What a vehicle expects of one of its CAN buses, from
+/// `[[package.metadata.opencar.can_buses]]` in `cars/<platform>/Cargo.toml`
+/// (in bus order, matching the board's `can_buses` entries).
+#[derive(Debug, PartialEq, Eq)]
+pub struct VehicleCanBus {
+    /// Nominal bitrate in bit/s, e.g. 500000.
+    pub bitrate: u32,
+    /// The bus carries CAN-FD frames: it never leaves listen-only mode.
+    pub fd: bool,
+}
+
+/// Reads the per-bus expectations the vehicle declares. A vehicle that declares
+/// none (e.g. the virtual car) gets no checks and no FD guard.
+pub fn load_vehicle_can_buses(platform: &str) -> Vec<VehicleCanBus> {
+    let path = format!("cars/{}/Cargo.toml", platform);
+    let cargo_str = fs::read_to_string(&path)
+        .unwrap_or_else(|_| panic!("Could not read vehicle Cargo.toml: {}", path));
+    let cargo: toml::Value = toml::from_str(&cargo_str).expect("Invalid vehicle Cargo.toml");
+    parse_vehicle_can_buses(&cargo).unwrap_or_else(|e| {
+        eprintln!("\u{274c} {}: {}", path, e);
+        exit(1);
+    })
+}
+
+fn parse_vehicle_can_buses(cargo: &toml::Value) -> Result<Vec<VehicleCanBus>, String> {
+    let Some(buses) = cargo
+        .get("package")
+        .and_then(|p| p.get("metadata"))
+        .and_then(|m| m.get("opencar"))
+        .and_then(|o| o.get("can_buses"))
+    else {
+        return Ok(Vec::new());
+    };
+    let buses = buses
+        .as_array()
+        .ok_or("[[package.metadata.opencar.can_buses]] must be an array of tables")?;
+    buses
+        .iter()
+        .enumerate()
+        .map(|(i, bus)| {
+            let bitrate = bus
+                .get("bitrate")
+                .and_then(|v| v.as_integer())
+                .and_then(|v| u32::try_from(v).ok())
+                .ok_or(format!("can_buses entry {i} needs an integer 'bitrate'"))?;
+            let fd = bus.get("fd").and_then(|v| v.as_bool()).unwrap_or(false);
+            Ok(VehicleCanBus { bitrate, fd })
+        })
+        .collect()
+}
+
+/// Checks the bitrate configured for a bus against what the vehicle expects.
+pub fn check_can_bitrate(
+    bus_id: usize,
+    configured: u32,
+    expected: Option<&VehicleCanBus>,
+) -> Result<(), String> {
+    match expected {
+        Some(e) if e.bitrate != configured => Err(format!(
+            "CAN bus {bus_id} is configured for {configured} bit/s but the vehicle expects {} bit/s.",
+            e.bitrate
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Emits the `declare_can_fd_bus` calls for the buses the vehicle declares as CAN-FD.
+pub fn generate_fd_bus_declarations(buses: &[VehicleCanBus], bus_count: usize) -> String {
+    buses
+        .iter()
+        .take(bus_count)
+        .enumerate()
+        .filter(|(_, b)| b.fd)
+        .map(|(i, _)| format!("    core_interface::declare_can_fd_bus({i});\n"))
+        .collect()
+}
+
 /// Generates `include_bytes!` constants for mTLS certs when `auth_mode = "mtls"`,
 /// or an empty string for other auth modes.
 /// The paths are relative to the generated `.app_build/src/main.rs` (hence `../../`).
@@ -751,3 +828,59 @@ pub trait TargetBuilder {
 
 // Automatically discovered and linked board builders
 include!(concat!(env!("OUT_DIR"), "/board_registry.rs"));
+
+#[cfg(test)]
+mod can_bus_tests {
+    use super::*;
+
+    fn parse(s: &str) -> Result<Vec<VehicleCanBus>, String> {
+        parse_vehicle_can_buses(&toml::from_str(s).unwrap())
+    }
+
+    #[test]
+    fn vehicle_without_declaration_has_no_buses() {
+        assert_eq!(parse("[package]\nname = \"x\"").unwrap(), vec![]);
+    }
+
+    #[test]
+    fn parses_bitrate_and_fd() {
+        let buses = parse(
+            "[[package.metadata.opencar.can_buses]]\nbitrate = 500000\n\
+             [[package.metadata.opencar.can_buses]]\nbitrate = 500000\nfd = true",
+        )
+        .unwrap();
+        assert_eq!(
+            buses,
+            vec![
+                VehicleCanBus { bitrate: 500_000, fd: false },
+                VehicleCanBus { bitrate: 500_000, fd: true },
+            ]
+        );
+    }
+
+    #[test]
+    fn bitrate_is_required() {
+        assert!(parse("[[package.metadata.opencar.can_buses]]\nfd = true").is_err());
+    }
+
+    #[test]
+    fn bitrate_mismatch_is_rejected() {
+        let expected = VehicleCanBus { bitrate: 500_000, fd: false };
+        assert!(check_can_bitrate(0, 500_000, Some(&expected)).is_ok());
+        assert!(check_can_bitrate(0, 250_000, Some(&expected)).is_err());
+        assert!(check_can_bitrate(0, 250_000, None).is_ok());
+    }
+
+    #[test]
+    fn fd_declarations_cover_only_used_fd_buses() {
+        let buses = [
+            VehicleCanBus { bitrate: 500_000, fd: false },
+            VehicleCanBus { bitrate: 500_000, fd: true },
+            VehicleCanBus { bitrate: 500_000, fd: true },
+        ];
+        assert_eq!(
+            generate_fd_bus_declarations(&buses, 2),
+            "    core_interface::declare_can_fd_bus(1);\n"
+        );
+    }
+}

@@ -3,6 +3,11 @@ name = "egmp-controller"
 version = "0.1.0"
 edition = "2024"
 
+# What xtask checks the board's CAN config against (one entry per bus, in bus order).
+# Set `fd = true` on a bus that carries CAN-FD frames: it never leaves listen-only mode.
+[[package.metadata.opencar.can_buses]]
+bitrate = 500000
+
 [dependencies]
 core-interface = { workspace = true }
 embedded-can = { workspace = true }

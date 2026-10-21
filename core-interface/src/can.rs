@@ -55,6 +55,38 @@ pub fn set_can_read_only(enabled: bool) {
     CAN_READ_ONLY_WATCH.sender().send(enabled);
 }
 
+// ── CAN-FD buses ──────────────────────────────────────────────────────────────
+
+/// Buses the vehicle declared as CAN-FD. The classic-CAN controllers this firmware
+/// drives (ESP TWAI, MCP2515) are not FD-tolerant: in normal mode they would
+/// error-frame every FD frame and disturb the car's bus, so these buses never leave
+/// listen-only mode, whatever `CAN_READ_ONLY` says.
+static CAN_FD_BUSES: [AtomicBool; MAX_CAN_BUSES] =
+    [const { AtomicBool::new(false) }; MAX_CAN_BUSES];
+
+/// Marks `bus_id` as a CAN-FD bus. Called once at boot, before the CAN drivers start,
+/// by the generated `main.rs` for every bus the vehicle declares as FD. Ignored for
+/// a `bus_id` that doesn't exist.
+pub fn declare_can_fd_bus(bus_id: u8) {
+    if let Some(flag) = CAN_FD_BUSES.get(bus_id as usize) {
+        flag.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Returns `true` if the vehicle declared `bus_id` as CAN-FD.
+pub fn is_can_fd_bus(bus_id: u8) -> bool {
+    CAN_FD_BUSES
+        .get(bus_id as usize)
+        .is_some_and(|flag| flag.load(Ordering::Relaxed))
+}
+
+/// Returns `true` if `bus_id` must stay read-only: either the global read-only flag
+/// is set, or the bus is declared CAN-FD. Board drivers use this (not
+/// `is_can_read_only()` alone) for both the controller mode and the TX drop.
+pub fn is_can_bus_read_only(bus_id: u8) -> bool {
+    is_can_read_only() || is_can_fd_bus(bus_id)
+}
+
 // ── CAN Filter ────────────────────────────────────────────────────────────────
 
 /// Returns the raw numeric value of a CAN identifier.

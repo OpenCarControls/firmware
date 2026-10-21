@@ -123,7 +123,7 @@ mod linux_can {
             // TX: drain this bus's own outbound channel
             while let Ok(outbound) = tx_channel.try_receive() {
                 // Drop silently when in read-only mode; do not transmit on the bus.
-                if core_interface::is_can_read_only() {
+                if core_interface::is_can_bus_read_only(bus_id) {
                     continue;
                 }
                 let sc_frame = core_to_socketcan_frame(&outbound);

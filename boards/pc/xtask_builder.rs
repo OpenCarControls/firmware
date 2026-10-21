@@ -127,6 +127,10 @@ impl TargetBuilder for Builder {
 
         // Generate one socket_can_task spawn per bus.
         // Only the first `can_bus_count` buses are used by the vehicle; extras are ignored.
+        let fd_declarations = crate::generate_fd_bus_declarations(
+            &crate::load_vehicle_can_buses(vehicle_platform),
+            can_bus_count,
+        );
         let can_spawns: String = pc_hw.can_buses.iter().take(can_bus_count).enumerate()
             .map(|(bus_id, bus)| format!(
                 "    spawner.spawn(board_pc::socket_can_task(\"{}\", {}, {}::CAN_FILTERS).unwrap());\n",
@@ -234,7 +238,7 @@ impl TargetBuilder for Builder {
         let main_rs = template
             .replace("{PLATFORM_ID}", &format!("0x{:08X}", platform_id))
             .replace("{VEHICLE_CRATE_IDENT}", &vehicle_crate_ident)
-            .replace("{CAN_SPAWNS}", &can_spawns)
+            .replace("{CAN_SPAWNS}", &format!("{fd_declarations}{can_spawns}"))
             .replace("{BLE_HTTP_SPAWN}", &ble_http_spawn)
             .replace("{MTLS_CERTS}", &mtls_certs)
             .replace("{NETWORK_CONSTANTS}", &network_constants)
