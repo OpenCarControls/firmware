@@ -102,6 +102,7 @@ pub async fn handle_ble_message(msg: proto::AppToDevice) {
                     })
                     .await;
             }
+            #[allow(deprecated)]
             Some(proto::system_command::Action::SetCanDebugEnabled(_))
             | Some(proto::system_command::Action::UpdateCanDebugFilters(_)) => {}
             Some(proto::system_command::Action::ListPairedPhones(cmd)) => {

@@ -255,6 +255,7 @@ fn mqtt_advanced_command_bytes_silently_dropped() {
 /// A bonded phone sending them must not panic or reach any channel, including with a
 /// `bus_id` that used to overflow the old bus bitmask.
 #[test]
+#[allow(deprecated)]
 fn ble_deprecated_can_debug_commands_are_ignored() {
     init(PLATFORM_ID);
     while SYSTEM_COMMAND_CHANNEL.try_receive().is_ok() {}

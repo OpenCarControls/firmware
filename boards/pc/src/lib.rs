@@ -91,9 +91,11 @@ pub async fn system_command_task() {
                     req.device_id.len()
                 );
             }
+            #[allow(deprecated)]
             Some(core_interface::proto::system_command::Action::SetCanDebugEnabled(_)) => {
                 // Deprecated: dropped by core-interface, never forwarded here.
             }
+            #[allow(deprecated)]
             Some(core_interface::proto::system_command::Action::UpdateCanDebugFilters(_)) => {
                 // Deprecated: dropped by core-interface, never forwarded here.
             }

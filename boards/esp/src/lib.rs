@@ -103,6 +103,7 @@ mod hardware {
                         req.device_id.len(),
                     );
                 }
+                #[allow(deprecated)]
                 Some(core_interface::proto::system_command::Action::SetCanDebugEnabled(_))
                 | Some(core_interface::proto::system_command::Action::UpdateCanDebugFilters(_))
                 | None => {}
