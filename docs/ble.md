@@ -10,14 +10,19 @@ BLE uses `esp-radio 0.18` + `trouble-host 0.6.0` (with `bt-hci 0.8.1`), built wi
 ## GATT transport
 `ble_transport_task` runs a full advertise/connect loop and bridges GATT RX/TX characteristics to `BLE_RX_CHANNEL` / `BLE_TX_CHANNEL`. It accepts a `name_base: &'static str` 4th parameter (injected by the generated `main.rs` as `BLE_DEVICE_NAME_BASE`).
 
-## Message size
-BLE messages are never fragmented: every encoded `AppToDevice` / `DeviceToApp` must fit in one ATT write or notification. The limit comes from the contract (`ble.payload` in `transport.toml`): the app requests an ATT MTU of `BLE_ATT_MTU` (247), so a message carries at most `BLE_MAX_MESSAGE_BYTES` (244). Both constants are generated into `core_interface::ble`; the GATT characteristics are sized with `BLE_MAX_MESSAGE_BYTES`, and a compile-time check ensures the stack's packet pool supports `BLE_ATT_MTU`.
+## Message size and fragmentation
+Messages larger than one ATT packet are split into chunks, as defined by the contract (`ble.payload` and `ble.fragmentation` in `transport.toml`, explained in `contracts/docs/ble-fragmentation.md`). Every write and notification is one chunk: a 1-byte header (bit 7 = last chunk, bits 0-6 = chunk index) and up to `negotiated MTU - 4` bytes of the encoded `AppToDevice` / `DeviceToApp`. The limits are generated into `core_interface::ble`: `BLE_MAX_CHUNK_BYTES` (244, one ATT value at the requested MTU `BLE_ATT_MTU` of 247) sizes the GATT characteristics, `BLE_MAX_MESSAGE_BYTES` (4096) is the largest reassembled message. A compile-time check ensures the stack's packet pool supports `BLE_ATT_MTU`.
+
+The splitting and reassembly logic is plain code in `core_interface::ble` (`chunks`, `Reassembler`), host-tested without hardware.
+
+**TX (device to app).** `ble_tx_notify_task` encodes each message and sends its chunks back to back. The MTU is read per message (`conn.raw().att_mtu()` is 23 until the exchange finishes), so the task waits up to 3 s for it to reach `BLE_MIN_ATT_MTU` and logs the negotiated value. If the peer negotiated less, the message is dropped with a warning instead of being sent truncated. Messages over `BLE_MAX_MESSAGE_BYTES` are dropped with a `BLE GATT TX message too large` warning. If a notification fails, the link is gone and the task ends; the app discards the partial message.
+
+**RX (app to device).** Writes use the same framing. `gatt_event_task` feeds each non-empty write to a per-connection `Reassembler` and decodes once the last chunk arrives. An empty write is still the pairing probe and is ignored. A gap, a duplicate chunk, a chunk with no start, a timeout (`BLE_REASSEMBLY_TIMEOUT_MS`) or an oversize message drops the partial message with a warning; the partial message also disappears with the connection.
 
 What keeps messages within the limit:
-*   **State updates:** each vehicle crate has a `worst_case_state_update_fits_one_ble_message` test that builds the state update through `core_interface::ble_state_update` with every field at its longest encoding. Adding fields to a vehicle's state fails that test before it can fail on a car.
-*   Anything larger is dropped on the device with a `BLE GATT TX message too large` warning.
+*   **State updates:** each vehicle crate has a `worst_case_state_update_fits_ble_message` test that builds the state update through `core_interface::ble_state_update` with every field at its longest encoding and checks it against `BLE_MAX_MESSAGE_BYTES`. Adding fields to a vehicle's state fails that test before it can fail on a car.
 
-**Planned: fragmentation.** The E-GMP worst-case state update is close to the limit, and the 12 V battery voltage and the four tire pressures (6 bytes each: a 4-byte float with a 2-byte tag) would push it over. They are decoded into `EgmpCarState` but kept out of the proto until state updates can be split over several BLE messages, which needs a reassembly protocol in the firmware and the app. Larger MTUs aren't a substitute: iOS picks its own MTU.
+The E-GMP 12 V battery voltage and the four tire pressures are decoded into `EgmpCarState` but not in the proto yet; fragmentation removes the one-packet limit that kept them out.
 
 ## Device name
 Configurable base name via `[hardware.esp.ble] device_name` in `config.toml` (default `"OpenCar"`). At runtime `ble_transport_task` appends a 2-byte MAC suffix using `build_ble_device_name(base, mac)` → `"{base}-{mac[4]:02X}{mac[5]:02X}"` (e.g. `"OpenCar-ABCD"`). The result is stored in a `StaticCell<heapless::String<33>>` for the `'static` lifetime required by `PeripheralConfig`.
