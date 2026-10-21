@@ -3,7 +3,9 @@
 ## Versioning & CI/CD
 *   **Independent crates:** managed via `release-plz` (not implemented yet, waiting for at least one car implementation to work). Changes to the core cascade safely to vehicle crates.
 *   **Tagging:** prefixed tags (e.g. `car-hmg-v0.2.1`).
-*   **Agnostic pipelines:** GitHub Actions trigger on `*-v*.*.*`. The YAML dynamically parses the tag to extract the car name, passes it to `xtask`, builds the `.bin`, and uploads it to GitHub Releases.
+*   **Release workflow (`auto-release.yml`):** on every push to `main`, each platform with changes since its last tag (in `cars/<platform>/`, `core-interface/`, `boards/` or `hardware-profiles/`) gets a new `car-<platform>-v<semver>` tag, bumped from the conventional commits. Several platforms can be tagged on the same commit.
+*   **Release assets:** one merged ESP image per hardware profile in `hardware-profiles/`, named `open-car-<platform>-<profile>-v<version>.bin`, plus `checksums.sha256`. Pins, LEDs and the CAN transceiver are specific to each device, so there is no generic per-MCU image; releasing for a new device means adding its profile. Profiles with fewer CAN buses than the platform needs are skipped (`.github/scripts/release_profiles.py`). The PC board isn't released.
+*   Release images are built from `config.toml.example` with only `hardware_profile` changed, so they carry its placeholder WiFi and MQTT settings.
 
 ## OTA manifest generation
 The CI/CD pipeline generates static `manifest.json` files hosted on GitHub Pages. This includes a compatibility matrix (`min_app_version`) to ensure the hardware is never updated to a Protobuf version the phone app cannot decode.

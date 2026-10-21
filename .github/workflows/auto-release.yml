@@ -118,6 +118,7 @@ jobs:
               "cars/${PLATFORM}/" \
               "core-interface/" \
               "boards/" \
+              "hardware-profiles/" \
               || true)
 
             if [ "$FORCE_ALL" != "true" ] && [ -z "$CHANGED" ]; then
@@ -137,6 +138,7 @@ jobs:
               "cars/${PLATFORM}/" \
               "core-interface/" \
               "boards/" \
+              "hardware-profiles/" \
               || true)
 
             BUMP="patch"
@@ -211,7 +213,7 @@ jobs:
       - name: Ensure tags are available
         run: git fetch --tags --force
 
-      # RISC-V ESP chips (the example config's ESP32-C3 profile) build on stable.
+      # RISC-V ESP chips (e.g. the WiCAN's ESP32-C3) build on stable.
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -245,51 +247,35 @@ jobs:
             exit 1
           }
 
-      - name: Create config.toml from example
-        run: cp config.toml.example config.toml
-
-      - name: Build PC firmware and package artifact
+      # One image per hardware profile: pins, LEDs and the CAN transceiver are specific
+      # to each device, so a build for one ESP32-C3 board won't work on another.
+      - name: Build an ESP image for each hardware profile
         run: |
           set -euo pipefail
           PLATFORM="${{ matrix.platform }}"
           VERSION="${{ matrix.version }}"
 
-          cargo xtask build --board pc --platform "$PLATFORM"
+          python3 .github/scripts/release_profiles.py "$PLATFORM" > profiles.tsv
+          grep -q '^hardware_profile = ' config.toml.example || {
+            echo "config.toml.example has no hardware_profile line to set"
+            exit 1
+          }
 
-          PC_OUT="open-car-${PLATFORM}-pc-v${VERSION}"
-          cp .app_build/target/release/app-build "./$PC_OUT"
-          echo "PC_OUT=$PC_OUT" >> "$GITHUB_ENV"
+          : > assets.txt
+          # fd 3, so nothing in the loop can read the profile list from stdin.
+          while IFS=$'\t' read -r -u 3 PROFILE MCU TRIPLE; do
+            echo "::group::${PROFILE} (${MCU})"
+            sed "s/^hardware_profile = .*/hardware_profile = \"${PROFILE}\"/" config.toml.example > config.toml
+            cargo xtask build --platform "$PLATFORM"
 
-      - name: Build ESP firmware and package merged .bin
-        run: |
-          set -euo pipefail
-          PLATFORM="${{ matrix.platform }}"
-          VERSION="${{ matrix.version }}"
-
-          cargo xtask build --board esp --platform "$PLATFORM"
-
-          # The MCU can come from a hardware profile, so read it from the target that
-          # was built rather than from config.toml.example.
-          ELF_BUILT=$(ls -t .app_build/target/*-none-elf/release/app-build | head -n1)
-          TRIPLE=$(basename "$(dirname "$(dirname "$ELF_BUILT")")")
-          case "$TRIPLE" in
-            xtensa-esp32-none-elf)        MCU=esp32 ;;
-            xtensa-esp32s3-none-elf)      MCU=esp32s3 ;;
-            riscv32imc-unknown-none-elf)  MCU=esp32c3 ;;
-            riscv32imac-unknown-none-elf) MCU=esp32c6 ;;
-            *)                            echo "Unknown target: $TRIPLE"; exit 1 ;;
-          esac
-
-          ELF=".app_build/target/${TRIPLE}/release/app-build"
-          ESP_OUT="open-car-${PLATFORM}-${MCU}-v${VERSION}.bin"
-
-          espflash save-image --chip "$MCU" --merge "$ELF" "./$ESP_OUT"
-
-          echo "MCU=$MCU" >> "$GITHUB_ENV"
-          echo "ESP_OUT=$ESP_OUT" >> "$GITHUB_ENV"
+            OUT="open-car-${PLATFORM}-${PROFILE}-v${VERSION}.bin"
+            espflash save-image --chip "$MCU" --merge ".app_build/target/${TRIPLE}/release/app-build" "./$OUT"
+            echo "$OUT" >> assets.txt
+            echo "::endgroup::"
+          done 3< profiles.tsv
 
       - name: Compute checksums
-        run: sha256sum "$PC_OUT" "$ESP_OUT" > checksums.sha256
+        run: xargs sha256sum < assets.txt > checksums.sha256
 
       - name: Generate release notes
         id: notes
@@ -311,7 +297,7 @@ jobs:
               echo "Generating notes from ${PREV_TAG}..${CURRENT_TAG}" >&2
               COMMITS=$(git log "${PREV_TAG}..${CURRENT_TAG}" \
                 --pretty=format:"%s" \
-                -- "cars/${PLATFORM}/" "core-interface/" "boards/" \
+                -- "cars/${PLATFORM}/" "core-interface/" "boards/" "hardware-profiles/" \
                 | head -100)
 
               FEATURES=$(echo "$COMMITS" | grep -iE '^feat(\(.+\))?!?:' | sed 's/^/- /' || true)
@@ -340,7 +326,8 @@ jobs:
           VERSION="${{ matrix.version }}"
           TAG="${{ matrix.tag }}"
 
+          mapfile -t ASSETS < assets.txt
           gh release create "$TAG" \
             --title "${PLATFORM_TITLE} v${VERSION}" \
             --notes-file release_notes.txt \
-            "$PC_OUT" "$ESP_OUT" checksums.sha256
+            "${ASSETS[@]}" checksums.sha256
