@@ -61,6 +61,12 @@ Bonded phones reconnect in Mode B and re-encrypt via LL_ENC_REQ using the stored
 ## Pairing lifecycle controls
 `ble_lifecycle_task` implements active-low pairing-button hold detection (`pairing_button_hold_s`) and opens pairing windows using the transport contract value `contracts/opencar/core/v1/transport.toml` → `[ble.pairing].pairing_window_seconds` via `core_interface::open_pairing_window_for(...)`.
 
+**Boards without a pairing button** (`pairing_button_pin` unset, e.g. the WiCAN profile) open the window at boot only while no phone is bonded, so first setup needs no hardware. The transport task reports how many bonds it loaded and the lifecycle task opens the window only for zero. Once a phone is bonded, a reboot (watchdog reset, brownout) leaves the window closed.
+
+Pairing uses `NoInputNoOutput` (Just Works): it has no MITM protection and no user confirmation, so any phone that can bond is trusted from then on. That is why the window must stay closed outside first setup and button presses.
+
+On a buttonless board with a bonded phone there is currently no way to open the window again: managing phones (`RemovePairedPhone`, `ClearPairedPhones`) needs an open window too. A deliberate action for that (a command from a bonded phone, or a physical one) is still to be designed and needs a contract change; until then such a board is reset by erasing its flash.
+
 ## Bondable mode policy
 Bondability is set to match the pairing-window state at connect time (via `set_bondable(pairing_open)` in the advertise loop) and kept in sync during active connections via `sync_bondable_with_window()` — which keeps bondable `true` until the link is encrypted on first connect so LTKs can be exchanged, then follows the window state.
 

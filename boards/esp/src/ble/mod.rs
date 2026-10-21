@@ -1,3 +1,4 @@
+mod boot_pairing;
 mod lifecycle;
 mod store;
 mod transport;

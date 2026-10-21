@@ -143,6 +143,7 @@ mod hardware {
         let mut bond_store = BondStore::new(&mut flash_async, bond_store_range);
 
         let loaded_bonds = bond_store.load_bonds().await;
+        crate::ble::boot_pairing::BONDS_LOADED.signal(loaded_bonds.len());
 
         // ── BLE host setup ──────────────────────────────────────────────────────
         let connector = match ble::controller::BleConnector::new(bt_peri, ble::Config::default()) {
