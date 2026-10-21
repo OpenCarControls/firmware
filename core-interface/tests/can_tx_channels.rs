@@ -48,6 +48,7 @@ fn read_only_receiver_wakes_on_every_change() {
     assert!(embassy_futures::poll_once(rx.changed()).is_ready());
     assert!(embassy_futures::poll_once(rx.changed()).is_pending());
 
+    core_interface::confirm_car_identity();
     set_can_read_only(false);
     assert!(embassy_futures::poll_once(rx.changed()).is_ready());
     assert!(embassy_futures::poll_once(rx.changed()).is_pending());
