@@ -214,9 +214,11 @@ mod hardware {
                         continue;
                     };
                     try_send_can_debug_capture(bus_id, &core_frame);
+                    core_interface::log_can_frame(&core_frame);
                     let matched = core_interface::passes_filter(&core_frame, filters);
                     stats.record_frame(matched);
-                    if matched {
+                    // The vehicle doesn't see frames while SavvyCAN has the buses.
+                    if matched && !core_interface::is_can_logging() {
                         CAN_RX_CHANNEL.sender().send(core_frame).await;
                     }
                 }
@@ -410,7 +412,9 @@ mod hardware {
             }
 
             // MCP2515 hardware mask switching on debug enable/disable.
-            let debug_now = core_interface::is_can_debug_active();
+            // SavvyCAN logging needs the same raw view.
+            let debug_now =
+                core_interface::is_can_debug_active() || core_interface::is_can_logging();
             if debug_now && !was_debug_active {
                 // Accept all frames in hardware so the debug tap sees raw traffic.
                 set_mcp_accept_all_masks(&mut driver);
@@ -443,7 +447,10 @@ mod hardware {
                             continue;
                         };
                         try_send_can_debug_capture(bus_id, &core_frame);
-                        if core_interface::passes_filter(&core_frame, filters) {
+                        core_interface::log_can_frame(&core_frame);
+                        if core_interface::passes_filter(&core_frame, filters)
+                            && !core_interface::is_can_logging()
+                        {
                             CAN_RX_CHANNEL.sender().send(core_frame).await;
                         }
                     }

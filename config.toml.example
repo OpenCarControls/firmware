@@ -58,6 +58,15 @@ enabled = true
 ssid = "YourSSID"
 password = "YourPassword"
 
+# SavvyCAN logger: streams every CAN frame to SavvyCAN over WiFi (add a "Network
+# connection" in SavvyCAN's Connection > Open Connection Window, type GVRET, this
+# device's IP and `port`). While SavvyCAN is connected the buses are read-only and the
+# vehicle receives no frames. The port has no authentication, so keep it off unless
+# you are reverse engineering a car on a network you trust.
+[network.can_logger]
+enabled = false
+port = 23
+
 [network.mqtt]
 # Use mqtt:// for basic auth (plain TCP). Use mqtts:// for mTLS.
 broker_url = "mqtt://192.168.0.100:1883"

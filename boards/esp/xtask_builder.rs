@@ -522,6 +522,22 @@ impl TargetBuilder for Builder {
             "    // WiFi disabled: MQTT driver not spawned.\n".to_string()
         };
 
+        let can_logger = &config.network.can_logger;
+        let can_logger_spawn = if can_logger.enabled {
+            if !wifi_enabled {
+                eprintln!("\u{274c} [network.can_logger].enabled=true needs [network.wifi].enabled=true");
+                exit(1);
+            }
+            format!(
+                "    spawner\n\
+                 \x20       .spawn(board_esp::can_logger_task(wifi_stack, {port}, {buses}).unwrap());\n",
+                port = can_logger.port,
+                buses = can_bus_count,
+            )
+        } else {
+            String::new()
+        };
+
         let is_dual_core = esp_hw.mcu == "esp32" || esp_hw.mcu == "esp32s3";
         let heap_size = if is_dual_core { "160 * 1024" } else { "83 * 1024" };
         // RAM used by the 2nd-stage bootloader is free once the app runs. On the RISC-V
@@ -623,6 +639,7 @@ impl TargetBuilder for Builder {
             .replace("{NETWORK_HARDWARE_INIT}", &network_hardware_init)
             .replace("{BLE_DRIVER_SPAWN}", &ble_driver_spawn)
             .replace("{MQTT_DRIVER_SPAWN}", &mqtt_driver_spawn)
+            .replace("{CAN_LOGGER_SPAWN}", &can_logger_spawn)
             .replace("{IDLE_LOOP}", &idle_loop);
 
         let target_arch = mcu_to_target_arch(&esp_hw.mcu);

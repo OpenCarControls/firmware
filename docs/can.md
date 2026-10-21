@@ -83,6 +83,24 @@ Two layers:
 3.  On success: `set_can_read_only(false)` — CAN TX is now live.
 4.  On any subsequent error or unexpected data: `set_can_read_only(true)` re-engages the lock.
 
+## SavvyCAN logging
+
+For reverse engineering, the firmware can stream every frame on every bus to [SavvyCAN](https://www.savvycan.com/) over WiFi, using its GVRET network protocol. It is receive-only.
+
+**Enable it** in `config.toml` with `[network.can_logger] enabled = true` (default off; `port` defaults to 23). The ESP board needs WiFi enabled too. In SavvyCAN add a network connection of type GVRET with the device's IP and that port. The port has no authentication and is open to the whole network, which is why it is off by default.
+
+**What it does while a client is connected:**
+*   The buses are forced read-only, whatever the vehicle asks: `is_can_read_only()` is true and `set_can_read_only(false)` is ignored. The buses are also relocked when the session starts and stay locked afterwards, so the vehicle has to validate the car again before it can transmit.
+*   The board drivers stop forwarding frames to the vehicle (`CAN_RX_CHANNEL`), so the vehicle tasks are idle. BLE and MQTT keep working.
+*   Frames SavvyCAN asks to transmit are parsed and discarded.
+*   The MCP2515 hardware masks are switched to accept-all so the logger sees every frame.
+
+Logging stops as soon as the client disconnects, errors, or stops reading for 5 s. On ESP, TCP keep-alive notices a client that vanished. One client at a time; a second connection waits until the first is gone.
+
+**Where the frames go:** the drivers call `core_interface::log_can_frame` for every received frame, before vehicle filtering. It uses `try_send` on the dedicated `CAN_LOG_CHANNEL` (64 frames), so a slow client drops frames (counted and logged when the session ends) and never stalls the CAN loop or the BLE/MQTT/vehicle queues. Frames on a bus the board doesn't have are ignored.
+
+**Protocol:** `core-interface/src/can_log.rs` holds the parser, the encoder and the session loop (generic over `embedded_io_async` streams); each board only provides the TCP listener (`can_logger_task`). Supported commands are binary-mode frames, time sync, keep-alive, number of buses, bus parameters (always listen-only, speed reported as 0) and device info. The bitrate is set at build time, so SavvyCAN's bus setup is accepted and ignored.
+
 ## E-GMP vehicle state
 `EgmpCarState` fields are all `None` until the matching CAN frame has been decoded, and `None` fields are omitted from the published proto, so the app never sees invented values. The debug simulation seeds its own defaults when it is switched on.
 

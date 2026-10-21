@@ -13,7 +13,7 @@ use rust_mqtt::{
 /// Adapts a non-blocking `std::net::TcpStream` to `embedded_io_async`'s
 /// `Read` and `Write` traits by polling every 1 ms via Embassy timer when the
 /// socket would block. This mirrors the pattern used by `socket_can_task`.
-struct NonBlockingTcpStream(std::net::TcpStream);
+pub(crate) struct NonBlockingTcpStream(pub(crate) std::net::TcpStream);
 
 impl embedded_io_async::ErrorType for NonBlockingTcpStream {
     type Error = embedded_io_async::ErrorKind;

@@ -58,7 +58,7 @@ broker_url = "mqtt://192.168.0.100:1883"
 auth_mode  = "basic"                       # "basic" or "mtls"
 ```
 
-Per-board settings live under `[hardware.esp]` / `[hardware.pc]`, including CAN buses (`[[hardware.<board>.can_buses]]`, where order determines `bus_id`) and BLE options. The `board` and `platform` values can be overridden with `--board` and `--platform`. Hardware profiles in `hardware-profiles/` are ready-made pin/CAN setups for specific devices; anything set in `config.toml`, including `board`, wins over the profile.
+Per-board settings live under `[hardware.esp]` / `[hardware.pc]`, including CAN buses (`[[hardware.<board>.can_buses]]`, where order determines `bus_id`) and BLE options. The `board` and `platform` values can be overridden with `--board` and `--platform`. To reverse engineer a car, `[network.can_logger] enabled = true` streams the CAN buses to SavvyCAN over WiFi (see [CAN bus](docs/can.md#savvycan-logging)). Hardware profiles in `hardware-profiles/` are ready-made pin/CAN setups for specific devices; anything set in `config.toml`, including `board`, wins over the profile.
 
 ### Switching boards in the IDE
 

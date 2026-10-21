@@ -32,8 +32,9 @@ mod hardware {
         types::{MqttBinary, MqttString, TopicFilter, TopicName},
     };
 
-    // 1 socket for the MQTT TCP connection + 2 for smoltcp internals (DHCP, ARP).
-    const NET_RESOURCES_SOCKETS: usize = 3;
+    // 1 socket for the MQTT TCP connection + 1 for the SavvyCAN CAN logger + 2 for
+    // smoltcp internals (DHCP, ARP).
+    const NET_RESOURCES_SOCKETS: usize = 4;
 
     /// The concrete WiFi stack type produced by `init_wifi`.
     pub type WifiStack = Stack<'static>;
@@ -286,6 +287,45 @@ mod hardware {
                 log::info!("MQTT: session ended, reconnecting in 5s");
             }
             Timer::after(Duration::from_secs(5)).await;
+        }
+    }
+
+    /// SavvyCAN network logger: accepts one client at a time on `port` and streams the
+    /// CAN buses to it until it disconnects. The protocol and session logic live in
+    /// `core-interface`.
+    #[embassy_executor::task]
+    pub async fn can_logger_task(stack: &'static WifiStack, port: u16, num_buses: u8) {
+        use embassy_time::{Duration, Timer};
+
+        let mut rx_buffer = [0u8; 1024];
+        let mut tx_buffer = [0u8; 2048];
+
+        loop {
+            if !stack.is_config_up() {
+                stack.wait_config_up().await;
+            }
+
+            let mut socket = TcpSocket::new(*stack, &mut rx_buffer, &mut tx_buffer);
+            // Notice a SavvyCAN that vanished (laptop slept, left WiFi) even when the
+            // bus is silent, so the buses are handed back to the vehicle.
+            socket.set_timeout(Some(Duration::from_secs(30)));
+            socket.set_keep_alive(Some(Duration::from_secs(10)));
+
+            log::info!("CAN logger: waiting for SavvyCAN on port {}", port);
+            if socket.accept(port).await.is_err() {
+                Timer::after(Duration::from_secs(1)).await;
+                continue;
+            }
+            log::info!("CAN logger: SavvyCAN connected");
+
+            let end = core_interface::run_can_log_session(&mut socket, num_buses).await;
+            log::info!(
+                "CAN logger: SavvyCAN disconnected ({} frame(s) dropped, {} transmit request(s) ignored)",
+                end.dropped,
+                end.tx_requests_ignored
+            );
+            socket.abort();
+            let _ = socket.flush().await;
         }
     }
 }

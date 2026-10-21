@@ -1,11 +1,13 @@
 mod ble;
 mod can;
+mod can_logger;
 mod network;
 
 use core_interface::SYSTEM_COMMAND_CHANNEL;
 
 pub use ble::{ble_http_task, set_ble_paired_store_path};
 pub use can::socket_can_task;
+pub use can_logger::can_logger_task;
 pub use network::mqtt_driver_task;
 
 pub fn start(spawner: &embassy_executor::Spawner) {
