@@ -15,7 +15,6 @@ pub fn start(spawner: &embassy_executor::Spawner) {
     spawner.spawn(core_interface::process_mqtt_commands_task().unwrap());
     spawner.spawn(core_interface::route_responses_task().unwrap());
     spawner.spawn(core_interface::publish_state_task().unwrap());
-    spawner.spawn(core_interface::publish_can_debug_task().unwrap());
     spawner.spawn(system_command_task().unwrap());
 }
 
@@ -93,10 +92,10 @@ pub async fn system_command_task() {
                 );
             }
             Some(core_interface::proto::system_command::Action::SetCanDebugEnabled(_)) => {
-                // Consumed by core-interface and not forwarded here.
+                // Deprecated: dropped by core-interface, never forwarded here.
             }
             Some(core_interface::proto::system_command::Action::UpdateCanDebugFilters(_)) => {
-                // Consumed by core-interface and not forwarded here.
+                // Deprecated: dropped by core-interface, never forwarded here.
             }
             None => {}
         }

@@ -53,7 +53,6 @@ mod hardware {
         spawner.spawn(core_interface::process_mqtt_commands_task().unwrap());
         spawner.spawn(core_interface::route_responses_task().unwrap());
         spawner.spawn(core_interface::publish_state_task().unwrap());
-        spawner.spawn(core_interface::publish_can_debug_task().unwrap());
         spawner.spawn(system_command_task().unwrap());
     }
 

@@ -6,7 +6,6 @@ pub mod proto {
 }
 
 mod can;
-mod can_debug;
 mod can_log;
 mod channels;
 mod dispatch;
@@ -41,27 +40,18 @@ pub fn platform_id() -> u32 {
 // ── Public re-exports ─────────────────────────────────────────────────────────
 
 // Types
-pub use types::{
-    CanDebugFilter, CanFilter, CanFrame, CanRawCapture, InboundCommand, Transport,
-    VehicleStatePayload,
-};
+pub use types::{CanFilter, CanFrame, InboundCommand, Transport, VehicleStatePayload};
 
 // Channels
 pub use channels::{
-    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, BLE_RX_CHANNEL, BLE_TX_CHANNEL, CAN_DEBUG_RX_CHANNEL,
-    CAN_RX_CHANNEL, CAN_TX_CHANNELS, CMD_RESP_CHANNEL, MAX_CAN_BUSES, MQTT_RX_CHANNEL,
-    MQTT_TX_CHANNEL, SYSTEM_COMMAND_CHANNEL, VEHICLE_STATE_CHANNEL, can_tx_channel, send_can_frame,
+    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, BLE_RX_CHANNEL, BLE_TX_CHANNEL, CAN_RX_CHANNEL,
+    CAN_TX_CHANNELS, CMD_RESP_CHANNEL, MAX_CAN_BUSES, MQTT_RX_CHANNEL, MQTT_TX_CHANNEL,
+    SYSTEM_COMMAND_CHANNEL, VEHICLE_STATE_CHANNEL, can_tx_channel, send_can_frame,
 };
 
 // CAN filter & read-only
 pub use can::{
     CanReadOnlyReceiver, can_read_only_receiver, is_can_read_only, passes_filter, set_can_read_only,
-};
-
-// CAN debug
-pub use can_debug::{
-    can_debug_wants_bus, debug_dropped_count, debug_filter_count, increment_can_debug_dropped,
-    is_can_debug_active, publish_can_debug_task, publish_single_debug_batch,
 };
 
 // CAN logging (SavvyCAN / GVRET)

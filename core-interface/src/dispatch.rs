@@ -2,13 +2,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use portable_atomic::Ordering;
 
-use crate::can_debug;
 use crate::channels::{
     ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, BLE_RX_CHANNEL, BLE_TX_CHANNEL, MQTT_RX_CHANNEL,
     MQTT_TX_CHANNEL, SYSTEM_COMMAND_CHANNEL,
 };
 use crate::proto;
-use crate::types::{CanDebugFilter, InboundCommand, Transport};
+use crate::types::{InboundCommand, Transport};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 
@@ -83,8 +82,8 @@ pub async fn reset_ble_controller_lease_for_tests() {
 /// Validates `platform_id` and routes each payload variant to the correct channel:
 /// - `system_command`:
 ///   - `restart_command` → `SYSTEM_COMMAND_CHANNEL` (board handles it)
-///   - `set_can_debug_enabled` → updates CAN debug state via `can_debug::enable/disable`
-///   - `update_can_debug_filters` → replaces blocklist via `can_debug::update_can_debug_filters`
+///   - `set_can_debug_enabled` / `update_can_debug_filters` → dropped (deprecated: the
+///     BLE CAN debug stream is gone, CAN logging goes to SavvyCAN instead)
 /// - `basic_command_bytes` → `BASIC_CMD_CHANNEL` (Transport::Ble)
 /// - `advanced_command_bytes` → `ADVANCED_CMD_CHANNEL` (Transport::Ble)
 /// Messages with a mismatched `platform_id` are silently dropped.
@@ -103,25 +102,8 @@ pub async fn handle_ble_message(msg: proto::AppToDevice) {
                     })
                     .await;
             }
-            Some(proto::system_command::Action::SetCanDebugEnabled(req)) => {
-                if req.enabled {
-                    can_debug::enable_can_debug(&req.bus_ids).await;
-                } else {
-                    can_debug::disable_can_debug();
-                }
-            }
-            Some(proto::system_command::Action::UpdateCanDebugFilters(req)) => {
-                let new: Vec<CanDebugFilter> = req
-                    .filters
-                    .into_iter()
-                    .map(|f| CanDebugFilter {
-                        can_id: f.can_id,
-                        is_extended_id: f.is_extended_id,
-                        mask: f.mask,
-                    })
-                    .collect();
-                can_debug::update_can_debug_filters(new).await;
-            }
+            Some(proto::system_command::Action::SetCanDebugEnabled(_))
+            | Some(proto::system_command::Action::UpdateCanDebugFilters(_)) => {}
             Some(proto::system_command::Action::ListPairedPhones(cmd)) => {
                 SYSTEM_COMMAND_CHANNEL
                     .sender()
