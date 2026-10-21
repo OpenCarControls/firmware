@@ -1,7 +1,8 @@
 use core_interface::{
-    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, BLE_TX_CHANNEL, SYSTEM_COMMAND_CHANNEL, Transport,
-    can_debug_wants_bus, debug_dropped_count, debug_filter_count, handle_ble_message,
-    handle_mqtt_message, increment_can_debug_dropped, init, is_can_debug_active,
+    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, BLE_TX_CHANNEL, MQTT_TX_CHANNEL,
+    SYSTEM_COMMAND_CHANNEL, Transport, can_debug_wants_bus, debug_dropped_count,
+    debug_filter_count, handle_ble_message, handle_mqtt_message, increment_can_debug_dropped, init,
+    is_can_debug_active,
     proto::{
         self, CanDebugFilter as ProtoCanDebugFilter, ClearPairedPhonesCommand,
         ListPairedPhonesCommand, RemovePairedPhoneCommand, RestartCommand, SetCanDebugEnabled,
@@ -204,16 +205,31 @@ fn ble_basic_command_with_empty_source_device_id_is_rejected() {
 // ── MQTT routing (restrictions) ───────────────────────────────────────────────
 
 #[test]
-fn mqtt_basic_command_bytes_goes_to_basic_channel_with_mqtt_transport() {
+fn mqtt_basic_command_is_rejected_until_mqtt_is_authenticated() {
     init(PLATFORM_ID);
-    let bytes = vec![0x11, 0x22];
-    let msg = ble_msg(PLATFORM_ID, Some(Payload::BasicCommandBytes(bytes.clone())));
+    while MQTT_TX_CHANNEL.try_receive().is_ok() {}
+    let mut msg = ble_msg(
+        PLATFORM_ID,
+        Some(Payload::BasicCommandBytes(vec![0x11, 0x22])),
+    );
+    msg.message_id = 77;
     embassy_futures::block_on(handle_mqtt_message(msg));
-    let cmd = BASIC_CMD_CHANNEL
+    assert!(
+        BASIC_CMD_CHANNEL.try_receive().is_err(),
+        "MQTT command must not reach the vehicle"
+    );
+    let reply = MQTT_TX_CHANNEL
         .try_receive()
-        .expect("BasicCommand not forwarded from MQTT");
-    assert_eq!(cmd.bytes, bytes);
-    assert!(matches!(cmd.transport, Transport::Mqtt));
+        .expect("rejected MQTT command not answered");
+    match reply.payload {
+        Some(proto::device_to_app::Payload::CommandResponse(resp)) => {
+            assert_eq!(resp.message_id, 77);
+            assert!(!resp.success);
+            assert_eq!(resp.status_code, proto::CommandStatusCode::Failed as i32);
+            assert!(resp.error_message.contains("MQTT"));
+        }
+        other => panic!("expected CommandResponse, got {other:?}"),
+    }
 }
 
 #[test]
