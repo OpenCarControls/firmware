@@ -751,6 +751,8 @@ mod hardware {
         let mut pending_msg: Option<proto::DeviceToApp> = None;
         let mut tx_held_logged = false;
         let mut logged_mtu = 0u16;
+        // Message sequence number: the same on every chunk of a message.
+        let mut seq = 0u8;
 
         'tx: loop {
             let msg = if let Some(msg) = pending_msg.take() {
@@ -811,20 +813,22 @@ mod hardware {
                 logged_mtu = mtu;
             }
 
-            let chunks = match chunks(&encoded, mtu) {
+            let chunks = match chunks(&encoded, mtu, seq) {
                 Ok(chunks) => chunks,
                 Err(e) => {
                     log::warn!("BLE GATT TX not sent: {:?} ({} bytes)", e, encoded.len());
                     continue;
                 }
             };
+            seq = seq.wrapping_add(1);
             // All chunks of a message go out back to back; this is the only
             // task that notifies on the characteristic.
-            for (header, data) in chunks {
-                let mut chunk = heapless::Vec::<u8, BLE_MAX_CHUNK_BYTES>::new();
-                // `chunks` sizes data to the MTU, which is capped at BLE_ATT_MTU.
-                let _ = chunk.push(header);
-                let _ = chunk.extend_from_slice(data);
+            for chunk in chunks {
+                // `chunks` sizes each chunk to the MTU, which is capped at BLE_ATT_MTU.
+                let Ok(chunk) = heapless::Vec::<u8, BLE_MAX_CHUNK_BYTES>::from_slice(&chunk) else {
+                    log::warn!("BLE GATT TX chunk too large: {} bytes", chunk.len());
+                    break;
+                };
                 if server.link.tx.notify(conn, &chunk).await.is_err() {
                     break 'tx;
                 }

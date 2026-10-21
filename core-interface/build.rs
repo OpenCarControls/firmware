@@ -75,14 +75,16 @@ fn generate_ble_transport_constants() -> Result<()> {
     let last_chunk_flag = frag_key("last_chunk_flag");
     let chunk_index_mask = frag_key("chunk_index_mask");
     let max_chunks = frag_key("max_chunks");
+    let crc_bytes = frag_key("crc_bytes");
     let max_chunk_data_bytes = frag_key("max_chunk_data_bytes");
     let min_att_mtu = frag_key("min_att_mtu");
     let reassembly_timeout_ms = frag_key("reassembly_timeout_ms");
     assert!(
-        header_bytes == 1
+        header_bytes == 2
             && last_chunk_flag == 0x80
             && chunk_index_mask == 0x7f
-            && max_chunks == chunk_index_mask + 1,
+            && max_chunks == chunk_index_mask + 1
+            && crc_bytes == 4,
         "transport.toml ble.fragmentation header layout changed; update core_interface::ble"
     );
     assert!(
@@ -90,8 +92,8 @@ fn generate_ble_transport_constants() -> Result<()> {
         "transport.toml ble.fragmentation.max_chunk_data_bytes must be max_chunk_bytes - header_bytes"
     );
     assert!(
-        max_chunks * (min_att_mtu - 3 - header_bytes) >= max_message_bytes,
-        "transport.toml min_att_mtu cannot carry max_message_bytes in max_chunks chunks"
+        max_chunks * (min_att_mtu - 3 - header_bytes) >= max_message_bytes + crc_bytes,
+        "transport.toml min_att_mtu cannot carry max_message_bytes and its CRC in max_chunks chunks"
     );
 
     let out_dir = std::env::var("OUT_DIR").unwrap();
@@ -117,6 +119,8 @@ fn generate_ble_transport_constants() -> Result<()> {
              pub const BLE_CHUNK_LAST_FLAG: u8 = {last_chunk_flag};\n\
              /// Chunk header bits holding the chunk index.\n\
              pub const BLE_CHUNK_INDEX_MASK: u8 = {chunk_index_mask};\n\
+             /// CRC-32 bytes after the message in the message stream.\n\
+             pub const BLE_CRC_BYTES: usize = {crc_bytes};\n\
              /// Most chunks a message can have.\n\
              pub const BLE_MAX_CHUNKS: usize = {max_chunks};\n\
              /// Smallest negotiated ATT MTU that can carry `BLE_MAX_MESSAGE_BYTES`.\n\
