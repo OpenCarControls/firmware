@@ -237,9 +237,11 @@ jobs:
       - name: Verify checked out tag matches matrix tag
         run: |
           set -euo pipefail
-          ACTUAL_TAG=$(git describe --tags --exact-match HEAD)
-          [ "$ACTUAL_TAG" = "${{ matrix.tag }}" ] || {
-            echo "Expected tag ${{ matrix.tag }} but found $ACTUAL_TAG"
+          # Platforms released from the same commit share it, so HEAD can carry several
+          # tags; `git describe` returns just one of them.
+          TAGS=$(git tag --points-at HEAD)
+          echo "$TAGS" | grep -qxF "${{ matrix.tag }}" || {
+            echo "Expected tag ${{ matrix.tag }} on HEAD, found: $(echo $TAGS)"
             exit 1
           }
 
