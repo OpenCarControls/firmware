@@ -15,7 +15,6 @@ BLE messages are never fragmented: every encoded `AppToDevice` / `DeviceToApp` m
 
 What keeps messages within the limit:
 *   **State updates:** each vehicle crate has a `worst_case_state_update_fits_one_ble_message` test that builds the state update through `core_interface::ble_state_update` with every field at its longest encoding. Adding fields to a vehicle's state fails that test before it can fail on a car.
-*   **CAN debug batches:** `publish_single_debug_batch` splits each batch (up to 20 frames) into as many `CanDebugUpdate` messages as needed. A single 8-byte frame takes 20–30 bytes, so a full batch needs two or three messages.
 *   Anything larger is dropped on the device with a `BLE GATT TX message too large` warning.
 
 **Planned: fragmentation.** The E-GMP worst-case state update is close to the limit, and the 12 V battery voltage and the four tire pressures (6 bytes each: a 4-byte float with a 2-byte tag) would push it over. They are decoded into `EgmpCarState` but kept out of the proto until state updates can be split over several BLE messages, which needs a reassembly protocol in the firmware and the app. Larger MTUs aren't a substitute: iOS picks its own MTU.
@@ -52,6 +51,15 @@ Both RX and TX GATT characteristics declare `permissions(encrypted)` in the `#[c
 
 Encryption is checked via a per-connection `tx_auth: AtomicBool` (initialized `false`). On each retry while `tx_auth` is `false`, `ble_tx_notify_task` calls `conn.raw().security_level()` — if the result is `Encrypted`, it sets `tx_auth = true` (cached for all subsequent messages) and sends immediately. This single check covers both the first-pair path (encryption established during `PairingComplete`) and the reconnect path (re-encryption via stored LTK, which never fires `PairingComplete` on iOS). `gatt_event_task` does not touch `tx_auth`.
 
+## Removing phones
+`RemovePairedPhone` / `ClearPairedPhones` (only accepted while the pairing window is open) queue a `BondOp` for the BLE task, which owns the bonds. It removes each bond from the stack, the `BondStore` flash, the controller's filter accept and resolving lists, and the paired-phone registry in `core-interface`, and disconnects the phone if it is connected. A removed phone can no longer reconnect. The `device_id` is `ble:` followed by the phone's 6-byte address (the same stamp as `source_device_id`).
+
+The registry only mirrors the bonds (restored from flash at startup, updated on pairing and removal), so `ListPairedPhones` reports real bonds. `UpsertPairedPhone` is ignored on ESP: phones enter by pairing.
+
+`max_bonded_phones` applies to BLE bonds: while that many phones are bonded, a new phone is disconnected even with the pairing window open (a bonded phone can still re-pair). The flash store holds at most 8 bonds regardless.
+
+A normal disconnect by the phone after an encrypted session never touches its bond. While the pairing window is open, a disconnect that signals broken keys wipes that phone's bond so it can pair afresh: `PIN_OR_KEY_MISSING`, `AUTHENTICATION_FAILURE`, `CONN_TERMINATED_DUE_TO_MIC_FAILURE`, or a hang-up (`REMOTE_USER_TERMINATED_CONN`) on a link that never got encrypted. The last one is a phone that forgot the bond: Android gives up and hangs up normally, so the app's "tap Pair again" stale-bond recovery depends on it. trouble-host emits no event when a bonded phone re-encrypts and resets the security level on disconnect, so `gatt_event_task` polls `security_level()` until the link is encrypted and remembers it.
+
 ## Pairing events
 Passkey display/confirm/input and pairing-complete/failure events are handled in the BLE event loop. On `PairingComplete`, new bond data is persisted to flash and added to the controller filter lists. A warning is logged if `security_level` is not encrypted. `tx_auth` is not touched here — TX unblocking is handled entirely by `ble_tx_notify_task`.
 
@@ -60,6 +68,12 @@ Bonded phones reconnect in Mode B and re-encrypt via LL_ENC_REQ using the stored
 
 ## Pairing lifecycle controls
 `ble_lifecycle_task` implements active-low pairing-button hold detection (`pairing_button_hold_s`) and opens pairing windows using the transport contract value `contracts/opencar/core/v1/transport.toml` → `[ble.pairing].pairing_window_seconds` via `core_interface::open_pairing_window_for(...)`.
+
+**Boards without a pairing button** (`pairing_button_pin` unset, e.g. the WiCAN profile) open the window at boot only while no phone is bonded, so first setup needs no hardware. The transport task reports how many bonds it loaded and the lifecycle task opens the window only for zero. Once a phone is bonded, a reboot (watchdog reset, brownout) leaves the window closed.
+
+Pairing uses `NoInputNoOutput` (Just Works): it has no MITM protection and no user confirmation, so any phone that can bond is trusted from then on. That is why the window must stay closed outside first setup and button presses.
+
+On a buttonless board with a bonded phone there is currently no way to open the window again: managing phones (`RemovePairedPhone`, `ClearPairedPhones`) needs an open window too. A deliberate action for that (a command from a bonded phone, or a physical one) is still to be designed and needs a contract change; until then such a board is reset by erasing its flash.
 
 ## Bondable mode policy
 Bondability is set to match the pairing-window state at connect time (via `set_bondable(pairing_open)` in the advertise loop) and kept in sync during active connections via `sync_bondable_with_window()` — which keeps bondable `true` until the link is encrypted on first connect so LTKs can be exchanged, then follows the window state.

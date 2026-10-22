@@ -1,5 +1,16 @@
 # 🚗 Open Car Firmware
 
+> [!WARNING]
+> **This project is under active construction. Do not use it on a real vehicle.**
+> It is experimental, largely untested on real cars, and may behave unpredictably.
+> Interfering with a vehicle's CAN bus can cause malfunctions, disable safety
+> systems, void warranties, or put people at risk. There is no warranty (see
+> [LICENSE](LICENSE)); you use this entirely at your own risk.
+>
+> This is an independent project. It is not affiliated with, endorsed by, or
+> sponsored by any vehicle manufacturer. Brand and model names are used only to
+> describe compatibility.
+
 Embedded Rust firmware for an open-source car hardware controller. Runs on ESP32 family chips or Linux-based boards (PC/Raspberry Pi), handling CAN bus communication, wireless connectivity (BLE/WiFi/LTE), and Over-the-Air (OTA) updates.
 
 ## 📋 Prerequisites
@@ -47,7 +58,7 @@ broker_url = "mqtt://192.168.0.100:1883"
 auth_mode  = "basic"                       # "basic" or "mtls"
 ```
 
-Per-board settings live under `[hardware.esp]` / `[hardware.pc]`, including CAN buses (`[[hardware.<board>.can_buses]]`, where order determines `bus_id`) and BLE options. The `board` and `platform` values can be overridden with `--board` and `--platform`. Hardware profiles in `hardware-profiles/` are ready-made pin/CAN setups for specific devices; anything set in `config.toml`, including `board`, wins over the profile.
+Per-board settings live under `[hardware.esp]` / `[hardware.pc]`, including CAN buses (`[[hardware.<board>.can_buses]]`, where order determines `bus_id`) and BLE options. The `board` and `platform` values can be overridden with `--board` and `--platform`. To reverse engineer a car, `[network.can_logger] enabled = true` streams the CAN buses to SavvyCAN over WiFi (see [CAN bus](docs/can.md#savvycan-logging)). Hardware profiles in `hardware-profiles/` are ready-made pin/CAN setups for specific devices; anything set in `config.toml`, including `board`, wins over the profile.
 
 ### Switching boards in the IDE
 
@@ -130,6 +141,10 @@ When running `cargo test -p <crate>` directly, pass `-- --test-threads=1`: the c
 CI runs `fmt`, diff-based host tests, and `clippy` plus full builds for both `esp` and `pc` on every affected vehicle platform. Versioning will be managed by `release-plz` with `car-<brand>-v<semver>` tags (not yet active), and release builds attach one ESP image per hardware profile to a GitHub Release. CI also publishes a static OTA `manifest.json` with a `min_app_version` compatibility matrix.
 
 To produce a flashable `.bin` yourself, or for the details of versioning and OTA, see [Releases, flash images & OTA](docs/releases.md).
+
+## 🤝 Contributing
+
+Contributions are welcome; please read [CONTRIBUTING.md](CONTRIBUTING.md) first and open an issue before starting anything large. Report security problems privately as described in [SECURITY.md](SECURITY.md).
 
 ## 📜 License
 

@@ -10,13 +10,13 @@ Related docs: [BLE](ble.md) · [CAN bus](can.md) · [Testing](testing.md) · [Re
 The intermediary between transport layers (BLE/MQTT) and vehicle logic. Knows nothing about specific cars or boards. Uses Embassy throughout (`embassy_time`, `embassy_sync`, `embassy_executor`).
 
 *   Defines 12 static `Channel`s as the inter-crate contract (see [Channels](#channels)).
-*   Defines shared types: `Transport`, `InboundCommand`, `VehicleStatePayload`, `CanRawCapture`, `CanDebugFilter`.
-*   Defines 5 pure-logic `#[embassy_executor::task]` functions: `process_ble_commands_task`, `process_mqtt_commands_task`, `route_responses_task`, `publish_state_task`, `publish_can_debug_task`.
-*   Exposes `pub fn passes_filter()`, `pub fn is_can_read_only()`, `pub fn set_can_read_only(bool)`, and the CAN debug query functions (`is_can_debug_active`, `can_debug_wants_bus`, `increment_can_debug_dropped`).
-*   Has 5 inner async helpers (`handle_ble_message`, `handle_mqtt_message`, `route_single_response`, `publish_single_state`, `publish_single_debug_batch`) extracted from the task loops so they can be unit-tested without running an executor.
+*   Defines shared types: `Transport`, `InboundCommand`, `VehicleStatePayload`, `CanLogFrame`.
+*   Defines 4 pure-logic `#[embassy_executor::task]` functions: `process_ble_commands_task`, `process_mqtt_commands_task`, `route_responses_task`, `publish_state_task`.
+*   Exposes `pub fn passes_filter()`, `pub fn is_can_read_only()`, `pub fn set_can_read_only(bool)`, and the SavvyCAN logging API (`is_can_logging`, `log_can_frame`, `run_can_log_session`).
+*   Has 4 inner async helpers (`handle_ble_message`, `handle_mqtt_message`, `route_single_response`, `publish_single_state`) extracted from the task loops so they can be unit-tested without running an executor.
 *   **`publish_single_state` is intentionally non-blocking:** it uses `try_send` on both `BLE_TX_CHANNEL` and `MQTT_TX_CHANNEL`; if either is full it evicts the oldest pending state update and enqueues the fresher one. This guarantees `publish_state_task` never stalls, keeping `VEHICLE_STATE_CHANNEL` always drainable and preventing a deadlock cascade through `state_update_task` and command-handler tasks.
 *   Uses `#![cfg_attr(not(test), no_std)]` so host tests compile without a `no_std` target.
-*   Internally organised into modules (`types`, `channels`, `can`, `can_debug`, `dispatch`, `routing`, …); all public symbols are re-exported from `lib.rs`.
+*   Internally organised into modules (`types`, `channels`, `can`, `can_log`, `dispatch`, `routing`, …); all public symbols are re-exported from `lib.rs`.
 
 ### Board crates (`board-esp`, `board-pc`)
 Compiled as `rlib`. Each exports a single `pub fn start(spawner: &Spawner)` that spawns the `core-interface` tasks. Board crates have no knowledge of vehicle logic or protos — they only drive hardware peripherals (radio, CAN, LTE) by reading/writing the edge channels (`BLE_RX_CHANNEL`, `BLE_TX_CHANNEL`, `MQTT_RX_CHANNEL`, `MQTT_TX_CHANNEL`).
@@ -61,19 +61,19 @@ The actual binary entry point. Generated fresh by `xtask` before every build fro
 | `MQTT_RX_CHANNEL` | board → core | `AppToDevice` | Raw inbound proto from MQTT driver |
 | `MQTT_TX_CHANNEL` | core → board | `DeviceToApp` | Outbound proto to MQTT driver |
 | `SYSTEM_COMMAND_CHANNEL` | core → board | `SystemCommand` | BLE only; board handles restart etc. |
-| `BASIC_CMD_CHANNEL` | core → vehicle | `InboundCommand` | From BLE and MQTT |
+| `BASIC_CMD_CHANNEL` | core → vehicle | `InboundCommand` | From BLE (MQTT is rejected until authenticated) |
 | `ADVANCED_CMD_CHANNEL` | core → vehicle | `InboundCommand` | BLE only |
 | `CMD_RESP_CHANNEL` | vehicle → core | `(Transport, CommandResponse)` | Transport tag routes response back |
 | `VEHICLE_STATE_CHANNEL` | vehicle → core | `VehicleStatePayload` | BLE gets full; MQTT gets basic only |
 | `CAN_RX_CHANNEL` | board → vehicle | `CanFrame` | Hardware-received CAN frame |
 | `CAN_TX_CHANNELS[bus_id]` | vehicle → board | `CanFrame` | Frame to transmit on that CAN bus (one queue per bus) |
-| `CAN_DEBUG_RX_CHANNEL` | board → core | `CanRawCapture` | Raw (pre-filter) frames for debug streaming; consumed by `publish_can_debug_task` → BLE only |
+| `CAN_LOG_CHANNEL` | board → logger session | `CanLogFrame` | Raw (pre-filter) frames for the SavvyCAN logger, only filled while a client is connected; see [CAN bus](can.md#savvycan-logging) |
 
 **`InboundCommand`** carries `{ message_id: u64, transport: Transport, bytes: Vec<u8> }`. The vehicle echoes the `Transport` tag back in `CMD_RESP_CHANNEL` so `route_responses_task` can route the response to the correct radio without the vehicle knowing anything about transports.
 
 **`platform_id`** is a CRC32 of the proto package name (e.g. `0xF7544D7E` for `opencar.cars.virtual_car.v1`), pre-computed and stored in `contracts/.../meta.toml`. xtask injects it as a compile-time constant into `.app_build/src/main.rs`. `core_interface::init(platform_id)` stores it in an `AtomicU32`; the dispatcher tasks validate every inbound message against it and silently drop mismatches.
 
-**MQTT restrictions:** `process_mqtt_commands_task` only forwards `BasicCommandBytes`. `SystemCommand` and `AdvancedCommandBytes` are restricted to BLE and silently dropped from MQTT.
+**MQTT restrictions:** `SystemCommand` and `AdvancedCommandBytes` are restricted to BLE and silently dropped from MQTT. `BasicCommandBytes` are **rejected for now** as well: MQTT commands aren't authenticated (anyone with the broker credentials, which ship in the app, could send or replay one), so `handle_mqtt_message` answers them with a failed `CommandResponse` saying so and never queues them to `BASIC_CMD_CHANNEL`. The gate is the `MQTT_COMMANDS_AUTHENTICATED` constant in `dispatch.rs`; remove it once MQTT commands are authenticated (contracts#8, firmware#16). State updates and heartbeats over MQTT are unaffected.
 
 ### Channel flow
 

@@ -19,7 +19,7 @@ Vehicles queue frames with `core_interface::send_can_frame(frame).await`, which 
 ## Filter strategy
 Hardware filters are set to accept-all where driver constraints apply (TWAI on ESP). All matching is done in software inside the driver loop against the vehicle-supplied filter list. Remote (RTR) frames are dropped before filtering: `CanFrame` has no RTR flag, so they would look like all-zero data frames. MCP2515 also programs hardware RX masks/filters from the same list as a first-pass optimisation.
 
-**Known MCP2515 issue (pre-existing):** the MCP2515 only accepts writes to its mask/filter registers in Configuration mode, but `init_mcp2515` and the debug mask switching write them in an operating mode, so they have no effect and the chip effectively accepts all frames (the software filter does the real work). Fixing this naively would break vehicles with more than 6 filters per bus (the chip has 6 filter slots and egmp uses 33), so it needs a fallback to accept-all in that case. Until then, the build refuses an MCP2515 bus whose vehicle has more than 6 filters for it: the generated `main.rs` asserts `bus_filter_count(..) <= MCP2515_HW_FILTERS` at compile time.
+**Known MCP2515 issue (pre-existing):** the MCP2515 only accepts writes to its mask/filter registers in Configuration mode, but `init_mcp2515` and the logging mask switching write them in an operating mode, so they have no effect and the chip effectively accepts all frames (the software filter does the real work). Fixing this naively would break vehicles with more than 6 filters per bus (the chip has 6 filter slots and egmp uses 33), so it needs a fallback to accept-all in that case. Until then, the build refuses an MCP2515 bus whose vehicle has more than 6 filters for it: the generated `main.rs` asserts `bus_filter_count(..) <= MCP2515_HW_FILTERS` at compile time.
 
 ## ESP two-core split
 
@@ -74,7 +74,9 @@ The TWAI and MCP2515 are classic-CAN controllers: in normal mode they would erro
 
 **Public API (in `core-interface`):**
 *   `pub fn is_can_read_only() -> bool` — vehicle tasks call this to check whether TX is currently blocked.
-*   `pub fn set_can_read_only(enabled: bool)` — vehicle tasks call this to unlock (`false`) after validating inbound CAN frames confirm the correct car, or re-lock (`true`) if an error or inconsistent data is detected at any time.
+*   `pub fn set_can_read_only(enabled: bool) -> bool` — vehicle tasks call this to unlock (`false`) after validating inbound CAN frames confirm the correct car, or re-lock (`true`) if an error or inconsistent data is detected at any time. Unlocking is **refused** (the bus stays read-only and the call returns `true`) until the car's identity has been confirmed, see below. Returns the resulting state.
+*   `confirm_car_identity()` / `revoke_car_identity()` / `is_car_identity_confirmed()` — the identity gate. `revoke_car_identity()` also re-locks the bus.
+*   `vin_matches(vin, prefixes)` — checks a VIN the car reported against the VINs a vehicle supports (well-formed 17 characters, then a prefix match: 3 characters for a manufacturer, longer for a model).
 
 ### Enforcement
 Two layers:
@@ -90,11 +92,34 @@ Two layers:
 
 **PC / SocketCAN:** only the software drop applies. Listen-only is a property of the Linux CAN interface, configured with root privileges while the link is down (`ip link set can0 type can bitrate 500000 listen-only on`), and `vcan` does not support it. Configure it on the interface if a PC is attached to a real car.
 
+### Car identity
+On every boot the device is passive until the vehicle has checked that it is plugged into a car it supports. `core-interface` enforces this: `set_can_read_only(false)` does nothing until the vehicle calls `confirm_car_identity()`, which starts unset at every boot. The vehicle decides how to confirm, from what the car itself reports; the VIN is the intended source (`vin_matches` with the VIN prefixes the vehicle supports). If the identity later changes (a different VIN, inconsistent data) the vehicle calls `revoke_car_identity()`, which also re-locks the bus.
+
+E-GMP does not confirm an identity yet, so it never unlocks the bus. The VIN has to come from a passive broadcast: reading it with a diagnostic request would need a transmit, which read-only mode forbids. Which E-GMP message carries it is still to be found in a CAN log.
+
 ### Intended vehicle workflow
-1.  Boot: `CAN_READ_ONLY = true`. Vehicle receives CAN frames via `can_rx_task`.
-2.  Vehicle validates frame IDs, data ranges, or handshake frames against its expected car profile.
-3.  On success: `set_can_read_only(false)` — CAN TX is now live.
-4.  On any subsequent error or unexpected data: `set_can_read_only(true)` re-engages the lock.
+1.  Boot: `CAN_READ_ONLY = true`, identity unconfirmed. Vehicle receives CAN frames via `can_rx_task`.
+2.  Vehicle reads the car's VIN from the frames and checks it with `vin_matches`; it also validates frame IDs, data ranges, or handshake frames against its expected car profile.
+3.  On success: `confirm_car_identity()`, then `set_can_read_only(false)` — CAN TX is now live.
+4.  On any subsequent error or unexpected data: `revoke_car_identity()` re-engages the lock.
+
+## SavvyCAN logging
+
+For reverse engineering, the firmware can stream every frame on every bus to [SavvyCAN](https://www.savvycan.com/) over WiFi, using its GVRET network protocol. It is receive-only.
+
+**Enable it** in `config.toml` with `[network.can_logger] enabled = true` (default off; `port` defaults to 23). The ESP board needs WiFi enabled too. In SavvyCAN add a network connection of type GVRET with the device's IP and that port. The port has no authentication and is open to the whole network, which is why it is off by default.
+
+**What it does while a client is connected:**
+*   The buses are forced read-only, whatever the vehicle asks: `is_can_read_only()` is true and `set_can_read_only(false)` is ignored. The buses are also relocked when the session starts and stay locked afterwards, so the vehicle has to validate the car again before it can transmit.
+*   The board drivers stop forwarding frames to the vehicle (`CAN_RX_CHANNEL`), so the vehicle tasks are idle. BLE and MQTT keep working.
+*   Frames SavvyCAN asks to transmit are parsed and discarded.
+*   The MCP2515 hardware masks are switched to accept-all so the logger sees every frame.
+
+Logging stops as soon as the client disconnects, errors, or stops reading for 5 s. On ESP, TCP keep-alive notices a client that vanished. One client at a time; a second connection waits until the first is gone.
+
+**Where the frames go:** the drivers call `core_interface::log_can_frame` for every received frame, before vehicle filtering. It uses `try_send` on the dedicated `CAN_LOG_CHANNEL` (256 frames), so a slow client drops frames (counted and logged when the session ends) and never stalls the CAN loop or the BLE/MQTT/vehicle queues. Frames on a bus the board doesn't have are ignored.
+
+**Protocol:** `core-interface/src/can_log.rs` holds the parser, the encoder and the session loop (generic over `embedded_io_async` streams); each board only provides the TCP listener (`can_logger_task`). Supported commands are binary-mode frames, time sync, keep-alive, number of buses, bus parameters (always listen-only, speed reported as 0) and device info. The bitrate is set at build time, so SavvyCAN's bus setup is accepted and ignored.
 
 ## E-GMP vehicle state
 `EgmpCarState` fields are all `None` until the matching CAN frame has been decoded, and `None` fields are omitted from the published proto, so the app never sees invented values. The debug simulation seeds its own defaults when it is switched on.

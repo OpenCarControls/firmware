@@ -2,13 +2,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use portable_atomic::Ordering;
 
-use crate::can_debug;
 use crate::channels::{
     ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, BLE_RX_CHANNEL, BLE_TX_CHANNEL, MQTT_RX_CHANNEL,
-    SYSTEM_COMMAND_CHANNEL,
+    MQTT_TX_CHANNEL, SYSTEM_COMMAND_CHANNEL,
 };
 use crate::proto;
-use crate::types::{CanDebugFilter, InboundCommand, Transport};
+use crate::types::{InboundCommand, Transport};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 
@@ -83,8 +82,8 @@ pub async fn reset_ble_controller_lease_for_tests() {
 /// Validates `platform_id` and routes each payload variant to the correct channel:
 /// - `system_command`:
 ///   - `restart_command` → `SYSTEM_COMMAND_CHANNEL` (board handles it)
-///   - `set_can_debug_enabled` → updates CAN debug state via `can_debug::enable/disable`
-///   - `update_can_debug_filters` → replaces blocklist via `can_debug::update_can_debug_filters`
+///   - `set_can_debug_enabled` / `update_can_debug_filters` → dropped (deprecated: the
+///     BLE CAN debug stream is gone, CAN logging goes to SavvyCAN instead)
 /// - `basic_command_bytes` → `BASIC_CMD_CHANNEL` (Transport::Ble)
 /// - `advanced_command_bytes` → `ADVANCED_CMD_CHANNEL` (Transport::Ble)
 /// Messages with a mismatched `platform_id` are silently dropped.
@@ -103,25 +102,9 @@ pub async fn handle_ble_message(msg: proto::AppToDevice) {
                     })
                     .await;
             }
-            Some(proto::system_command::Action::SetCanDebugEnabled(req)) => {
-                if req.enabled {
-                    can_debug::enable_can_debug(&req.bus_ids).await;
-                } else {
-                    can_debug::disable_can_debug();
-                }
-            }
-            Some(proto::system_command::Action::UpdateCanDebugFilters(req)) => {
-                let new: Vec<CanDebugFilter> = req
-                    .filters
-                    .into_iter()
-                    .map(|f| CanDebugFilter {
-                        can_id: f.can_id,
-                        is_extended_id: f.is_extended_id,
-                        mask: f.mask,
-                    })
-                    .collect();
-                can_debug::update_can_debug_filters(new).await;
-            }
+            #[allow(deprecated)]
+            Some(proto::system_command::Action::SetCanDebugEnabled(_))
+            | Some(proto::system_command::Action::UpdateCanDebugFilters(_)) => {}
             Some(proto::system_command::Action::ListPairedPhones(cmd)) => {
                 SYSTEM_COMMAND_CHANNEL
                     .sender()
@@ -206,9 +189,36 @@ pub async fn process_ble_commands_task() {
 
 // ── MQTT Dispatcher ───────────────────────────────────────────────────────────
 
+/// Whether commands arriving over MQTT are authenticated. They are not: anyone
+/// with the broker credentials (which ship in the app) could publish one, or
+/// replay a captured one. Until they are (contracts#8, firmware#16), basic
+/// commands from MQTT are rejected. Remove the gate together with this flag.
+const MQTT_COMMANDS_AUTHENTICATED: bool = false;
+
+/// Answers a rejected MQTT command. `try_send`: the MQTT driver must never be
+/// stalled by a full queue, and the app can retry or notice the missing reply.
+fn send_mqtt_unauthenticated_response(message_id: u64) {
+    let _ = MQTT_TX_CHANNEL.try_send(proto::DeviceToApp {
+        timestamp_ms: embassy_time::Instant::now().as_millis(),
+        platform_id: crate::PLATFORM_ID.load(Ordering::Relaxed),
+        payload: Some(proto::device_to_app::Payload::CommandResponse(
+            proto::CommandResponse {
+                message_id,
+                success: false,
+                error_message: String::from(
+                    "command rejected: commands over MQTT are not authenticated yet, use BLE",
+                ),
+                response_data: None,
+                status_code: proto::CommandStatusCode::Failed as i32,
+            },
+        )),
+    });
+}
+
 /// Processes a single `AppToDevice` message arriving from the MQTT driver.
 /// Validates `platform_id` and routes `basic_command_bytes` →
-/// `BASIC_CMD_CHANNEL` (Transport::Mqtt).
+/// `BASIC_CMD_CHANNEL` (Transport::Mqtt) once MQTT commands are authenticated;
+/// until then they are answered with a failed `CommandResponse` instead.
 /// `SystemCommand` and `advanced_command_bytes` are silently dropped — both
 /// are restricted to BLE only.
 /// `heartbeat` carries no payload and is not routed; its presence alone resets
@@ -221,6 +231,10 @@ pub async fn handle_mqtt_message(msg: proto::AppToDevice) {
     // activity window alive so state updates flow at full rate.
     crate::routing::record_mqtt_activity((embassy_time::Instant::now().as_millis() / 1000) as u32);
     if let Some(proto::app_to_device::Payload::BasicCommandBytes(bytes)) = msg.payload {
+        if !MQTT_COMMANDS_AUTHENTICATED {
+            send_mqtt_unauthenticated_response(msg.message_id);
+            return;
+        }
         BASIC_CMD_CHANNEL
             .sender()
             .send(InboundCommand {
