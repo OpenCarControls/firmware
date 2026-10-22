@@ -1,8 +1,6 @@
 use core_interface::{
     ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, BLE_TX_CHANNEL, MQTT_TX_CHANNEL,
-    SYSTEM_COMMAND_CHANNEL, Transport, can_debug_wants_bus, debug_dropped_count,
-    debug_filter_count, handle_ble_message, handle_mqtt_message, increment_can_debug_dropped, init,
-    is_can_debug_active,
+    SYSTEM_COMMAND_CHANNEL, Transport, handle_ble_message, handle_mqtt_message, init,
     proto::{
         self, CanDebugFilter as ProtoCanDebugFilter, ClearPairedPhonesCommand,
         ListPairedPhonesCommand, RemovePairedPhoneCommand, RestartCommand, SetCanDebugEnabled,
@@ -251,91 +249,44 @@ fn mqtt_advanced_command_bytes_silently_dropped() {
     assert!(BASIC_CMD_CHANNEL.try_receive().is_err());
 }
 
-// ── CAN debug command dispatch ────────────────────────────────────────────────
+// ── Deprecated CAN debug commands ─────────────────────────────────────────────
 
-fn set_debug_msg(enabled: bool, bus_ids: Vec<u32>) -> proto::AppToDevice {
-    ble_msg(
-        PLATFORM_ID,
-        Some(Payload::SystemCommand(SystemCommand {
-            action: Some(Action::SetCanDebugEnabled(SetCanDebugEnabled {
-                enabled,
-                bus_ids,
+/// The BLE CAN debug stream was removed (contracts still carry the messages, deprecated).
+/// A bonded phone sending them must not panic or reach any channel, including with a
+/// `bus_id` that used to overflow the old bus bitmask.
+#[test]
+#[allow(deprecated)]
+fn ble_deprecated_can_debug_commands_are_ignored() {
+    init(PLATFORM_ID);
+    while SYSTEM_COMMAND_CHANNEL.try_receive().is_ok() {}
+
+    for bus_ids in [vec![], vec![0], vec![8], vec![255, 1_000_000]] {
+        let msg = ble_msg(
+            PLATFORM_ID,
+            Some(Payload::SystemCommand(SystemCommand {
+                action: Some(Action::SetCanDebugEnabled(SetCanDebugEnabled {
+                    enabled: true,
+                    bus_ids,
+                })),
             })),
-        })),
-    )
-}
-
-fn update_filters_msg(filters: Vec<ProtoCanDebugFilter>) -> proto::AppToDevice {
-    ble_msg(
+        );
+        embassy_futures::block_on(handle_ble_message(msg));
+    }
+    let msg = ble_msg(
         PLATFORM_ID,
         Some(Payload::SystemCommand(SystemCommand {
             action: Some(Action::UpdateCanDebugFilters(UpdateCanDebugFilters {
-                filters,
+                filters: vec![ProtoCanDebugFilter {
+                    can_id: 0x100,
+                    is_extended_id: false,
+                    mask: 0x7FF,
+                }],
             })),
         })),
-    )
-}
+    );
+    embassy_futures::block_on(handle_ble_message(msg));
 
-#[test]
-fn ble_set_can_debug_enabled_activates_debug_mode() {
-    init(PLATFORM_ID);
-    // Ensure disabled first.
-    embassy_futures::block_on(handle_ble_message(set_debug_msg(false, vec![])));
-    assert!(!is_can_debug_active());
-
-    embassy_futures::block_on(handle_ble_message(set_debug_msg(true, vec![0])));
-    assert!(is_can_debug_active());
-    assert!(can_debug_wants_bus(0));
-    assert!(!can_debug_wants_bus(1));
-    assert!(!can_debug_wants_bus(2));
-
-    // Cleanup
-    embassy_futures::block_on(handle_ble_message(set_debug_msg(false, vec![])));
-}
-
-#[test]
-fn ble_set_can_debug_disabled_deactivates() {
-    init(PLATFORM_ID);
-    embassy_futures::block_on(handle_ble_message(set_debug_msg(true, vec![0])));
-    assert!(is_can_debug_active());
-
-    embassy_futures::block_on(handle_ble_message(set_debug_msg(false, vec![])));
-    assert!(!is_can_debug_active());
-}
-
-#[test]
-fn ble_set_can_debug_empty_bus_ids_watches_all_buses() {
-    init(PLATFORM_ID);
-    embassy_futures::block_on(handle_ble_message(set_debug_msg(true, vec![])));
-    assert!(is_can_debug_active());
-    for bus in 0u8..=7 {
-        assert!(
-            can_debug_wants_bus(bus),
-            "expected bus {} to be watched",
-            bus
-        );
-    }
-
-    // Cleanup
-    embassy_futures::block_on(handle_ble_message(set_debug_msg(false, vec![])));
-}
-
-#[test]
-fn ble_update_debug_filters_ignored_when_inactive() {
-    init(PLATFORM_ID);
-    // Ensure debug is off.
-    embassy_futures::block_on(handle_ble_message(set_debug_msg(false, vec![])));
-    assert!(!is_can_debug_active());
-
-    // Should not panic; state should not change.
-    let filter = ProtoCanDebugFilter {
-        can_id: 0x100,
-        is_extended_id: false,
-        mask: 0x7FF,
-    };
-    embassy_futures::block_on(handle_ble_message(update_filters_msg(vec![filter])));
-    // Can't inspect filters directly; only assert no panic and debug is still off.
-    assert!(!is_can_debug_active());
+    assert!(SYSTEM_COMMAND_CHANNEL.try_receive().is_err());
 }
 
 #[test]
@@ -429,98 +380,4 @@ fn ble_upsert_paired_phone_forwarded_to_system_channel() {
         received.action,
         Some(Action::UpsertPairedPhone(_))
     ));
-}
-
-#[test]
-fn ble_set_can_debug_multiple_specific_buses() {
-    init(PLATFORM_ID);
-    embassy_futures::block_on(handle_ble_message(set_debug_msg(true, vec![1, 3])));
-    assert!(is_can_debug_active());
-    assert!(!can_debug_wants_bus(0), "bus 0 should not be watched");
-    assert!(can_debug_wants_bus(1), "bus 1 should be watched");
-    assert!(!can_debug_wants_bus(2), "bus 2 should not be watched");
-    assert!(can_debug_wants_bus(3), "bus 3 should be watched");
-    assert!(!can_debug_wants_bus(4), "bus 4 should not be watched");
-
-    // Cleanup
-    embassy_futures::block_on(handle_ble_message(set_debug_msg(false, vec![])));
-}
-
-#[test]
-fn ble_update_debug_filters_stored_when_active() {
-    init(PLATFORM_ID);
-    embassy_futures::block_on(handle_ble_message(set_debug_msg(true, vec![0])));
-
-    let filters = vec![
-        ProtoCanDebugFilter {
-            can_id: 0x100,
-            is_extended_id: false,
-            mask: 0x7FF,
-        },
-        ProtoCanDebugFilter {
-            can_id: 0x200,
-            is_extended_id: false,
-            mask: 0x7FF,
-        },
-    ];
-    embassy_futures::block_on(handle_ble_message(update_filters_msg(filters)));
-    let count = embassy_futures::block_on(debug_filter_count());
-    assert_eq!(count, 2, "filter list should contain 2 entries");
-
-    // Cleanup
-    embassy_futures::block_on(handle_ble_message(set_debug_msg(false, vec![])));
-}
-
-#[test]
-fn ble_re_enable_resets_filter_list() {
-    init(PLATFORM_ID);
-    // Enable and install 2 filters.
-    embassy_futures::block_on(handle_ble_message(set_debug_msg(true, vec![0])));
-    let filters = vec![
-        ProtoCanDebugFilter {
-            can_id: 0x100,
-            is_extended_id: false,
-            mask: 0x7FF,
-        },
-        ProtoCanDebugFilter {
-            can_id: 0x200,
-            is_extended_id: false,
-            mask: 0x7FF,
-        },
-    ];
-    embassy_futures::block_on(handle_ble_message(update_filters_msg(filters)));
-    assert_eq!(embassy_futures::block_on(debug_filter_count()), 2);
-
-    // Disable then re-enable — filters must be cleared.
-    embassy_futures::block_on(handle_ble_message(set_debug_msg(false, vec![])));
-    embassy_futures::block_on(handle_ble_message(set_debug_msg(true, vec![0])));
-    assert_eq!(
-        embassy_futures::block_on(debug_filter_count()),
-        0,
-        "re-enable must clear filters"
-    );
-
-    // Cleanup
-    embassy_futures::block_on(handle_ble_message(set_debug_msg(false, vec![])));
-}
-
-#[test]
-fn ble_re_enable_resets_dropped_counter() {
-    init(PLATFORM_ID);
-    // Accumulate some drops.
-    increment_can_debug_dropped();
-    increment_can_debug_dropped();
-    increment_can_debug_dropped();
-    assert_eq!(debug_dropped_count(), 3);
-
-    // Enabling debug must reset the counter to 0.
-    embassy_futures::block_on(handle_ble_message(set_debug_msg(true, vec![0])));
-    assert_eq!(
-        debug_dropped_count(),
-        0,
-        "enable must reset dropped counter"
-    );
-
-    // Cleanup
-    embassy_futures::block_on(handle_ble_message(set_debug_msg(false, vec![])));
 }

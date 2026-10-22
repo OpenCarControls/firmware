@@ -20,7 +20,7 @@ use embedded_can::Frame as EmbeddedFrame;
 /// a data frame full of zeros and be decoded as real values (doors locked, speed 0).
 /// `CanFrame` has no RTR flag, so they are dropped here. They could still be useful
 /// later, e.g. to record every frame in CAN logging; that needs an RTR flag on
-/// `CanFrame` (and `CanRawCapture`) first.
+/// `CanFrame` (and `CanLogFrame`) first.
 #[cfg_attr(not(feature = "hardware"), allow(dead_code))]
 fn to_core_frame<F: EmbeddedFrame>(frame: F, bus_id: u8) -> Option<CanFrame> {
     if frame.is_remote_frame() {
@@ -42,9 +42,7 @@ fn to_core_frame<F: EmbeddedFrame>(frame: F, bus_id: u8) -> Option<CanFrame> {
 #[cfg(feature = "hardware")]
 mod hardware {
     use super::{CanFilter, to_core_frame};
-    use core_interface::{
-        CAN_DEBUG_RX_CHANNEL, CAN_RX_CHANNEL, CanFrame, CanRawCapture, CanReadOnlyReceiver,
-    };
+    use core_interface::{CAN_RX_CHANNEL, CanFrame, CanReadOnlyReceiver};
     use embedded_can::Frame as EmbeddedFrame;
     use embedded_can::{Id, StandardId};
     use embedded_hal_bus::spi::ExclusiveDevice;
@@ -213,7 +211,6 @@ mod hardware {
                     let Some(core_frame) = to_core_frame(frame, bus_id) else {
                         continue;
                     };
-                    try_send_can_debug_capture(bus_id, &core_frame);
                     core_interface::log_can_frame(&core_frame);
                     let matched = core_interface::passes_filter(&core_frame, filters);
                     stats.record_frame(matched);
@@ -402,7 +399,7 @@ mod hardware {
         let mut read_only_changed = core_interface::can_read_only_receiver()
             .expect("more CAN bus drivers than MAX_CAN_BUSES");
 
-        let mut was_debug_active = false;
+        let mut was_logging = false;
         let mut listen_only = core_interface::is_can_read_only();
         set_mcp_operating_mode(&mut driver, bus_id, listen_only);
         loop {
@@ -411,21 +408,19 @@ mod hardware {
                 set_mcp_operating_mode(&mut driver, bus_id, listen_only);
             }
 
-            // MCP2515 hardware mask switching on debug enable/disable.
-            // SavvyCAN logging needs the same raw view.
-            let debug_now =
-                core_interface::is_can_debug_active() || core_interface::is_can_logging();
-            if debug_now && !was_debug_active {
-                // Accept all frames in hardware so the debug tap sees raw traffic.
+            // MCP2515 hardware mask switching when SavvyCAN logging starts/stops.
+            let logging_now = core_interface::is_can_logging();
+            if logging_now && !was_logging {
+                // Accept all frames in hardware so the logger sees raw traffic.
                 set_mcp_accept_all_masks(&mut driver);
-            } else if !debug_now && was_debug_active {
+            } else if !logging_now && was_logging {
                 // Restore vehicle-specific hardware masks.
                 set_mcp_vehicle_masks(&mut driver, filters, bus_id);
             }
-            was_debug_active = debug_now;
+            was_logging = logging_now;
 
             // INT is level-triggered: if it is already low (frames left pending), no edge
-            // arrives, so the timeout also guarantees RX is serviced and the debug-mask
+            // arrives, so the timeout also guarantees RX is serviced and the logging-mask
             // state above is re-evaluated.
             let mut pending_tx = match select4(
                 int_pin.wait_for_falling_edge(),
@@ -446,7 +441,6 @@ mod hardware {
                         let Some(core_frame) = to_core_frame(frame, bus_id) else {
                             continue;
                         };
-                        try_send_can_debug_capture(bus_id, &core_frame);
                         core_interface::log_can_frame(&core_frame);
                         if core_interface::passes_filter(&core_frame, filters)
                             && !core_interface::is_can_logging()
@@ -495,8 +489,8 @@ mod hardware {
     }
 
     /// Switches both MCP2515 RX buffer masks to accept-all (mask bits = 0).
-    /// Called when CAN debug mode is enabled so the debug tap can observe every
-    /// frame on the bus before the software filter runs.
+    /// Called when SavvyCAN logging starts so the logger can observe every frame on
+    /// the bus before the software filter runs.
     fn set_mcp_accept_all_masks(driver: &mut Mcp2515Driver) {
         // StandardId 0 is always valid (fits in 11 bits); no unsafe needed.
         let id_zero = Id::Standard(StandardId::new(0).unwrap());
@@ -505,7 +499,7 @@ mod hardware {
     }
 
     /// Restores the MCP2515 RX buffer masks derived from the vehicle's `CanFilter` list.
-    /// Called when CAN debug mode is disabled to return the hardware to selective
+    /// Called when SavvyCAN logging stops to return the hardware to selective
     /// filtering and reduce CPU load from unwanted frames reaching the software path.
     fn set_mcp_vehicle_masks(driver: &mut Mcp2515Driver, filters: &[CanFilter], bus_id: u8) {
         let (mask0, mask1) = super::compute_mcp_masks(filters, bus_id);
@@ -514,27 +508,6 @@ mod hardware {
         }
         if let Some(sid) = StandardId::new((mask1 & 0x7FF) as u16) {
             driver.set_mask(RxMask::Mask1, Id::Standard(sid)).ok();
-        }
-    }
-
-    /// Forwards `frame` to the CAN debug channel if the debug tap is currently
-    /// watching `bus_id`. Uses `try_send` (non-blocking) so the CAN driver is never
-    /// stalled by a slow debug consumer; dropped frames are counted so the app can
-    /// report the loss.
-    fn try_send_can_debug_capture(bus_id: u8, frame: &CanFrame) {
-        if !core_interface::can_debug_wants_bus(bus_id) {
-            return;
-        }
-
-        let cap = CanRawCapture {
-            timestamp_ms: embassy_time::Instant::now().as_millis(),
-            bus_id,
-            id: frame.id,
-            data: frame.data,
-            dlc: frame.dlc,
-        };
-        if CAN_DEBUG_RX_CHANNEL.sender().try_send(cap).is_err() {
-            core_interface::increment_can_debug_dropped();
         }
     }
 }

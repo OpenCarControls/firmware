@@ -15,7 +15,6 @@ BLE messages are never fragmented: every encoded `AppToDevice` / `DeviceToApp` m
 
 What keeps messages within the limit:
 *   **State updates:** each vehicle crate has a `worst_case_state_update_fits_one_ble_message` test that builds the state update through `core_interface::ble_state_update` with every field at its longest encoding. Adding fields to a vehicle's state fails that test before it can fail on a car.
-*   **CAN debug batches:** `publish_single_debug_batch` splits each batch (up to 20 frames) into as many `CanDebugUpdate` messages as needed. A single 8-byte frame takes 20–30 bytes, so a full batch needs two or three messages.
 *   Anything larger is dropped on the device with a `BLE GATT TX message too large` warning.
 
 **Planned: fragmentation.** The E-GMP worst-case state update is close to the limit, and the 12 V battery voltage and the four tire pressures (6 bytes each: a 4-byte float with a 2-byte tag) would push it over. They are decoded into `EgmpCarState` but kept out of the proto until state updates can be split over several BLE messages, which needs a reassembly protocol in the firmware and the app. Larger MTUs aren't a substitute: iOS picks its own MTU.

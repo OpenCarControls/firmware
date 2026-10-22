@@ -1,5 +1,5 @@
 use crate::proto;
-use crate::types::{CanFrame, CanRawCapture, InboundCommand, Transport, VehicleStatePayload};
+use crate::types::{CanFrame, InboundCommand, Transport, VehicleStatePayload};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 
@@ -62,6 +62,3 @@ pub async fn send_can_frame(frame: CanFrame) -> bool {
         None => false,
     }
 }
-/// Raw CAN frames captured before vehicle filtering, consumed by `publish_can_debug_task`.
-pub static CAN_DEBUG_RX_CHANNEL: Channel<CriticalSectionRawMutex, CanRawCapture, 16> =
-    Channel::new();

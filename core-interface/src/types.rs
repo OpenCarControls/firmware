@@ -57,32 +57,3 @@ pub struct VehicleStatePayload {
     /// Encoded `AdvancedState` bytes — sent over BLE only.
     pub advanced: Vec<u8>,
 }
-
-/// Raw CAN frame captured by a board driver before vehicle-specific filtering,
-/// forwarded to `CAN_DEBUG_RX_CHANNEL` when CAN debug streaming is active.
-pub struct CanRawCapture {
-    /// Device uptime in milliseconds at the moment of frame reception — set by
-    /// the board driver so inter-frame timing within a batch is accurate.
-    pub timestamp_ms: u64,
-    /// 0-based bus index identifying which physical CAN bus this frame arrived on.
-    pub bus_id: u8,
-    /// The CAN frame identifier (standard or extended).
-    pub id: embedded_can::Id,
-    /// Raw frame payload bytes (always 8 bytes; only `dlc` bytes are valid).
-    pub data: [u8; 8],
-    /// Number of valid bytes in `data` (0–8).
-    pub dlc: u8,
-}
-
-/// A single CAN debug blocklist entry. A frame is excluded if:
-///   `(frame_raw_id & mask) == (can_id & mask)` AND `is_extended_id` matches the frame type.
-///
-/// Applies across all buses being observed — no per-bus scoping.
-pub struct CanDebugFilter {
-    /// The CAN identifier value to match against.
-    pub can_id: u32,
-    /// `true` to target extended (29-bit) IDs; `false` for standard (11-bit) IDs.
-    pub is_extended_id: bool,
-    /// Acceptance mask. See `passes_filter` docs for semantics.
-    pub mask: u32,
-}
