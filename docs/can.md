@@ -61,7 +61,9 @@ In `xtask_builder.rs` per board:
 
 **Public API (in `core-interface`):**
 *   `pub fn is_can_read_only() -> bool` — vehicle tasks call this to check whether TX is currently blocked.
-*   `pub fn set_can_read_only(enabled: bool)` — vehicle tasks call this to unlock (`false`) after validating inbound CAN frames confirm the correct car, or re-lock (`true`) if an error or inconsistent data is detected at any time.
+*   `pub fn set_can_read_only(enabled: bool) -> bool` — vehicle tasks call this to unlock (`false`) after validating inbound CAN frames confirm the correct car, or re-lock (`true`) if an error or inconsistent data is detected at any time. Unlocking is **refused** (the bus stays read-only and the call returns `true`) until the car's identity has been confirmed, see below. Returns the resulting state.
+*   `confirm_car_identity()` / `revoke_car_identity()` / `is_car_identity_confirmed()` — the identity gate. `revoke_car_identity()` also re-locks the bus.
+*   `vin_matches(vin, prefixes)` — checks a VIN the car reported against the VINs a vehicle supports (well-formed 17 characters, then a prefix match: 3 characters for a manufacturer, longer for a model).
 
 ### Enforcement
 Two layers:
@@ -77,11 +79,16 @@ Two layers:
 
 **PC / SocketCAN:** only the software drop applies. Listen-only is a property of the Linux CAN interface, configured with root privileges while the link is down (`ip link set can0 type can bitrate 500000 listen-only on`), and `vcan` does not support it. Configure it on the interface if a PC is attached to a real car.
 
+### Car identity
+On every boot the device is passive until the vehicle has checked that it is plugged into a car it supports. `core-interface` enforces this: `set_can_read_only(false)` does nothing until the vehicle calls `confirm_car_identity()`, which starts unset at every boot. The vehicle decides how to confirm, from what the car itself reports; the VIN is the intended source (`vin_matches` with the VIN prefixes the vehicle supports). If the identity later changes (a different VIN, inconsistent data) the vehicle calls `revoke_car_identity()`, which also re-locks the bus.
+
+E-GMP does not confirm an identity yet, so it never unlocks the bus. The VIN has to come from a passive broadcast: reading it with a diagnostic request would need a transmit, which read-only mode forbids. Which E-GMP message carries it is still to be found in a CAN log.
+
 ### Intended vehicle workflow
-1.  Boot: `CAN_READ_ONLY = true`. Vehicle receives CAN frames via `can_rx_task`.
-2.  Vehicle validates frame IDs, data ranges, or handshake frames against its expected car profile.
-3.  On success: `set_can_read_only(false)` — CAN TX is now live.
-4.  On any subsequent error or unexpected data: `set_can_read_only(true)` re-engages the lock.
+1.  Boot: `CAN_READ_ONLY = true`, identity unconfirmed. Vehicle receives CAN frames via `can_rx_task`.
+2.  Vehicle reads the car's VIN from the frames and checks it with `vin_matches`; it also validates frame IDs, data ranges, or handshake frames against its expected car profile.
+3.  On success: `confirm_car_identity()`, then `set_can_read_only(false)` — CAN TX is now live.
+4.  On any subsequent error or unexpected data: `revoke_car_identity()` re-engages the lock.
 
 ## SavvyCAN logging
 

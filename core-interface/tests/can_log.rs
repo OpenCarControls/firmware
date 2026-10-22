@@ -178,6 +178,7 @@ fn full_channel_counts_drops_instead_of_blocking() {
 #[test]
 fn session_forces_read_only_and_relocks_afterwards() {
     reset();
+    core_interface::confirm_car_identity();
     set_can_read_only(false);
     assert!(!is_can_read_only());
 
