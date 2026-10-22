@@ -59,7 +59,7 @@ The registry only mirrors the bonds (restored from flash at startup, updated on 
 
 `max_bonded_phones` applies to BLE bonds: while that many phones are bonded, a new phone is disconnected even with the pairing window open (a bonded phone can still re-pair). The flash store holds at most 8 bonds regardless.
 
-A normal disconnect by the phone never touches its bond. While the pairing window is open, a disconnect that signals broken keys (`PIN_OR_KEY_MISSING`, `AUTHENTICATION_FAILURE`, `CONN_TERMINATED_DUE_TO_MIC_FAILURE`) wipes that phone's bond so it can pair afresh.
+A normal disconnect by the phone after an encrypted session never touches its bond. While the pairing window is open, a disconnect that signals broken keys wipes that phone's bond so it can pair afresh: `PIN_OR_KEY_MISSING`, `AUTHENTICATION_FAILURE`, `CONN_TERMINATED_DUE_TO_MIC_FAILURE`, or a hang-up (`REMOTE_USER_TERMINATED_CONN`) on a link that never got encrypted. The last one is a phone that forgot the bond: Android gives up and hangs up normally, so the app's "tap Pair again" stale-bond recovery depends on it. trouble-host emits no event when a bonded phone re-encrypts and resets the security level on disconnect, so `gatt_event_task` polls `security_level()` until the link is encrypted and remembers it.
 
 ## Pairing events
 Passkey display/confirm/input and pairing-complete/failure events are handled in the BLE event loop. On `PairingComplete`, new bond data is persisted to flash and added to the controller filter lists. A warning is logged if `security_level` is not encrypted. `tx_auth` is not touched here — TX unblocking is handled entirely by `ble_tx_notify_task`.

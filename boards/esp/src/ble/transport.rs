@@ -50,7 +50,7 @@ mod hardware {
     use embassy_embedded_hal::adapter::BlockingAsync;
     use embassy_futures::{
         join::join,
-        select::{Either, select},
+        select::{Either, Either3, select, select3},
     };
     use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlash, ReadNorFlash};
     use esp_hal::peripherals;
@@ -585,10 +585,31 @@ mod hardware {
             );
         }
 
+        // Whether the link has been encrypted at any point, which tells a stale bond
+        // from a normal hang-up at disconnect. trouble-host emits no event when a
+        // bonded phone re-encrypts and resets the level on disconnect, so poll it
+        // until it latches.
+        let mut link_encrypted = false;
+
         loop {
-            let event = match select(conn.next(), BOND_OPS.receive()).await {
-                Either::First(event) => event,
-                Either::Second(op) => {
+            if !link_encrypted {
+                link_encrypted = conn
+                    .raw()
+                    .security_level()
+                    .map(|l| l.encrypted())
+                    .unwrap_or(false);
+            }
+            let encryption_poll = async {
+                if link_encrypted {
+                    core::future::pending::<()>().await
+                } else {
+                    embassy_time::Timer::after(embassy_time::Duration::from_millis(100)).await
+                }
+            };
+            let event = match select3(conn.next(), BOND_OPS.receive(), encryption_poll).await {
+                Either3::First(event) => event,
+                Either3::Third(()) => continue,
+                Either3::Second(op) => {
                     apply_bond_op(op, stack, bond_store).await;
                     let hits_peer = match op {
                         BondOp::Clear => true,
@@ -608,8 +629,9 @@ mod hardware {
                     // Broken-bond auto-heal: if the stored keys no longer work (the phone
                     // lost its side of the bond) and the pairing window is open, wipe the
                     // stored bond so it can re-pair fresh on the next connection. A normal
-                    // hang-up by the phone must not count.
-                    if is_broken_bond_disconnect(reason) && core_interface::is_pairing_window_open()
+                    // hang-up after an encrypted session must not count.
+                    if is_broken_bond_disconnect(reason, link_encrypted)
+                        && core_interface::is_pairing_window_open()
                     {
                         let bonds = stack.get_bond_information();
                         if let Some(known_bond) =

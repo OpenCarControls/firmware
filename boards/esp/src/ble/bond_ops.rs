@@ -43,17 +43,23 @@ pub(in crate::ble) fn has_room_for_bond(bond_count: usize, max_bonded_phones: u8
     bond_count < max_bonded_phones as usize
 }
 
-/// Disconnect reasons that mean the stored keys no longer work. A phone that
-/// hangs up normally (`REMOTE_USER_TERMINATED_CONN`) is not one of them.
+/// Whether a disconnect means the stored keys no longer work: a security error, or
+/// a hang-up on a link that never got encrypted. The latter is a phone that forgot
+/// its side of the bond and gave up (Android reports it as a normal hang-up). A
+/// phone that hangs up after an encrypted session keeps its bond.
 #[cfg_attr(not(feature = "hardware"), allow(dead_code))]
-pub(in crate::ble) fn is_broken_bond_disconnect(reason: bt_hci::param::Status) -> bool {
+pub(in crate::ble) fn is_broken_bond_disconnect(
+    reason: bt_hci::param::Status,
+    link_encrypted: bool,
+) -> bool {
     use bt_hci::param::Status;
-    matches!(
-        reason,
+    match reason {
         Status::PIN_OR_KEY_MISSING
-            | Status::AUTHENTICATION_FAILURE
-            | Status::CONN_TERMINATED_DUE_TO_MIC_FAILURE
-    )
+        | Status::AUTHENTICATION_FAILURE
+        | Status::CONN_TERMINATED_DUE_TO_MIC_FAILURE => true,
+        Status::REMOTE_USER_TERMINATED_CONN => !link_encrypted,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -88,13 +94,37 @@ mod tests {
     #[test]
     fn normal_disconnect_is_not_a_broken_bond() {
         assert!(!is_broken_bond_disconnect(
-            Status::REMOTE_USER_TERMINATED_CONN
+            Status::REMOTE_USER_TERMINATED_CONN,
+            true
         ));
-        assert!(!is_broken_bond_disconnect(Status::CONN_TIMEOUT));
-        assert!(is_broken_bond_disconnect(Status::PIN_OR_KEY_MISSING));
-        assert!(is_broken_bond_disconnect(Status::AUTHENTICATION_FAILURE));
+        assert!(!is_broken_bond_disconnect(Status::CONN_TIMEOUT, true));
+        assert!(!is_broken_bond_disconnect(Status::CONN_TIMEOUT, false));
+    }
+
+    #[test]
+    fn security_errors_are_broken_bonds() {
+        for encrypted in [true, false] {
+            assert!(is_broken_bond_disconnect(
+                Status::PIN_OR_KEY_MISSING,
+                encrypted
+            ));
+            assert!(is_broken_bond_disconnect(
+                Status::AUTHENTICATION_FAILURE,
+                encrypted
+            ));
+            assert!(is_broken_bond_disconnect(
+                Status::CONN_TERMINATED_DUE_TO_MIC_FAILURE,
+                encrypted
+            ));
+        }
+    }
+
+    #[test]
+    fn hang_up_before_encryption_is_a_broken_bond() {
+        // A phone that forgot its bond: Android hangs up before the link encrypts.
         assert!(is_broken_bond_disconnect(
-            Status::CONN_TERMINATED_DUE_TO_MIC_FAILURE
+            Status::REMOTE_USER_TERMINATED_CONN,
+            false
         ));
     }
 }
