@@ -298,7 +298,10 @@ mod hardware {
         use embassy_time::{Duration, Timer};
 
         let mut rx_buffer = [0u8; 1024];
-        let mut tx_buffer = [0u8; 2048];
+        // The send buffer bounds the bytes in flight, so throughput is at most its size
+        // per round trip. A busy bus needs ~42 KB/s, and WiFi round trips (with BLE
+        // coexistence) reach ~100 ms: 2 KB lost three quarters of the frames.
+        let mut tx_buffer = [0u8; 16 * 1024];
 
         loop {
             if !stack.is_config_up() {

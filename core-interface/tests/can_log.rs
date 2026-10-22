@@ -166,10 +166,11 @@ fn tap_ignores_buses_beyond_the_maximum() {
 fn full_channel_counts_drops_instead_of_blocking() {
     reset();
     let _session = CanLogSession::start().unwrap();
-    for _ in 0..80 {
+    let capacity = CAN_LOG_CHANNEL.capacity();
+    for _ in 0..capacity + 16 {
         log_can_frame(&frame(0, std_id(1), &[1]));
     }
-    assert_eq!(core_interface::can_log_dropped_count(), 80 - 64);
+    assert_eq!(core_interface::can_log_dropped_count(), 16);
 }
 
 // ── Session and read-only ─────────────────────────────────────────────────────

@@ -41,8 +41,9 @@ pub struct CanLogFrame {
 }
 
 /// Raw frames from the board CAN drivers to the active logging session. Only filled
-/// while a session is active, and only ever read by it.
-pub static CAN_LOG_CHANNEL: Channel<CriticalSectionRawMutex, CanLogFrame, 64> = Channel::new();
+/// while a session is active, and only ever read by it. 256 frames cover ~120 ms of a
+/// busy bus (~2100 frames/s), enough to ride out a TCP round trip over WiFi.
+pub static CAN_LOG_CHANNEL: Channel<CriticalSectionRawMutex, CanLogFrame, 256> = Channel::new();
 
 /// Returns `true` while a SavvyCAN client is connected.
 ///
