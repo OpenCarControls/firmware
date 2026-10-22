@@ -1,3 +1,4 @@
+pub(crate) mod bond_ops;
 mod lifecycle;
 mod store;
 mod transport;
