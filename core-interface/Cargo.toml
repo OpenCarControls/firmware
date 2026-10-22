@@ -10,6 +10,8 @@ embedded-hal-async = "1.0.0"
 embassy-executor = { workspace = true }
 embassy-time = { workspace = true }
 embassy-sync = { workspace = true }
+embassy-futures = { workspace = true }
+embedded-io-async = { workspace = true }
 prost = { workspace = true }
 bytes = { workspace = true }
 portable-atomic = { workspace = true }
@@ -20,5 +22,6 @@ toml = { workspace = true }
 
 [dev-dependencies]
 critical-section = { workspace = true }
-embassy-futures = { workspace = true }
 embassy-time = { workspace = true, features = ["std"] }
+# Supplies `__pender` for host tests that exercise timeouts.
+embassy-executor = { workspace = true, features = ["platform-std", "executor-thread"] }

@@ -55,6 +55,31 @@ pub struct NetworkConfig {
     pub mqtt: MqttConfig,
     #[serde(default)]
     pub wifi: WifiConfig,
+    #[serde(default)]
+    pub can_logger: CanLoggerConfig,
+}
+
+/// SavvyCAN network logger. Off by default: the port is open to the whole network and
+/// has no authentication.
+#[derive(Deserialize)]
+pub struct CanLoggerConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "can_logger_port_default")]
+    pub port: u16,
+}
+
+impl Default for CanLoggerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: can_logger_port_default(),
+        }
+    }
+}
+
+fn can_logger_port_default() -> u16 {
+    23
 }
 
 #[derive(Deserialize, Default)]

@@ -7,6 +7,7 @@ pub mod proto {
 
 mod can;
 mod can_debug;
+mod can_log;
 mod channels;
 mod dispatch;
 mod lifecycle;
@@ -61,6 +62,12 @@ pub use can::{
 pub use can_debug::{
     can_debug_wants_bus, debug_dropped_count, debug_filter_count, increment_can_debug_dropped,
     is_can_debug_active, publish_can_debug_task, publish_single_debug_batch,
+};
+
+// CAN logging (SavvyCAN / GVRET)
+pub use can_log::{
+    CAN_LOG_CHANNEL, CanLogFrame, CanLogSession, GvretCommand, GvretParser, SessionEnd,
+    can_log_dropped_count, encode_gvret_frame, is_can_logging, log_can_frame, run_can_log_session,
 };
 
 // Pairing registry

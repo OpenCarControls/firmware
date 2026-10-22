@@ -9,7 +9,7 @@ Related docs: [BLE](ble.md) · [CAN bus](can.md) · [Testing](testing.md) · [Re
 ### `core-interface`
 The intermediary between transport layers (BLE/MQTT) and vehicle logic. Knows nothing about specific cars or boards. Uses Embassy throughout (`embassy_time`, `embassy_sync`, `embassy_executor`).
 
-*   Defines 12 static `Channel`s as the inter-crate contract (see [Channels](#channels)).
+*   Defines 13 static `Channel`s as the inter-crate contract (see [Channels](#channels)).
 *   Defines shared types: `Transport`, `InboundCommand`, `VehicleStatePayload`, `CanRawCapture`, `CanDebugFilter`.
 *   Defines 5 pure-logic `#[embassy_executor::task]` functions: `process_ble_commands_task`, `process_mqtt_commands_task`, `route_responses_task`, `publish_state_task`, `publish_can_debug_task`.
 *   Exposes `pub fn passes_filter()`, `pub fn is_can_read_only()`, `pub fn set_can_read_only(bool)`, and the CAN debug query functions (`is_can_debug_active`, `can_debug_wants_bus`, `increment_can_debug_dropped`).
@@ -67,6 +67,7 @@ The actual binary entry point. Generated fresh by `xtask` before every build fro
 | `VEHICLE_STATE_CHANNEL` | vehicle → core | `VehicleStatePayload` | BLE gets full; MQTT gets basic only |
 | `CAN_RX_CHANNEL` | board → vehicle | `CanFrame` | Hardware-received CAN frame |
 | `CAN_TX_CHANNELS[bus_id]` | vehicle → board | `CanFrame` | Frame to transmit on that CAN bus (one queue per bus) |
+| `CAN_LOG_CHANNEL` | board → logger session | `CanLogFrame` | Raw (pre-filter) frames for the SavvyCAN logger, only filled while a client is connected; see [CAN bus](can.md#savvycan-logging) |
 | `CAN_DEBUG_RX_CHANNEL` | board → core | `CanRawCapture` | Raw (pre-filter) frames for debug streaming; consumed by `publish_can_debug_task` → BLE only |
 
 **`InboundCommand`** carries `{ message_id: u64, transport: Transport, bytes: Vec<u8> }`. The vehicle echoes the `Transport` tag back in `CMD_RESP_CHANNEL` so `route_responses_task` can route the response to the correct radio without the vehicle knowing anything about transports.

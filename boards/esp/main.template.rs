@@ -51,7 +51,7 @@ async fn main(spawner: Spawner) -> ! {
             BLE_MAX_BONDED_PHONES,
             BLE_CONTROLLER_LEASE_TTL_S,
         ).unwrap());
-{MQTT_DRIVER_SPAWN}    spawner.spawn({VEHICLE_CRATE_IDENT}::handle_basic_commands_task().unwrap());
+{MQTT_DRIVER_SPAWN}{CAN_LOGGER_SPAWN}    spawner.spawn({VEHICLE_CRATE_IDENT}::handle_basic_commands_task().unwrap());
     spawner.spawn({VEHICLE_CRATE_IDENT}::handle_advanced_commands_task().unwrap());
     spawner.spawn({VEHICLE_CRATE_IDENT}::state_update_task().unwrap());
     spawner.spawn({VEHICLE_CRATE_IDENT}::can_rx_task().unwrap());

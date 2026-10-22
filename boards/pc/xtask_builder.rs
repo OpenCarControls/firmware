@@ -229,6 +229,16 @@ impl TargetBuilder for Builder {
              MQTT_PASSWORD,\n\
              ).unwrap());\n".to_string();
 
+        let can_logger = &config.network.can_logger;
+        let can_logger_spawn = if can_logger.enabled {
+            format!(
+                "    spawner.spawn(board_pc::can_logger_task({}, {}).unwrap());\n",
+                can_logger.port, can_bus_count
+            )
+        } else {
+            String::new()
+        };
+
         let template = fs::read_to_string("boards/pc/main.template.rs")
             .expect("\u{274c} Could not read boards/pc/main.template.rs");
         let main_rs = template
@@ -238,7 +248,8 @@ impl TargetBuilder for Builder {
             .replace("{BLE_HTTP_SPAWN}", &ble_http_spawn)
             .replace("{MTLS_CERTS}", &mtls_certs)
             .replace("{NETWORK_CONSTANTS}", &network_constants)
-            .replace("{MQTT_DRIVER_SPAWN}", &mqtt_driver_spawn);
+            .replace("{MQTT_DRIVER_SPAWN}", &mqtt_driver_spawn)
+            .replace("{CAN_LOGGER_SPAWN}", &can_logger_spawn);
 
         fs::create_dir_all(".app_build/src").expect("Failed to create .app_build/src");
         fs::write(".app_build/Cargo.toml", cargo_toml).expect("Failed to write .app_build/Cargo.toml");

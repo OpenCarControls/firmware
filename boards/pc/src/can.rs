@@ -109,7 +109,11 @@ mod linux_can {
                                 core_interface::increment_can_debug_dropped();
                             }
                         }
-                        if core_interface::passes_filter(&core_frame, filters) {
+                        core_interface::log_can_frame(&core_frame);
+                        // The vehicle doesn't see frames while SavvyCAN has the buses.
+                        if core_interface::passes_filter(&core_frame, filters)
+                            && !core_interface::is_can_logging()
+                        {
                             CAN_RX_CHANNEL.sender().send(core_frame).await;
                         }
                     }

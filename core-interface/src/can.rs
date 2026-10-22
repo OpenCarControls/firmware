@@ -13,7 +13,7 @@ use crate::types::{CanFilter, CanFrame};
 /// silently drops outbound TX frames. Defaults to `true` at boot so nothing can reach
 /// the bus until the vehicle crate explicitly unlocks it after validating the
 /// connected car.
-static CAN_READ_ONLY: AtomicBool = AtomicBool::new(true);
+pub(crate) static CAN_READ_ONLY: AtomicBool = AtomicBool::new(true);
 
 /// Wakes board CAN drivers when the flag changes, so they can switch controller mode
 /// immediately instead of polling. The atomic stays the source of truth for the TX check.
@@ -36,8 +36,11 @@ pub fn can_read_only_receiver() -> Option<CanReadOnlyReceiver> {
 /// Vehicle tasks should check this before deciding whether to attempt a
 /// CAN write; if `true`, pushes to the bus's `CAN_TX_CHANNELS` entry will be accepted by
 /// the channel but silently dropped by the board driver loop.
+///
+/// Also `true` for as long as a CAN logging session is active (see
+/// [`crate::is_can_logging`]), whatever the vehicle asks for.
 pub fn is_can_read_only() -> bool {
-    CAN_READ_ONLY.load(Ordering::Relaxed)
+    CAN_READ_ONLY.load(Ordering::Relaxed) || crate::can_log::is_can_logging()
 }
 
 /// Enables or disables CAN read-only mode.
@@ -50,9 +53,18 @@ pub fn is_can_read_only() -> bool {
 /// have been validated to confirm the connected car matches this firmware.
 /// Call `set_can_read_only(true)` to re-engage the lock if an error or
 /// inconsistent data is detected at any point.
+///
+/// An unlock request while a CAN logging session is active is ignored, not deferred:
+/// the vehicle has to validate the car again once the session is over.
 pub fn set_can_read_only(enabled: bool) {
+    let enabled = enabled || crate::can_log::is_can_logging();
     CAN_READ_ONLY.store(enabled, Ordering::Relaxed);
-    CAN_READ_ONLY_WATCH.sender().send(enabled);
+    notify_can_read_only_changed();
+}
+
+/// Wakes the board CAN drivers so they re-read [`is_can_read_only`].
+pub(crate) fn notify_can_read_only_changed() {
+    CAN_READ_ONLY_WATCH.sender().send(is_can_read_only());
 }
 
 // ── CAN Filter ────────────────────────────────────────────────────────────────

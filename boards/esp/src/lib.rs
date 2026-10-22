@@ -31,7 +31,7 @@ mod hardware {
         run_mcp2515_loop, run_twai_loop,
     };
 
-    pub use network::{WifiStack, init_wifi, mqtt_driver_task};
+    pub use network::{WifiStack, can_logger_task, init_wifi, mqtt_driver_task};
 
     use core_interface::SYSTEM_COMMAND_CHANNEL;
 
