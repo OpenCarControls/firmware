@@ -87,12 +87,21 @@ mod hardware {
                 embassy_time::Timer::after(embassy_time::Duration::from_millis(25)).await;
             }
         } else {
-            // No button pin defined: open the pairing window automatically on startup
-            core_interface::open_pairing_window_for(window_s);
-            log::info!(
-                "No pairing button defined; BLE pairing window automatically opened for {}s on boot",
-                window_s
-            );
+            // No button pin defined: the window can only open by itself for first setup
+            // (no phone bonded yet). Once a phone is bonded, nothing opens it at boot.
+            let bond_count = crate::ble::boot_pairing::BONDS_LOADED.wait().await;
+            if crate::ble::boot_pairing::open_window_at_boot(bond_count) {
+                core_interface::open_pairing_window_for(window_s);
+                log::info!(
+                    "No pairing button defined and no phone bonded; BLE pairing window opened for {}s on boot",
+                    window_s
+                );
+            } else {
+                log::info!(
+                    "No pairing button defined; {} phone(s) bonded, pairing window stays closed on boot",
+                    bond_count
+                );
+            }
 
             let mut pairing_was_open = core_interface::is_pairing_window_open();
             loop {
