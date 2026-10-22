@@ -93,3 +93,24 @@ fn vin_must_be_well_formed_and_match_a_prefix() {
     assert!(!vin_matches(b"KNAC381AAP500000O", &["KNA"]));
     assert!(!vin_matches(&[0u8; 17], &["KNA"]));
 }
+
+/// A bus declared CAN-FD stays read-only even after the vehicle unlocks the others.
+/// Uses bus 3 so it can't affect other tests' buses (the declaration is permanent).
+#[test]
+fn fd_bus_never_leaves_read_only() {
+    reset();
+    core_interface::declare_can_fd_bus(3);
+    set_can_read_only(false);
+    assert!(core_interface::is_can_fd_bus(3));
+    assert!(core_interface::is_can_bus_read_only(3));
+    assert!(!core_interface::is_can_bus_read_only(0));
+    set_can_read_only(true);
+    assert!(core_interface::is_can_bus_read_only(0));
+}
+
+#[test]
+fn declaring_a_missing_bus_is_ignored() {
+    core_interface::declare_can_fd_bus(200);
+    assert!(!core_interface::is_can_fd_bus(200));
+    assert!(!core_interface::is_can_bus_read_only(200) || is_can_read_only());
+}

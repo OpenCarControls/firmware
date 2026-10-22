@@ -70,6 +70,7 @@ mod hardware {
         twai: twai::AnyTwai<'static>,
         rx_pin: AnyPin<'static>,
         tx_pin: AnyPin<'static>,
+        bitrate: u32,
     }
 
     /// Concrete MCP2515 driver type (blocking SPI, INT-pin driven).
@@ -95,11 +96,24 @@ mod hardware {
         rx_pin: impl Into<AnyPin<'static>>,
         tx_pin: impl Into<AnyPin<'static>>,
         _filters: &[CanFilter],
+        bitrate: u32,
     ) -> TwaiDriver {
         TwaiDriver {
             twai: peripheral.into(),
             rx_pin: rx_pin.into(),
             tx_pin: tx_pin.into(),
+            bitrate,
+        }
+    }
+
+    /// The TWAI baud rate for a bitrate in bit/s. xtask only generates supported values.
+    fn twai_baud_rate(bitrate: u32) -> twai::BaudRate {
+        match bitrate {
+            125_000 => twai::BaudRate::B125K,
+            250_000 => twai::BaudRate::B250K,
+            500_000 => twai::BaudRate::B500K,
+            1_000_000 => twai::BaudRate::B1000K,
+            other => panic!("unsupported TWAI bitrate {}", other),
         }
     }
 
@@ -122,7 +136,7 @@ mod hardware {
             driver.twai.reborrow(),
             driver.rx_pin.reborrow(),
             driver.tx_pin.reborrow(),
-            esp_hal::twai::BaudRate::B500K,
+            twai_baud_rate(driver.bitrate),
             mode,
         );
         cfg.set_filter(accept_all);
@@ -142,7 +156,7 @@ mod hardware {
         let mut stats = TwaiRxStats::new();
         let mut next_report = embassy_time::Instant::now() + RX_STATS_INTERVAL;
         loop {
-            let listen_only = core_interface::is_can_read_only();
+            let listen_only = core_interface::is_can_bus_read_only(bus_id);
             let mode = if listen_only {
                 TwaiMode::ListenOnly
             } else {
@@ -193,7 +207,7 @@ mod hardware {
             core_interface::can_tx_channel(bus_id).expect("CAN bus id exceeds MAX_CAN_BUSES");
 
         loop {
-            if core_interface::is_can_read_only() != listen_only {
+            if core_interface::is_can_bus_read_only(bus_id) != listen_only {
                 return;
             }
 
@@ -252,7 +266,7 @@ mod hardware {
                 // Drop silently when in read-only mode; do not transmit on the bus.
                 // Both checks matter: the flag may have flipped since this session
                 // started, and the controller is only rebuilt at the top of the loop.
-                if !listen_only && !core_interface::is_can_read_only() {
+                if !listen_only && !core_interface::is_can_bus_read_only(bus_id) {
                     transmit_twai(twai, bus_id, &outbound).await;
                 }
             }
@@ -400,10 +414,10 @@ mod hardware {
             .expect("more CAN bus drivers than MAX_CAN_BUSES");
 
         let mut was_logging = false;
-        let mut listen_only = core_interface::is_can_read_only();
+        let mut listen_only = core_interface::is_can_bus_read_only(bus_id);
         set_mcp_operating_mode(&mut driver, bus_id, listen_only);
         loop {
-            if core_interface::is_can_read_only() != listen_only {
+            if core_interface::is_can_bus_read_only(bus_id) != listen_only {
                 listen_only = !listen_only;
                 set_mcp_operating_mode(&mut driver, bus_id, listen_only);
             }
@@ -456,7 +470,7 @@ mod hardware {
                 // Drop silently when in read-only mode; do not transmit on the bus.
                 // Both checks matter: the flag may have flipped since the mode was
                 // last applied at the top of the loop.
-                if !listen_only && !core_interface::is_can_read_only() {
+                if !listen_only && !core_interface::is_can_bus_read_only(bus_id) {
                     if let Some(f) = core_to_mcp_frame(&outbound) {
                         if driver.send_message(f).is_ok() {
                             crate::status_leds::pulse_can();

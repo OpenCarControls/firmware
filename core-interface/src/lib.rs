@@ -51,8 +51,9 @@ pub use channels::{
 
 // CAN filter & read-only
 pub use can::{
-    CanReadOnlyReceiver, can_read_only_receiver, confirm_car_identity, is_can_read_only,
-    is_car_identity_confirmed, passes_filter, revoke_car_identity, set_can_read_only, vin_matches,
+    CanReadOnlyReceiver, can_read_only_receiver, confirm_car_identity, declare_can_fd_bus,
+    is_can_bus_read_only, is_can_fd_bus, is_can_read_only, is_car_identity_confirmed,
+    passes_filter, revoke_car_identity, set_can_read_only, vin_matches,
 };
 
 // CAN logging (SavvyCAN / GVRET)

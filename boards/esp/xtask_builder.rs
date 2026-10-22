@@ -247,6 +247,8 @@ impl TargetBuilder for Builder {
         let mut can_task_spawns = String::new();
         let mut mcp_spi_idx: u8 = 2; // SPI0/SPI1 reserved for flash; MCP2515 buses start at SPI2
         let filters_expr = format!("{}::CAN_FILTERS", vehicle_crate_ident);
+        let vehicle_buses = crate::load_vehicle_can_buses(vehicle_platform);
+        can_hardware_init.push_str(&crate::generate_fd_bus_declarations(&vehicle_buses, can_bus_count));
 
         for (bus_id, bus) in esp_hw.can_buses.iter().take(can_bus_count).enumerate() {
             let interface = bus.get("interface")
@@ -259,6 +261,15 @@ impl TargetBuilder for Builder {
                         .unwrap_or_else(|| { eprintln!("\u{274c} TWAI bus {} missing 'tx_pin'", bus_id); exit(1); });
                     let rx = bus.get("rx_pin").and_then(|v| v.as_integer())
                         .unwrap_or_else(|| { eprintln!("\u{274c} TWAI bus {} missing 'rx_pin'", bus_id); exit(1); });
+                    let bitrate = bus.get("bitrate").and_then(|v| v.as_integer()).unwrap_or(500_000) as u32;
+                    match bitrate {
+                        125_000 | 250_000 | 500_000 | 1_000_000 => {}
+                        other => { eprintln!("\u{274c} Unsupported bitrate {} for TWAI bus {}. Use: 125000, 250000, 500000, 1000000.", other, bus_id); exit(1); }
+                    };
+                    if let Err(e) = crate::check_can_bitrate(bus_id, bitrate, vehicle_buses.get(bus_id)) {
+                        eprintln!("\u{274c} {e} Set 'bitrate' in this [[hardware.esp.can_buses]] entry.");
+                        exit(1);
+                    }
                     let mut standby_init = String::new();
                     if let Some(enable_pin) = bus.get("enable_pin").and_then(|v| v.as_integer()) {
                         let enable_level = bus.get("enable_level").and_then(|v| v.as_str()).unwrap_or("high");
@@ -273,8 +284,8 @@ impl TargetBuilder for Builder {
                         );
                     }
                     can_hardware_init.push_str(&format!(
-                        "{4}    let can_bus_{0} = board_esp::init_twai(peripherals.TWAI0, peripherals.GPIO{2}, peripherals.GPIO{1}, {3});\n",
-                        bus_id, tx, rx, filters_expr, standby_init
+                        "{4}    let can_bus_{0} = board_esp::init_twai(peripherals.TWAI0, peripherals.GPIO{2}, peripherals.GPIO{1}, {3}, {5});\n",
+                        bus_id, tx, rx, filters_expr, standby_init, bitrate
                     ));
                     can_task_defs.push_str(&format!(
                         "#[embassy_executor::task]\nasync fn can_bus_{0}_task(driver: board_esp::TwaiDriver) {{\n    board_esp::run_twai_loop(driver, {0}, {1}).await;\n}}\n",
@@ -306,6 +317,14 @@ impl TargetBuilder for Builder {
                         "16mhz" => "board_esp::McpSpeed::MHz16",
                         other => { eprintln!("\u{274c} Unknown mcp_speed '{}' for bus {}. Use: 8mhz, 16mhz.", other, bus_id); exit(1); }
                     };
+                    let can_bitrate = match can_speed_str {
+                        "100kbps" => 100_000, "125kbps" => 125_000, "250kbps" => 250_000,
+                        "500kbps" => 500_000, _ => 1_000_000,
+                    };
+                    if let Err(e) = crate::check_can_bitrate(bus_id, can_bitrate, vehicle_buses.get(bus_id)) {
+                        eprintln!("\u{274c} {e} Set 'can_speed' in this [[hardware.esp.can_buses]] entry.");
+                        exit(1);
+                    }
                     let spi  = format!("SPI{}", mcp_spi_idx);
                     mcp_spi_idx += 1;
                     can_hardware_init.push_str(&format!(
