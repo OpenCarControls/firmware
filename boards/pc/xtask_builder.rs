@@ -16,6 +16,8 @@ struct PcCanBus {
 struct PcBleConfig {
     #[serde(default)]
     device_name: Option<String>,
+    #[serde(default = "default_ble_http_bind")]
+    http_bind: String,
     #[serde(default = "default_ble_http_port")]
     http_port: u16,
     #[serde(default = "default_max_bonded_phones")]
@@ -28,11 +30,16 @@ impl Default for PcBleConfig {
     fn default() -> Self {
         Self {
             device_name: None,
+            http_bind: default_ble_http_bind(),
             http_port: default_ble_http_port(),
             max_bonded_phones: default_max_bonded_phones(),
             paired_phones_file: default_paired_phones_file(),
         }
     }
+}
+
+fn default_ble_http_bind() -> String {
+    "127.0.0.1".to_string()
 }
 
 fn default_ble_http_port() -> u16 {
@@ -194,10 +201,19 @@ impl TargetBuilder for Builder {
             exit(1);
         }
 
+        if pc_hw.ble.http_bind.parse::<std::net::IpAddr>().is_err() {
+            eprintln!(
+                "[hardware.pc.ble].http_bind must be an IP address, got '{}'",
+                pc_hw.ble.http_bind
+            );
+            exit(1);
+        }
+
         let network_constants = format!(
             "const MQTT_BROKER_HOST: &str = \"{host}\";\n\
              const MQTT_BROKER_PORT: u16 = {port};\n\
              const BLE_DEVICE_NAME_BASE: &str = \"{ble_name}\";\n\
+             const BLE_HTTP_BIND: &str = \"{ble_http_bind}\";\n\
              const BLE_HTTP_PORT: u16 = {ble_http_port};\n\
              const BLE_PAIRING_WINDOW_S: u32 = {pair_window};\n\
              const BLE_MAX_BONDED_PHONES: u8 = {max_bonds};\n\
@@ -210,6 +226,7 @@ impl TargetBuilder for Builder {
             host = broker_host,
             port = broker_port,
             ble_name = ble_device_name,
+            ble_http_bind = pc_hw.ble.http_bind,
             ble_http_port = pc_hw.ble.http_port,
             pair_window = transport.ble.pairing.pairing_window_seconds,
             max_bonds = pc_hw.ble.max_bonded_phones,
@@ -222,7 +239,7 @@ impl TargetBuilder for Builder {
         );
 
         let ble_http_spawn = "    spawner\n\
-             .spawn(board_pc::ble_http_task(BLE_HTTP_PORT, BLE_DEVICE_NAME_BASE, BLE_PAIRING_WINDOW_S).unwrap());\n"
+             .spawn(board_pc::ble_http_task(BLE_HTTP_BIND, BLE_HTTP_PORT, BLE_DEVICE_NAME_BASE, BLE_PAIRING_WINDOW_S).unwrap());\n"
             .to_string();
 
         let mqtt_driver_spawn =
