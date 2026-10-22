@@ -5,7 +5,7 @@ use portable_atomic::Ordering;
 use crate::can_debug;
 use crate::channels::{
     ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, BLE_RX_CHANNEL, BLE_TX_CHANNEL, MQTT_RX_CHANNEL,
-    SYSTEM_COMMAND_CHANNEL,
+    MQTT_TX_CHANNEL, SYSTEM_COMMAND_CHANNEL,
 };
 use crate::proto;
 use crate::types::{CanDebugFilter, InboundCommand, Transport};
@@ -206,9 +206,36 @@ pub async fn process_ble_commands_task() {
 
 // ── MQTT Dispatcher ───────────────────────────────────────────────────────────
 
+/// Whether commands arriving over MQTT are authenticated. They are not: anyone
+/// with the broker credentials (which ship in the app) could publish one, or
+/// replay a captured one. Until they are (contracts#8, firmware#16), basic
+/// commands from MQTT are rejected. Remove the gate together with this flag.
+const MQTT_COMMANDS_AUTHENTICATED: bool = false;
+
+/// Answers a rejected MQTT command. `try_send`: the MQTT driver must never be
+/// stalled by a full queue, and the app can retry or notice the missing reply.
+fn send_mqtt_unauthenticated_response(message_id: u64) {
+    let _ = MQTT_TX_CHANNEL.try_send(proto::DeviceToApp {
+        timestamp_ms: embassy_time::Instant::now().as_millis(),
+        platform_id: crate::PLATFORM_ID.load(Ordering::Relaxed),
+        payload: Some(proto::device_to_app::Payload::CommandResponse(
+            proto::CommandResponse {
+                message_id,
+                success: false,
+                error_message: String::from(
+                    "command rejected: commands over MQTT are not authenticated yet, use BLE",
+                ),
+                response_data: None,
+                status_code: proto::CommandStatusCode::Failed as i32,
+            },
+        )),
+    });
+}
+
 /// Processes a single `AppToDevice` message arriving from the MQTT driver.
 /// Validates `platform_id` and routes `basic_command_bytes` →
-/// `BASIC_CMD_CHANNEL` (Transport::Mqtt).
+/// `BASIC_CMD_CHANNEL` (Transport::Mqtt) once MQTT commands are authenticated;
+/// until then they are answered with a failed `CommandResponse` instead.
 /// `SystemCommand` and `advanced_command_bytes` are silently dropped — both
 /// are restricted to BLE only.
 /// `heartbeat` carries no payload and is not routed; its presence alone resets
@@ -221,6 +248,10 @@ pub async fn handle_mqtt_message(msg: proto::AppToDevice) {
     // activity window alive so state updates flow at full rate.
     crate::routing::record_mqtt_activity((embassy_time::Instant::now().as_millis() / 1000) as u32);
     if let Some(proto::app_to_device::Payload::BasicCommandBytes(bytes)) = msg.payload {
+        if !MQTT_COMMANDS_AUTHENTICATED {
+            send_mqtt_unauthenticated_response(msg.message_id);
+            return;
+        }
         BASIC_CMD_CHANNEL
             .sender()
             .send(InboundCommand {

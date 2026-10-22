@@ -50,7 +50,7 @@ mod hardware {
     use embassy_embedded_hal::adapter::BlockingAsync;
     use embassy_futures::{
         join::join,
-        select::{Either, select},
+        select::{Either, Either3, select, select3},
     };
     use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlash, ReadNorFlash};
     use esp_hal::peripherals;
@@ -68,6 +68,9 @@ mod hardware {
     };
     use bt_hci::controller::ControllerCmdSync;
 
+    use crate::ble::bond_ops::{
+        BOND_OPS, BondOp, has_room_for_bond, is_broken_bond_disconnect, phone_device_id,
+    };
     use crate::ble::store::BondStore;
     use core_interface::ble::{
         BLE_ATT_MTU, BLE_MAX_MESSAGE_BYTES, GATT_RX_UUID, GATT_SERVICE_UUID, GATT_TX_UUID,
@@ -176,6 +179,8 @@ mod hardware {
         for bond in &loaded_bonds {
             if let Err(e) = stack.add_bond_information(bond.clone()) {
                 log::warn!("BLE: failed to restore bond: {:?}", e);
+            } else {
+                core_interface::add_paired_phone(&phone_device_id(&bond.identity.bd_addr.0)).await;
             }
         }
 
@@ -203,6 +208,10 @@ mod hardware {
             },
             async {
                 loop {
+                    while let Ok(op) = BOND_OPS.try_receive() {
+                        apply_bond_op(op, &stack, &mut bond_store).await;
+                    }
+
                     let pairing_open = core_interface::is_pairing_window_open();
 
                     // Sync FAL + RL with in-memory bonds before every advertise cycle.
@@ -459,6 +468,60 @@ mod hardware {
         (bonds.len(), has_irk)
     }
 
+    // ─── Bond removal ─────────────────────────────────────────────────────────────
+
+    /// Remove one bond everywhere it lives: the stack, flash, the controller lists
+    /// and the paired-phone registry. Returns whether a bond was found.
+    async fn revoke_bond<C, P, S>(
+        stack: &Stack<'_, C, P>,
+        bond_store: &mut BondStore<'_, S>,
+        bond: &BondInformation,
+    ) where
+        C: Controller
+            + ControllerCmdSync<LeRemoveDeviceFromFilterAcceptList>
+            + ControllerCmdSync<LeRemoveDeviceFromResolvingList>
+            + ControllerCmdSync<LeSetAddrResolutionEnable>,
+        P: PacketPool,
+        S: NorFlash + MultiwriteNorFlash,
+    {
+        let _ = stack.remove_bond_information(bond.identity);
+        let _ = bond_store.remove_bond(&bond.identity.bd_addr).await;
+        remove_bond_from_controller(stack, bond).await;
+        core_interface::remove_paired_phone(&phone_device_id(&bond.identity.bd_addr.0)).await;
+    }
+
+    /// Apply a queued `RemovePairedPhone` / `ClearPairedPhones`. Only called while
+    /// no connection is active; a live connection handles its own ops in
+    /// `gatt_event_task`.
+    async fn apply_bond_op<C, P, S>(
+        op: BondOp,
+        stack: &Stack<'_, C, P>,
+        bond_store: &mut BondStore<'_, S>,
+    ) where
+        C: Controller
+            + ControllerCmdSync<LeRemoveDeviceFromFilterAcceptList>
+            + ControllerCmdSync<LeRemoveDeviceFromResolvingList>
+            + ControllerCmdSync<LeSetAddrResolutionEnable>,
+        P: PacketPool,
+        S: NorFlash + MultiwriteNorFlash,
+    {
+        let bonds = stack.get_bond_information();
+        match op {
+            BondOp::Remove(addr) => {
+                for bond in bonds.iter().filter(|b| b.identity.bd_addr.0 == addr) {
+                    revoke_bond(stack, bond_store, bond).await;
+                    log::info!("BLE: revoked bond for {:02X?}", addr);
+                }
+            }
+            BondOp::Clear => {
+                for bond in bonds.iter() {
+                    revoke_bond(stack, bond_store, bond).await;
+                }
+                log::info!("BLE: revoked all {} bond(s)", bonds.len());
+            }
+        }
+    }
+
     // ─── GATT event loop ──────────────────────────────────────────────────────────
 
     async fn gatt_event_task<C, P, S>(
@@ -481,10 +544,11 @@ mod hardware {
         let peer_bd_addr = conn.raw().peer_identity().bd_addr;
 
         // Determine if this phone has a stored bond (RL active → bd_addr is identity).
-        let is_known = stack
-            .get_bond_information()
+        let bonds = stack.get_bond_information();
+        let is_known = bonds
             .iter()
             .any(|b| b.identity.bd_addr == peer_bd_addr || b.identity.match_address(&peer_bd_addr));
+        let max_bonded_phones = core_interface::ble_max_bonded_phones();
 
         log::info!(
             "BLE gatt: peer {:02X?} connected — is_known={} pairing_open={}",
@@ -501,6 +565,19 @@ mod hardware {
             return;
         }
 
+        // A new phone can only bond while there is room; a known phone may re-pair.
+        if pairing_open_at_connect
+            && !is_known
+            && !has_room_for_bond(bonds.len(), max_bonded_phones)
+        {
+            log::warn!(
+                "BLE: refusing new phone — {} bond(s) stored, max_bonded_phones={}",
+                bonds.len(),
+                max_bonded_phones
+            );
+            return;
+        }
+
         if let Err(e) = conn.raw().set_bondable(pairing_open_at_connect) {
             log::warn!(
                 "BLE set_bondable({}) failed: {:?}",
@@ -509,28 +586,59 @@ mod hardware {
             );
         }
 
+        // Whether the link has been encrypted at any point, which tells a stale bond
+        // from a normal hang-up at disconnect. trouble-host emits no event when a
+        // bonded phone re-encrypts and resets the level on disconnect, so poll it
+        // until it latches.
+        let mut link_encrypted = false;
+
         loop {
-            match conn.next().await {
+            if !link_encrypted {
+                link_encrypted = conn
+                    .raw()
+                    .security_level()
+                    .map(|l| l.encrypted())
+                    .unwrap_or(false);
+            }
+            let encryption_poll = async {
+                if link_encrypted {
+                    core::future::pending::<()>().await
+                } else {
+                    embassy_time::Timer::after(embassy_time::Duration::from_millis(100)).await
+                }
+            };
+            let event = match select3(conn.next(), BOND_OPS.receive(), encryption_poll).await {
+                Either3::First(event) => event,
+                Either3::Third(()) => continue,
+                Either3::Second(op) => {
+                    apply_bond_op(op, stack, bond_store).await;
+                    let hits_peer = match op {
+                        BondOp::Clear => true,
+                        BondOp::Remove(addr) => addr == peer_bd_addr.0,
+                    };
+                    if hits_peer {
+                        log::info!("BLE: disconnecting peer whose bond was revoked");
+                        conn.raw().disconnect();
+                        break;
+                    }
+                    continue;
+                }
+            };
+            match event {
                 GattConnectionEvent::Disconnected { reason } => {
                     log::info!("BLE GATT disconnected: {:?}", reason);
-                    // Broken-bond auto-heal: if the phone disconnected with a security error
-                    // while the pairing window is open, wipe the stored bond so it can
-                    // re-pair fresh on the next connection.
-                    let is_security_disconnect = matches!(
-                        reason,
-                        bt_hci::param::Status::PIN_OR_KEY_MISSING
-                            | bt_hci::param::Status::REMOTE_USER_TERMINATED_CONN
-                            | bt_hci::param::Status::AUTHENTICATION_FAILURE
-                            | bt_hci::param::Status::CONN_TERMINATED_DUE_TO_MIC_FAILURE,
-                    );
-                    if is_security_disconnect && core_interface::is_pairing_window_open() {
+                    // Broken-bond auto-heal: if the stored keys no longer work (the phone
+                    // lost its side of the bond) and the pairing window is open, wipe the
+                    // stored bond so it can re-pair fresh on the next connection. A normal
+                    // hang-up after an encrypted session must not count.
+                    if is_broken_bond_disconnect(reason, link_encrypted)
+                        && core_interface::is_pairing_window_open()
+                    {
                         let bonds = stack.get_bond_information();
                         if let Some(known_bond) =
                             bonds.iter().find(|b| b.identity.bd_addr == peer_bd_addr)
                         {
-                            let _ = stack.remove_bond_information(known_bond.identity);
-                            let _ = bond_store.remove_bond(&peer_bd_addr).await;
-                            remove_bond_from_controller(stack, known_bond).await;
+                            revoke_bond(stack, bond_store, known_bond).await;
                             log::info!(
                                 "BLE: wiped broken bond for {:02X?} (auto-heal)",
                                 peer_bd_addr.raw()
@@ -549,10 +657,21 @@ mod hardware {
                         let _ = bond_store.remove_bond(&bond_info.identity.bd_addr).await;
                         let _ = bond_store.store_bond(&bond_info).await;
                         add_bond_to_controller(stack, &bond_info).await;
+                        core_interface::add_paired_phone(&phone_device_id(
+                            &bond_info.identity.bd_addr.0,
+                        ))
+                        .await;
                         log::info!(
                             "BLE: new bond stored inline for {:02X?}",
                             bond_info.identity.bd_addr.raw()
                         );
+                        // Backstop for the check at connect time.
+                        if stack.get_bond_information().len() > max_bonded_phones as usize {
+                            log::warn!("BLE: max_bonded_phones exceeded — revoking new bond");
+                            revoke_bond(stack, bond_store, &bond_info).await;
+                            conn.raw().disconnect();
+                            break;
+                        }
                     }
                     if !security_level.encrypted() {
                         log::warn!("BLE: PairingComplete with encrypted=false");

@@ -61,7 +61,7 @@ The actual binary entry point. Generated fresh by `xtask` before every build fro
 | `MQTT_RX_CHANNEL` | board → core | `AppToDevice` | Raw inbound proto from MQTT driver |
 | `MQTT_TX_CHANNEL` | core → board | `DeviceToApp` | Outbound proto to MQTT driver |
 | `SYSTEM_COMMAND_CHANNEL` | core → board | `SystemCommand` | BLE only; board handles restart etc. |
-| `BASIC_CMD_CHANNEL` | core → vehicle | `InboundCommand` | From BLE and MQTT |
+| `BASIC_CMD_CHANNEL` | core → vehicle | `InboundCommand` | From BLE (MQTT is rejected until authenticated) |
 | `ADVANCED_CMD_CHANNEL` | core → vehicle | `InboundCommand` | BLE only |
 | `CMD_RESP_CHANNEL` | vehicle → core | `(Transport, CommandResponse)` | Transport tag routes response back |
 | `VEHICLE_STATE_CHANNEL` | vehicle → core | `VehicleStatePayload` | BLE gets full; MQTT gets basic only |
@@ -73,7 +73,7 @@ The actual binary entry point. Generated fresh by `xtask` before every build fro
 
 **`platform_id`** is a CRC32 of the proto package name (e.g. `0xF7544D7E` for `opencar.cars.virtual_car.v1`), pre-computed and stored in `contracts/.../meta.toml`. xtask injects it as a compile-time constant into `.app_build/src/main.rs`. `core_interface::init(platform_id)` stores it in an `AtomicU32`; the dispatcher tasks validate every inbound message against it and silently drop mismatches.
 
-**MQTT restrictions:** `process_mqtt_commands_task` only forwards `BasicCommandBytes`. `SystemCommand` and `AdvancedCommandBytes` are restricted to BLE and silently dropped from MQTT.
+**MQTT restrictions:** `SystemCommand` and `AdvancedCommandBytes` are restricted to BLE and silently dropped from MQTT. `BasicCommandBytes` are **rejected for now** as well: MQTT commands aren't authenticated (anyone with the broker credentials, which ship in the app, could send or replay one), so `handle_mqtt_message` answers them with a failed `CommandResponse` saying so and never queues them to `BASIC_CMD_CHANNEL`. The gate is the `MQTT_COMMANDS_AUTHENTICATED` constant in `dispatch.rs`; remove it once MQTT commands are authenticated (contracts#8, firmware#16). State updates and heartbeats over MQTT are unaffected.
 
 ### Channel flow
 
