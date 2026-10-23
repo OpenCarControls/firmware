@@ -69,7 +69,7 @@ pub async fn route_responses_task() {
 
 /// The BLE state message for one update: the full state (basic + advanced).
 /// Public so vehicle crates can check their worst-case state still fits in
-/// `ble::BLE_MAX_MESSAGE_BYTES`.
+/// `ble::BLE_MAX_MESSAGE_BYTES` once reassembled.
 pub fn ble_state_update(
     timestamp_ms: u64,
     platform_id: u32,

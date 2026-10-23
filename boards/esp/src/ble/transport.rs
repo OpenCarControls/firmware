@@ -73,14 +73,18 @@ mod hardware {
     };
     use crate::ble::store::BondStore;
     use core_interface::ble::{
-        BLE_ATT_MTU, BLE_MAX_MESSAGE_BYTES, GATT_RX_UUID, GATT_SERVICE_UUID, GATT_TX_UUID,
-        mac_to_ble_address,
+        BLE_ATT_MTU, BLE_MAX_CHUNK_BYTES, BLE_MAX_MESSAGE_BYTES, BLE_MIN_ATT_MTU, GATT_RX_UUID,
+        GATT_SERVICE_UUID, GATT_TX_UUID, Reassembler, chunks, mac_to_ble_address,
     };
 
     // The stack answers an MTU exchange with at most its packet size minus the
     // 4-byte L2CAP header, so the contract's ATT MTU (which the app requests)
     // must fit in it.
     const _: () = assert!(BLE_ATT_MTU as usize <= <DefaultPacketPool as PacketPool>::MTU - 4);
+
+    /// How long the TX task waits for the MTU exchange before dropping a
+    /// message. The exchange normally finishes within a second of encryption.
+    const MTU_EXCHANGE_TIMEOUT_MS: u64 = 3000;
 
     const BLE_CONNECTIONS_MAX: usize = 1;
     const BLE_L2CAP_CHANNELS_MAX: usize = 3;
@@ -93,9 +97,9 @@ mod hardware {
     #[gatt_service(uuid = GATT_SERVICE_UUID)]
     struct OpenCarGattService {
         #[characteristic(uuid = GATT_RX_UUID, write, write_without_response, permissions(encrypted))]
-        rx: heapless::Vec<u8, BLE_MAX_MESSAGE_BYTES>,
+        rx: heapless::Vec<u8, BLE_MAX_CHUNK_BYTES>,
         #[characteristic(uuid = GATT_TX_UUID, notify, permissions(encrypted))]
-        tx: heapless::Vec<u8, BLE_MAX_MESSAGE_BYTES>,
+        tx: heapless::Vec<u8, BLE_MAX_CHUNK_BYTES>,
     }
 
     // ─── RNG wrapper ──────────────────────────────────────────────────────────────
@@ -592,6 +596,9 @@ mod hardware {
         // until it latches.
         let mut link_encrypted = false;
 
+        // Partial inbound messages never outlive the connection.
+        let mut reassembler = Reassembler::new();
+
         loop {
             if !link_encrypted {
                 link_encrypted = conn
@@ -697,7 +704,18 @@ mod hardware {
                             continue;
                         }
 
-                        match proto::AppToDevice::decode(payload.as_slice()) {
+                        // Every write is one chunk; decode once the last one arrives.
+                        let now_ms = embassy_time::Instant::now().as_millis();
+                        let message = match reassembler.push(payload.as_slice(), now_ms) {
+                            Ok(Some(message)) => message,
+                            Ok(None) => continue,
+                            Err(e) => {
+                                log::warn!("BLE GATT RX chunk dropped: {:?}", e);
+                                continue;
+                            }
+                        };
+
+                        match proto::AppToDevice::decode(message.as_slice()) {
                             Ok(mut msg) => {
                                 // Overwrite source_device_id with the firmware-verified peer
                                 // address so the app cannot spoof its identity.
@@ -732,8 +750,11 @@ mod hardware {
     ) {
         let mut pending_msg: Option<proto::DeviceToApp> = None;
         let mut tx_held_logged = false;
+        let mut logged_mtu = 0u16;
+        // Message sequence number: the same on every chunk of a message.
+        let mut seq = 0u8;
 
-        loop {
+        'tx: loop {
             let msg = if let Some(msg) = pending_msg.take() {
                 msg
             } else {
@@ -754,8 +775,6 @@ mod hardware {
                 if encrypted {
                     tx_auth.store(true, Ordering::Relaxed);
                     log::info!("BLE TX: link encrypted — tx_auth granted");
-                    // Wait for MTU exchange to complete before sending the first packet
-                    embassy_time::Timer::after(embassy_time::Duration::from_millis(500)).await;
                 } else {
                     if !tx_held_logged {
                         log::debug!("BLE TX: holding message — link not yet encrypted");
@@ -774,18 +793,64 @@ mod hardware {
                 continue;
             }
 
-            let payload =
-                match heapless::Vec::<u8, BLE_MAX_MESSAGE_BYTES>::from_slice(encoded.as_slice()) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        log::warn!("BLE GATT TX message too large: {} bytes", encoded.len());
-                        continue;
-                    }
-                };
-
-            if server.link.tx.notify(conn, &payload).await.is_err() {
-                break;
+            if encoded.len() > BLE_MAX_MESSAGE_BYTES {
+                log::warn!("BLE GATT TX message too large: {} bytes", encoded.len());
+                continue;
             }
+
+            // The MTU exchange runs after the link is up, so it's read per message:
+            // it's the 23-byte default until the exchange completes.
+            let Some(mtu) = wait_for_att_mtu(conn).await else {
+                log::warn!(
+                    "BLE GATT TX dropped: ATT MTU {} is below the {} the contract needs",
+                    conn.raw().att_mtu(),
+                    BLE_MIN_ATT_MTU
+                );
+                continue;
+            };
+            if mtu != logged_mtu {
+                log::info!("BLE TX: ATT MTU {}", mtu);
+                logged_mtu = mtu;
+            }
+
+            let chunks = match chunks(&encoded, mtu, seq) {
+                Ok(chunks) => chunks,
+                Err(e) => {
+                    log::warn!("BLE GATT TX not sent: {:?} ({} bytes)", e, encoded.len());
+                    continue;
+                }
+            };
+            seq = seq.wrapping_add(1);
+            // All chunks of a message go out back to back; this is the only
+            // task that notifies on the characteristic.
+            for chunk in chunks {
+                // `chunks` sizes each chunk to the MTU, which is capped at BLE_ATT_MTU.
+                let Ok(chunk) = heapless::Vec::<u8, BLE_MAX_CHUNK_BYTES>::from_slice(&chunk) else {
+                    log::warn!("BLE GATT TX chunk too large: {} bytes", chunk.len());
+                    break;
+                };
+                if server.link.tx.notify(conn, &chunk).await.is_err() {
+                    break 'tx;
+                }
+            }
+        }
+    }
+
+    /// Waits for the MTU exchange to leave the 23-byte default, up to
+    /// `MTU_EXCHANGE_TIMEOUT_MS`. Returns the ATT MTU, or `None` if it's still
+    /// below what the contract needs (the peer negotiated too little).
+    async fn wait_for_att_mtu<P: PacketPool>(conn: &GattConnection<'_, '_, P>) -> Option<u16> {
+        let deadline = embassy_time::Instant::now()
+            + embassy_time::Duration::from_millis(MTU_EXCHANGE_TIMEOUT_MS);
+        loop {
+            let mtu = conn.raw().att_mtu();
+            if mtu >= BLE_MIN_ATT_MTU {
+                return Some(mtu);
+            }
+            if embassy_time::Instant::now() >= deadline {
+                return None;
+            }
+            embassy_time::Timer::after(embassy_time::Duration::from_millis(20)).await;
         }
     }
 }

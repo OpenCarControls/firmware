@@ -503,14 +503,14 @@ mod tests {
         );
     }
 
-    /// The largest state update this vehicle can produce must fit in one BLE
-    /// message: BLE messages aren't fragmented, and an oversized update is
-    /// dropped on the device. Every field is set to the value with the longest
+    /// The largest state update this vehicle can produce must fit in one
+    /// reassembled BLE message (`BLE_MAX_MESSAGE_BYTES`): an oversized update
+    /// is dropped on the device. Every field is set to the value with the longest
     /// protobuf encoding (negative ints take 10 bytes). The struct is built
     /// without `..` on purpose: a new state field won't compile until it's
     /// covered here.
     #[test]
-    fn worst_case_state_update_fits_one_ble_message() {
+    fn worst_case_state_update_fits_ble_message() {
         use proto::advanced_state::Gear;
         use proto::basic_state::ChargePortState;
 
