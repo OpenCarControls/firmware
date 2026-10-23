@@ -73,7 +73,7 @@ The TWAI and MCP2515 are classic-CAN controllers: in normal mode they would erro
 **Flag:** `core-interface` — `static CAN_READ_ONLY: AtomicBool = AtomicBool::new(true)`. Defaults to `true` (locked) at boot so no frame can reach the bus before validation.
 
 **Public API (in `core-interface`):**
-*   `pub fn is_can_read_only() -> bool` — vehicle tasks call this to check whether TX is currently blocked.
+*   `pub fn is_can_read_only() -> bool` — vehicle tasks call this to check whether TX is currently blocked. Also `true` while a CAN logging session is active or the car's identity is unconfirmed; both are checked on every read, so a racing unlock can't leave the bus open without a confirmed identity.
 *   `pub fn set_can_read_only(enabled: bool) -> bool` — vehicle tasks call this to unlock (`false`) after validating inbound CAN frames confirm the correct car, or re-lock (`true`) if an error or inconsistent data is detected at any time. Unlocking is **refused** (the bus stays read-only and the call returns `true`) until the car's identity has been confirmed, see below. Returns the resulting state.
 *   `confirm_car_identity()` / `revoke_car_identity()` / `is_car_identity_confirmed()` — the identity gate. `revoke_car_identity()` also re-locks the bus.
 *   `vin_matches(vin, prefixes)` — checks a VIN the car reported against the VINs a vehicle supports (well-formed 17 characters, then a prefix match: 3 characters for a manufacturer, longer for a model).
