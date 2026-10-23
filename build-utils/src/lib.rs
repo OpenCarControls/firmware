@@ -13,12 +13,6 @@ pub fn compile_car_contracts(car_name: &str) {
     ));
     if proto_path.exists() {
         println!("cargo:rerun-if-changed={}", proto_path.display());
-        println!(
-            "cargo:rerun-if-changed={}",
-            workspace_dir
-                .join("contracts/opencar/core/v1/vehicle_state.proto")
-                .display()
-        );
 
         prost_build::Config::new()
             .compile_protos(&[proto_path], &[workspace_dir.join("contracts/opencar")])
