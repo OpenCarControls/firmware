@@ -91,6 +91,7 @@ mod hardware {
             // (no phone bonded yet). Once a phone is bonded, nothing opens it at boot.
             let bond_count = crate::ble::boot_pairing::BONDS_LOADED.wait().await;
             if crate::ble::boot_pairing::open_window_at_boot(bond_count) {
+                crate::ble::boot_pairing::mark_first_setup_window();
                 core_interface::open_pairing_window_for(window_s);
                 log::info!(
                     "No pairing button defined and no phone bonded; BLE pairing window opened for {}s on boot",

@@ -679,6 +679,12 @@ mod hardware {
                             conn.raw().disconnect();
                             break;
                         }
+                        if crate::ble::boot_pairing::close_window_after_bond() {
+                            core_interface::close_pairing_window();
+                            log::info!(
+                                "BLE: first phone bonded — first-setup pairing window closed"
+                            );
+                        }
                     }
                     if !security_level.encrypted() {
                         log::warn!("BLE: PairingComplete with encrypted=false");
