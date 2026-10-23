@@ -48,6 +48,7 @@ async fn main(spawner: Spawner) -> ! {
             BLE_PAIRING_BUTTON_PIN,
             BLE_PAIRING_BUTTON_HOLD_S,
             BLE_PAIRING_WINDOW_S,
+            BLE_FIRST_SETUP_PAIRING_WINDOW_S,
             BLE_MAX_BONDED_PHONES,
             BLE_CONTROLLER_LEASE_TTL_S,
         ).unwrap());
