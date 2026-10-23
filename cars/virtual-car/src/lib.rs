@@ -41,7 +41,7 @@ impl VirtualCarState {
             is_driving: Some(false),
             are_doors_locked: Some(false),
             speed: Some(0),
-            gear: Some(0),
+            gear: Some(proto::advanced_state::Gear::Park as i32),
             custom_state1: Some(false),
         }
     }
@@ -56,13 +56,15 @@ impl VirtualCarState {
 ///   Ticks 15–19: parked at 0 kph
 ///
 /// `gear` and `is_driving` are derived from `speed`:
-///   speed > 0  → gear = 2 (DRIVE), is_driving = true
-///   speed == 0 → gear = 0 (PARK),  is_driving = false
+///   speed > 0  → gear = `Gear::Drive`, is_driving = true
+///   speed == 0 → gear = `Gear::Park`,  is_driving = false
 ///
 /// `odometer` increments by 1 km at tick 19 (end of each full cycle).
 /// `are_doors_locked` is intentionally untouched — it is command-controlled only.
 #[cfg(debug_assertions)]
 pub fn tick_simulation(state: &mut VirtualCarState, tick: u64) {
+    use proto::advanced_state::Gear;
+
     let phase = (tick % 20) as i32;
     let speed = match phase {
         0..=4 => phase * 16,
@@ -72,7 +74,7 @@ pub fn tick_simulation(state: &mut VirtualCarState, tick: u64) {
     };
     state.speed = Some(speed);
     state.is_driving = Some(speed > 0);
-    state.gear = Some(if speed > 0 { 2 } else { 0 });
+    state.gear = Some(if speed > 0 { Gear::Drive } else { Gear::Park } as i32);
     if phase == 19 {
         state.odometer = Some(state.odometer.unwrap_or(0).saturating_add(1));
     }
@@ -378,7 +380,10 @@ mod tests {
         assert_eq!(basic.is_driving, Some(false));
         assert_eq!(basic.are_doors_locked, Some(false));
         assert_eq!(advanced.speed, Some(0));
-        assert_eq!(advanced.gear, Some(0));
+        assert_eq!(
+            advanced.gear,
+            Some(proto::advanced_state::Gear::Park as i32)
+        );
     }
 
     /// The largest state update this vehicle can produce must fit in one

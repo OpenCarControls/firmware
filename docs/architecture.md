@@ -29,8 +29,8 @@ Vehicle crates that use CAN also export a `can_rx_task` (reads `CAN_RX_CHANNEL`)
 ### `cars/virtual-car` (`virtual-car-controller`)
 A mock vehicle implementation used strictly for UI/UX testing without physical hardware. Contains real Embassy tasks and real proto encoding, just no CAN bus.
 
-*   `VirtualCarState` is `pub` with `pub` fields and initialises with concrete defaults (`odometer: 0`, `is_driving: false`, `are_doors_locked: false`, `speed: 0`, `gear: 0`).
-*   `pub fn tick_simulation(state: &mut VirtualCarState, tick: u64)` advances a 20-tick (≈ 100 s) drive cycle: ticks 0–4 ramp speed 0 → 80 kph, 5–9 cruise at 80 kph, 10–14 ramp 80 → 0 kph, 15–19 park at 0 kph. `gear` and `is_driving` are derived from `speed`; `odometer` increments by 1 km at tick 19; `are_doors_locked` is intentionally untouched (command-controlled only).
+*   `VirtualCarState` is `pub` with `pub` fields and initialises with concrete defaults (`odometer: 0`, `is_driving: false`, `are_doors_locked: false`, `speed: 0`, `gear: Park`).
+*   `pub fn tick_simulation(state: &mut VirtualCarState, tick: u64)` advances a 20-tick (≈ 100 s) drive cycle: ticks 0–4 ramp speed 0 → 80 kph, 5–9 cruise at 80 kph, 10–14 ramp 80 → 0 kph, 15–19 park at 0 kph. `gear` (`Gear::Drive` / `Gear::Park`) and `is_driving` are derived from `speed`; `odometer` increments by 1 km at tick 19; `are_doors_locked` is intentionally untouched (command-controlled only).
 *   `state_update_task` calls `tick_simulation` on each 5-second fire and increments an internal counter, so the app receives realistic-looking state updates over MQTT without any CAN frames.
 
 ### `.app_build` (ephemeral, xtask-generated)

@@ -1,7 +1,7 @@
 use prost::Message;
 use virtual_car_controller::{
     VirtualCarState, encode_state,
-    proto::{AdvancedState, BasicState},
+    proto::{AdvancedState, BasicState, advanced_state::Gear},
     tick_simulation,
 };
 
@@ -40,7 +40,7 @@ fn tick_simulation_starts_driving_on_tick_1() {
     tick_simulation(&mut state, 1);
     assert_eq!(state.speed, Some(16));
     assert_eq!(state.is_driving, Some(true));
-    assert_eq!(state.gear, Some(2));
+    assert_eq!(state.gear, Some(Gear::Drive as i32));
 }
 
 #[test]
@@ -49,7 +49,7 @@ fn tick_simulation_parks_after_rampdown() {
     tick_simulation(&mut state, 15);
     assert_eq!(state.speed, Some(0));
     assert_eq!(state.is_driving, Some(false));
-    assert_eq!(state.gear, Some(0));
+    assert_eq!(state.gear, Some(Gear::Park as i32));
 }
 
 #[test]
