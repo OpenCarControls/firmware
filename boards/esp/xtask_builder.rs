@@ -139,6 +139,11 @@ impl Builder {
         let features = format!("esp-hal/{mcu},esp-rtos/{mcu},esp-backtrace/{mcu},esp-println/{mcu},esp-radio/{mcu},esp-storage/{mcu},esp-bootloader-esp-idf/{mcu}");
         cmd.arg("--features").arg(features);
 
+        if cargo_cmd == "clippy" {
+            // Lints must fail the build, not just print.
+            cmd.args(["--", "-D", "warnings"]);
+        }
+
         let status = cmd.status().expect("Failed to execute cargo command");
         if !status.success() {
             exit(status.code().unwrap_or(1));

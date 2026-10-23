@@ -86,6 +86,7 @@ pub async fn reset_ble_controller_lease_for_tests() {
 ///     BLE CAN debug stream is gone, CAN logging goes to SavvyCAN instead)
 /// - `basic_command_bytes` → `BASIC_CMD_CHANNEL` (Transport::Ble)
 /// - `advanced_command_bytes` → `ADVANCED_CMD_CHANNEL` (Transport::Ble)
+///
 /// Messages with a mismatched `platform_id` are silently dropped.
 pub async fn handle_ble_message(msg: proto::AppToDevice) {
     if msg.platform_id != crate::PLATFORM_ID.load(Ordering::Relaxed) {

@@ -93,6 +93,7 @@ pub fn ble_state_update(
 /// Publishes a single vehicle state update.
 /// - BLE receives the full state (basic + advanced).
 /// - MQTT receives basic only (`advanced_state_bytes` is always empty).
+///
 /// `timestamp_ms` is passed explicitly so callers (and tests) control the clock.
 ///
 /// Both TX channels are written non-blocking. State updates are ephemeral —

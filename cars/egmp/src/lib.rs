@@ -93,6 +93,12 @@ pub struct EgmpCarState {
     pub regen_level: Option<u32>,
 }
 
+impl Default for EgmpCarState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EgmpCarState {
     /// Nothing is known about the car until the matching CAN frame has been seen, so every
     /// field starts as `None` and is left out of the published state.

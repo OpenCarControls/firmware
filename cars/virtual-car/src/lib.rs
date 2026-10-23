@@ -28,6 +28,12 @@ pub struct VirtualCarState {
     pub custom_state1: Option<bool>,
 }
 
+impl Default for VirtualCarState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VirtualCarState {
     pub const fn new() -> Self {
         Self {

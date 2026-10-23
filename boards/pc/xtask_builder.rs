@@ -73,6 +73,10 @@ impl Builder {
         if release {
             cmd.arg("--release");
         }
+        if cargo_cmd == "clippy" {
+            // Lints must fail the build, not just print.
+            cmd.args(["--", "-D", "warnings"]);
+        }
         let status = cmd.status().expect("Failed to execute cargo command");
         if !status.success() {
             exit(status.code().unwrap_or(1));

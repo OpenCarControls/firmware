@@ -40,14 +40,13 @@ jobs:
         id: tag
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_PLATFORMS_RAW: ${{ github.event.inputs.platforms || '' }}
+          FORCE_ALL: ${{ github.event.inputs.force_all || false }}
         run: |
           set -euo pipefail
 
           git fetch --tags --force
-
-          EVENT_NAME="${{ github.event_name }}"
-          REQUESTED_PLATFORMS_RAW="${{ github.event.inputs.platforms || '' }}"
-          FORCE_ALL="${{ github.event.inputs.force_all || false }}"
 
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             echo "Manual run requested."
