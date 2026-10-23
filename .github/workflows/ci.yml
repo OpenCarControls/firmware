@@ -31,7 +31,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Lint xtask
-        run: cargo clippy --package xtask
+        run: cargo clippy --package xtask -- -D warnings
 
 
   test:

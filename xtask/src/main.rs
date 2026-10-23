@@ -563,14 +563,13 @@ fn main() {
             config.hardware = base_hw;
         }
         // Like the hardware settings, a board set in the config wins over the profile's.
-        if config.target.board.is_none() {
-            if let Some(board) = profile_toml
+        if config.target.board.is_none()
+            && let Some(board) = profile_toml
                 .get("target")
                 .and_then(|t| t.get("board"))
                 .and_then(|v| v.as_str())
-            {
-                config.target.board = Some(board.to_string());
-            }
+        {
+            config.target.board = Some(board.to_string());
         }
     }
 
@@ -813,6 +812,7 @@ pub trait TargetBuilder {
     fn clippy(&self, _config: &Config) {
         let status = Command::new("cargo")
             .arg("clippy")
+            .args(["--", "-D", "warnings"])
             .current_dir(".app_build")
             .status()
             .expect("Failed to execute cargo clippy");

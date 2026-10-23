@@ -9,10 +9,7 @@ mod linux_can {
     /// Converts a received `socketcan::CanDataFrame` into a `core_interface::CanFrame`,
     /// tagging it with the given `bus_id`.
     pub(crate) fn socketcan_to_core_frame(f: &socketcan::CanDataFrame, bus_id: u8) -> CanFrame {
-        let id = match f.id() {
-            Id::Standard(sid) => Id::Standard(sid),
-            Id::Extended(eid) => Id::Extended(eid),
-        };
+        let id = f.id();
         let dlc = f.dlc() as u8;
         let mut data = [0u8; 8];
         let bytes = f.data();
