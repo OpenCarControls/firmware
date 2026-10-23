@@ -56,6 +56,9 @@ Both RX and TX GATT characteristics declare `permissions(encrypted)` in the `#[c
 
 Encryption is checked via a per-connection `tx_auth: AtomicBool` (initialized `false`). On each retry while `tx_auth` is `false`, `ble_tx_notify_task` calls `conn.raw().security_level()` — if the result is `Encrypted`, it sets `tx_auth = true` (cached for all subsequent messages) and sends immediately. This single check covers both the first-pair path (encryption established during `PairingComplete`) and the reconnect path (re-encryption via stored LTK, which never fires `PairingComplete` on iOS). `gatt_event_task` does not touch `tx_auth`.
 
+## State on subscribe
+trouble-host's `notify` sends nothing to a peer that hasn't enabled notifications (and still returns `Ok`), and the app subscribes only after the link is encrypted, so the first state update after connecting would otherwise be lost. `publish_single_state` keeps the last BLE state message in `core_interface::latest_ble_state()`. When the app writes the TX characteristic's CCCD with notifications enabled, `gatt_event_task` signals `ble_tx_notify_task`, which sends that cached state (full state, original timestamp) through the normal path: still held until the link is encrypted. Nothing is sent if the vehicle hasn't published a state since boot. A message the app was already subscribed for may arrive twice; state updates are idempotent.
+
 ## Removing phones
 `RemovePairedPhone` / `ClearPairedPhones` (only accepted while the pairing window is open) queue a `BondOp` for the BLE task, which owns the bonds. It removes each bond from the stack, the `BondStore` flash, the controller's filter accept and resolving lists, and the paired-phone registry in `core-interface`, and disconnects the phone if it is connected. A removed phone can no longer reconnect. The `device_id` is `ble:` followed by the phone's 6-byte address (the same stamp as `source_device_id`).
 
