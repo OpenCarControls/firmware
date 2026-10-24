@@ -38,9 +38,14 @@ pub fn can_read_only_receiver() -> Option<CanReadOnlyReceiver> {
 /// the channel but silently dropped by the board driver loop.
 ///
 /// Also `true` for as long as a CAN logging session is active (see
-/// [`crate::is_can_logging`]), whatever the vehicle asks for.
+/// [`crate::is_can_logging`]), whatever the vehicle asks for, and for as long as the
+/// car's identity is unconfirmed (see [`is_car_identity_confirmed`]). Both are checked
+/// here, when the flag is read, so a racing `set_can_read_only(false)` can't leave the
+/// bus unlocked without a confirmed identity.
 pub fn is_can_read_only() -> bool {
-    CAN_READ_ONLY.load(Ordering::Relaxed) || crate::can_log::is_can_logging()
+    CAN_READ_ONLY.load(Ordering::Relaxed)
+        || crate::can_log::is_can_logging()
+        || !is_car_identity_confirmed()
 }
 
 /// Enables or disables CAN read-only mode.
@@ -166,4 +171,27 @@ pub fn passes_filter(frame: &CanFrame, filters: &[CanFilter]) -> bool {
         .iter()
         .filter(|f| f.bus_id == frame.bus_id)
         .any(|f| (frame_raw & f.mask) == (id_raw(f.id) & f.mask))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The identity is enforced when the flag is read, not only when it is written: if
+    /// the identity is cleared between the check and the store in
+    /// `set_can_read_only(false)`, the bus must still read as read-only. Simulated by
+    /// clearing only the identity flag, without the re-lock `revoke_car_identity` does.
+    #[test]
+    fn unconfirmed_identity_reads_as_read_only_even_if_flag_is_unlocked() {
+        confirm_car_identity();
+        assert!(!set_can_read_only(false));
+        assert!(!is_can_read_only());
+
+        CAR_IDENTITY_CONFIRMED.store(false, Ordering::Relaxed);
+        assert!(!CAN_READ_ONLY.load(Ordering::Relaxed));
+        assert!(is_can_read_only());
+        assert!(is_can_bus_read_only(0));
+
+        set_can_read_only(true);
+    }
 }

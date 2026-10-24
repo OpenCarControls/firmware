@@ -22,7 +22,6 @@ const PLATFORM_ID: u32 = {PLATFORM_ID};
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env();
-    esp_println::println!("!!! FIRMWARE BOOTED SUCCESSFULLY !!!");
     log::info!("Booting firmware for vehicle platform: {}", stringify!({VEHICLE_CRATE_IDENT}));
 {RECLAIMED_HEAP}    esp_alloc::heap_allocator!(size: {HEAP_SIZE});
 

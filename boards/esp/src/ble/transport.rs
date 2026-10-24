@@ -12,6 +12,8 @@
 //! - RX writes require link encryption (enforced by `trouble-host` via `permissions(encrypted)`).
 //! - TX notifications are withheld until `ble_tx_notify_task` confirms encryption via
 //!   `conn.raw().security_level()` and sets per-connection `tx_auth`.
+//! - When the app enables notifications on the TX characteristic, the latest state
+//!   update is sent again: `notify` drops anything sent before the subscription.
 //! - `source_device_id` in every accepted message is overwritten with the firmware-verified
 //!   BLE address so the vehicle layer always has a trustworthy caller identity.
 
@@ -52,6 +54,8 @@ mod hardware {
         join::join,
         select::{Either, Either3, select, select3},
     };
+    use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+    use embassy_sync::signal::Signal;
     use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlash, ReadNorFlash};
     use esp_hal::peripherals;
     use esp_radio::ble;
@@ -242,6 +246,7 @@ mod hardware {
                                 pairing_open_at_connect
                             );
                             let tx_auth = AtomicBool::new(false);
+                            let tx_subscribed = Signal::new();
                             crate::status_leds::set_flag(crate::status_leds::FLAG_BLE, true);
                             let _ = select(
                                 gatt_event_task(
@@ -250,8 +255,9 @@ mod hardware {
                                     &stack,
                                     &mut bond_store,
                                     pairing_open_at_connect,
+                                    &tx_subscribed,
                                 ),
-                                ble_tx_notify_task(&server, &conn, &tx_auth),
+                                ble_tx_notify_task(&server, &conn, &tx_auth, &tx_subscribed),
                             )
                             .await;
                             crate::status_leds::set_flag(crate::status_leds::FLAG_BLE, false);
@@ -534,6 +540,7 @@ mod hardware {
         stack: &Stack<'_, C, P>,
         bond_store: &mut BondStore<'_, S>,
         pairing_open_at_connect: bool,
+        tx_subscribed: &Signal<CriticalSectionRawMutex, ()>,
     ) where
         C: Controller
             + ControllerCmdSync<LeAddDeviceToFilterAcceptList>
@@ -545,6 +552,7 @@ mod hardware {
         S: NorFlash + MultiwriteNorFlash,
     {
         let rx_handle = server.link.rx.handle;
+        let tx_cccd_handle = server.link.tx.cccd_handle;
         let peer_bd_addr = conn.raw().peer_identity().bd_addr;
 
         // Determine if this phone has a stored bond (RL active → bd_addr is identity).
@@ -736,6 +744,18 @@ mod hardware {
                             }
                         }
                     }
+                    GattEvent::Write(write_evt) if Some(write_evt.handle()) == tx_cccd_handle => {
+                        // CCCD bit 0 enables notifications. Accepting stores the value,
+                        // so the TX task's `notify` reaches this peer from now on.
+                        let notifications_on = write_evt.data().first().is_some_and(|b| b & 1 != 0);
+                        if let Ok(reply) = write_evt.accept() {
+                            let _ = reply.send().await;
+                        }
+                        if notifications_on {
+                            log::info!("BLE: app subscribed to TX — resending latest state");
+                            tx_subscribed.signal(());
+                        }
+                    }
                     other => {
                         if let Ok(reply) = other.accept() {
                             let _ = reply.send().await;
@@ -753,6 +773,7 @@ mod hardware {
         server: &OpenCarGattServer<'_>,
         conn: &GattConnection<'_, '_, P>,
         tx_auth: &AtomicBool,
+        tx_subscribed: &Signal<CriticalSectionRawMutex, ()>,
     ) {
         let mut pending_msg: Option<proto::DeviceToApp> = None;
         let mut tx_held_logged = false;
@@ -764,7 +785,15 @@ mod hardware {
             let msg = if let Some(msg) = pending_msg.take() {
                 msg
             } else {
-                BLE_TX_CHANNEL.receive().await
+                match select(BLE_TX_CHANNEL.receive(), tx_subscribed.wait()).await {
+                    Either::First(msg) => msg,
+                    // The app just subscribed: whatever was sent before went nowhere,
+                    // so give it the current state now instead of at the next update.
+                    Either::Second(()) => match core_interface::latest_ble_state() {
+                        Some(msg) => msg,
+                        None => continue,
+                    },
+                }
             };
 
             // Hold notifications until the link is confirmed encrypted.

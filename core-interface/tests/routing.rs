@@ -1,7 +1,7 @@
 use core_interface::{
-    BLE_TX_CHANNEL, MQTT_TX_CHANNEL, Transport, VehicleStatePayload, init, proto,
-    publish_single_state, record_mqtt_activity, reset_mqtt_throttle_for_tests,
-    route_single_response,
+    BLE_TX_CHANNEL, MQTT_TX_CHANNEL, Transport, VehicleStatePayload, init, latest_ble_state, proto,
+    publish_single_state, record_mqtt_activity, reset_latest_ble_state_for_tests,
+    reset_mqtt_throttle_for_tests, route_single_response,
 };
 
 const PLATFORM_ID: u32 = 0xCAFE_BABE;
@@ -141,6 +141,62 @@ fn state_publish_carries_correct_timestamp() {
     let mqtt_msg = MQTT_TX_CHANNEL.try_receive().unwrap();
     assert_eq!(ble_msg.timestamp_ms, 9999);
     assert_eq!(mqtt_msg.timestamp_ms, 9999);
+}
+
+// ── latest_ble_state ──────────────────────────────────────────────────────────
+
+#[test]
+fn latest_ble_state_is_none_before_any_publish() {
+    drain_tx_channels();
+    reset_latest_ble_state_for_tests();
+    assert!(latest_ble_state().is_none());
+}
+
+#[test]
+fn latest_ble_state_keeps_the_newest_full_state() {
+    drain_tx_channels();
+    reset_latest_ble_state_for_tests();
+    init(PLATFORM_ID);
+    for (basic, ts) in [(0x01, 1000), (0x02, 2000)] {
+        let payload = VehicleStatePayload {
+            basic: vec![basic],
+            advanced: vec![0xBB],
+        };
+        embassy_futures::block_on(publish_single_state(payload, ts));
+    }
+    drain_tx_channels();
+
+    // Still available after the channel was drained (as the BLE task does
+    // while nobody has subscribed).
+    let msg = latest_ble_state().expect("no cached BLE state");
+    assert_eq!(msg.timestamp_ms, 2000);
+    assert_eq!(msg.platform_id, PLATFORM_ID);
+    match msg.payload {
+        Some(proto::device_to_app::Payload::StateUpdate(update)) => {
+            let vs = update.vehicle_state.expect("no vehicle_state");
+            assert_eq!(vs.basic_state_bytes, vec![0x02]);
+            assert_eq!(vs.advanced_state_bytes, vec![0xBB]);
+        }
+        other => panic!("unexpected payload: {:?}", other),
+    }
+}
+
+#[test]
+fn command_responses_do_not_replace_latest_ble_state() {
+    drain_tx_channels();
+    reset_latest_ble_state_for_tests();
+    init(PLATFORM_ID);
+    let payload = VehicleStatePayload {
+        basic: vec![0x01],
+        advanced: vec![],
+    };
+    embassy_futures::block_on(publish_single_state(payload, TS));
+    embassy_futures::block_on(route_single_response(Transport::Ble, make_response(4), TS));
+    drain_tx_channels();
+    assert!(matches!(
+        latest_ble_state().and_then(|m| m.payload),
+        Some(proto::device_to_app::Payload::StateUpdate(_))
+    ));
 }
 
 // ── MQTT throttle ─────────────────────────────────────────────────────────────

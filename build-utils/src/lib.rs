@@ -13,12 +13,6 @@ pub fn compile_car_contracts(car_name: &str) {
     ));
     if proto_path.exists() {
         println!("cargo:rerun-if-changed={}", proto_path.display());
-        println!(
-            "cargo:rerun-if-changed={}",
-            workspace_dir
-                .join("contracts/opencar/core/v1/vehicle_state.proto")
-                .display()
-        );
 
         prost_build::Config::new()
             .compile_protos(&[proto_path], &[workspace_dir.join("contracts/opencar")])
@@ -37,7 +31,7 @@ pub fn compile_car_contracts(car_name: &str) {
         for entry in fs::read_dir(&dbc_dir).expect("Failed to read dbc directory") {
             let entry = entry.expect("Failed to read dir entry");
             let path = entry.path();
-            if path.is_file() && path.extension().map_or(false, |ext| ext == "dbc") {
+            if path.is_file() && path.extension().is_some_and(|ext| ext == "dbc") {
                 println!("cargo:rerun-if-changed={}", path.display());
 
                 let file_stem = path

@@ -10,7 +10,7 @@
 //! the frame.
 
 use core_interface::{CanFilter, CanFrame};
-use embedded_can::Frame as EmbeddedFrame;
+use embedded_can::{Frame as EmbeddedFrame, Id};
 
 /// Converts any [`EmbeddedFrame`]-implementing hardware frame into the
 /// crate-shared [`CanFrame`] type. Used by both the TWAI and MCP2515 drivers.
@@ -604,21 +604,33 @@ pub const fn bus_filter_count(filters: &[CanFilter], bus_id: u8) -> usize {
 /// - `mask0` covers RXB0 filters (slots 0-1, up to 2 filters).
 /// - `mask1` covers RXB1 filters (slots 2-5, up to 4 more filters).
 ///
-/// Each mask is OR-folded from the individual filter masks so that a hardware
-/// RXB mask bit is 1 (must match) only when every filter in that buffer agrees
-/// the bit must match.
+/// Each mask is AND-folded from the individual filter masks, so a hardware RXB mask
+/// bit is 1 (must match) only when every filter in that buffer needs the bit to match.
+/// Every frame a filter accepts therefore also passes the hardware; the software
+/// filter does the exact matching. A buffer with no filter gets mask 0 (accept-all).
+///
+/// The hardware masks are written as standard IDs and the chip has only
+/// [`MCP2515_HW_FILTERS`] filter slots, so if any filter for the bus is extended or
+/// there are more filters than slots, both masks fall back to accept-all (0).
 #[cfg_attr(not(feature = "hardware"), allow(dead_code))]
 pub(crate) fn compute_mcp_masks(filters: &[CanFilter], bus_id: u8) -> (u32, u32) {
-    let mut it = filters.iter().filter(|f| f.bus_id == bus_id);
-    let mask0 = it.by_ref().take(2).fold(0u32, |acc, f| acc | f.mask);
-    let mask1 = it.take(4).fold(0u32, |acc, f| acc | f.mask);
+    let for_bus = || filters.iter().filter(|f| f.bus_id == bus_id);
+    if for_bus().count() > MCP2515_HW_FILTERS || for_bus().any(|f| matches!(f.id, Id::Extended(_)))
+    {
+        return (0, 0);
+    }
+    let and_masks =
+        |it: &mut dyn Iterator<Item = u32>| it.reduce(|acc, mask| acc & mask).unwrap_or(0);
+    let mut masks = for_bus().map(|f| f.mask);
+    let mask0 = and_masks(&mut masks.by_ref().take(2));
+    let mask1 = and_masks(&mut masks.take(4));
     (mask0, mask1)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use embedded_can::{Id, StandardId};
+    use embedded_can::{ExtendedId, Id, StandardId};
 
     fn filter(bus_id: u8, raw_id: u16, mask: u32) -> CanFilter {
         CanFilter {
@@ -644,11 +656,50 @@ mod tests {
     }
 
     #[test]
-    fn two_filters_ored_into_mask0() {
+    fn two_filters_anded_into_mask0() {
         let filters = [filter(0, 0x100, 0x700), filter(0, 0x200, 0x0FF)];
         let (m0, m1) = compute_mcp_masks(&filters, 0);
-        assert_eq!(m0, 0x7FF);
+        assert_eq!(m0, 0x000);
         assert_eq!(m1, 0);
+    }
+
+    /// Whatever the software filter accepts must also get past the hardware masks.
+    #[test]
+    fn hardware_masks_accept_everything_the_software_filter_accepts() {
+        let filters = [
+            filter(0, 0x100, 0x7F0),
+            filter(0, 0x120, 0x7F0),
+            filter(0, 0x300, 0x7FF),
+            filter(0, 0x310, 0x7F0),
+        ];
+        let (m0, m1) = compute_mcp_masks(&filters, 0);
+        assert_eq!((m0, m1), (0x7F0, 0x7F0));
+        for (i, f) in filters.iter().enumerate() {
+            let mask = if i < 2 { m0 } else { m1 };
+            let Id::Standard(sid) = f.id else {
+                unreachable!()
+            };
+            // A frame the filter accepts: its own ID, and one differing in a don't-care bit.
+            for raw in [sid.as_raw(), sid.as_raw() | (!f.mask as u16 & 0x7FF)] {
+                assert_eq!(raw as u32 & mask, sid.as_raw() as u32 & mask);
+            }
+        }
+    }
+
+    #[test]
+    fn extended_filter_falls_back_to_accept_all() {
+        let mut filters = [filter(0, 0x100, 0x7FF), filter(0, 0x200, 0x7FF)];
+        filters[1].id = Id::Extended(ExtendedId::new(0x1234_5678).unwrap());
+        assert_eq!(compute_mcp_masks(&filters, 0), (0, 0));
+        // An extended filter on another bus doesn't affect this one.
+        filters[1].bus_id = 1;
+        assert_eq!(compute_mcp_masks(&filters, 0), (0x7FF, 0));
+    }
+
+    #[test]
+    fn more_filters_than_hardware_slots_falls_back_to_accept_all() {
+        let filters: Vec<CanFilter> = (0u16..7).map(|i| filter(0, 0x100 + i, 0x7FF)).collect();
+        assert_eq!(compute_mcp_masks(&filters, 0), (0, 0));
     }
 
     #[test]

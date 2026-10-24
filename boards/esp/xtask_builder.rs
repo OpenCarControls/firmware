@@ -139,6 +139,11 @@ impl Builder {
         let features = format!("esp-hal/{mcu},esp-rtos/{mcu},esp-backtrace/{mcu},esp-println/{mcu},esp-radio/{mcu},esp-storage/{mcu},esp-bootloader-esp-idf/{mcu}");
         cmd.arg("--features").arg(features);
 
+        if cargo_cmd == "clippy" {
+            // Lints must fail the build, not just print.
+            cmd.args(["--", "-D", "warnings"]);
+        }
+
         let status = cmd.status().expect("Failed to execute cargo command");
         if !status.success() {
             exit(status.code().unwrap_or(1));
@@ -685,7 +690,12 @@ impl TargetBuilder for Builder {
         fs::write(".app_build/.cargo/config.toml", cargo_config).expect("Failed to write .app_build/.cargo/config.toml");
         fs::write(".app_build/src/main.rs", main_rs).expect("Failed to write .app_build/src/main.rs");
         
-        // Remove stale Cargo.lock so the bitvec patch is correctly applied
+        // The generated crate resolves the root Cargo.toml's `[patch.crates-io]` (a git
+        // `bitvec`; `radium` in the released 1.0 doesn't build for Xtensa). A Cargo.lock left
+        // from an earlier build can pin the unpatched crates.io version, so it is deleted
+        // to force a fresh resolve. Tracked for removal once a `bitvec` release with the fix
+        // ships and the patch can go (see the reproducible-builds item in
+        // OpenCarControls/contracts#11).
         let _ = fs::remove_file(".app_build/Cargo.lock");
     }
 
@@ -815,7 +825,7 @@ impl TargetBuilder for Builder {
         fs::write(".app_test_build/src/main.rs", main_rs)
             .expect("Failed to write .app_test_build/src/main.rs");
             
-        // Remove stale Cargo.lock so the bitvec patch is correctly applied
+        // Same as `.app_build`: delete the lock so the `bitvec` patch is resolved afresh.
         let _ = fs::remove_file(".app_test_build/Cargo.lock");
         
         println!(".app_test_build/ generated for {} ({})", mcu, config.target.platform);

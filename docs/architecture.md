@@ -29,8 +29,8 @@ Vehicle crates that use CAN also export a `can_rx_task` (reads `CAN_RX_CHANNEL`)
 ### `cars/virtual-car` (`virtual-car-controller`)
 A mock vehicle implementation used strictly for UI/UX testing without physical hardware. Contains real Embassy tasks and real proto encoding, just no CAN bus.
 
-*   `VirtualCarState` is `pub` with `pub` fields and initialises with concrete defaults (`odometer: 0`, `is_driving: false`, `are_doors_locked: false`, `speed: 0`, `gear: 0`).
-*   `pub fn tick_simulation(state: &mut VirtualCarState, tick: u64)` advances a 20-tick (≈ 100 s) drive cycle: ticks 0–4 ramp speed 0 → 80 kph, 5–9 cruise at 80 kph, 10–14 ramp 80 → 0 kph, 15–19 park at 0 kph. `gear` and `is_driving` are derived from `speed`; `odometer` increments by 1 km at tick 19; `are_doors_locked` is intentionally untouched (command-controlled only).
+*   `VirtualCarState` is `pub` with `pub` fields and initialises with concrete defaults (`odometer: 0`, `is_driving: false`, `are_doors_locked: false`, `speed: 0`, `gear: Park`).
+*   `pub fn tick_simulation(state: &mut VirtualCarState, tick: u64)` advances a 20-tick (≈ 100 s) drive cycle: ticks 0–4 ramp speed 0 → 80 kph, 5–9 cruise at 80 kph, 10–14 ramp 80 → 0 kph, 15–19 park at 0 kph. `gear` (`Gear::Drive` / `Gear::Park`) and `is_driving` are derived from `speed`; `odometer` increments by 1 km at tick 19; `are_doors_locked` is intentionally untouched (command-controlled only).
 *   `state_update_task` calls `tick_simulation` on each 5-second fire and increments an internal counter, so the app receives realistic-looking state updates over MQTT without any CAN frames.
 
 ### `.app_build` (ephemeral, xtask-generated)
@@ -44,6 +44,7 @@ The actual binary entry point. Generated fresh by `xtask` before every build fro
 *   `--debug` produces an unoptimised build (no `--release`; default is release). The debug binary is what the VS Code probe-rs debugger launch config points at.
 *   **`config.toml` is gitignored.** It holds per-developer settings (WiFi credentials, CAN pins, etc.) and must never be committed. The tracked template is `config.toml.example`. On first invocation, if `config.toml` is absent and `config.toml.example` exists, xtask copies the example into place so a bare clone compiles without manual setup. This auto-copy only triggers for the default `"config.toml"` path — passing an explicit positional config path bypasses it.
 *   For ESP builds, the generated `.app_build/Cargo.toml` carries `esp-radio = { version = "0.18.0", features = ["wifi", "ble", "unstable"] }` and `esp-storage = { version = "0.9.0", features = ["critical-section"] }` as **direct** dependencies so xtask can forward chip features as `esp-radio/{mcu}` and `esp-storage/{mcu}`; it also pins `esp-alloc = "0.10.0"`.
+*   **`bitvec` patch (ESP):** the released `bitvec` 1.0 pulls in `radium`, which doesn't build for Xtensa (no 64-bit atomics), so the root `Cargo.toml` patches `bitvec` to a git rev. xtask copies that `[patch]` table into the generated `.app_build`/`.app_test_build` crates and deletes their `Cargo.lock` on every generation (ESP builder only) so the patch is always resolved afresh. The cost is that those builds aren't locked; both go away once a `bitvec` release with the fix ships (tracked with the reproducible-builds item in contracts#11).
 *   All ESP-specific crate versions are sourced by xtask from `boards/esp/Cargo.toml`: direct deps use `[dependencies]`; versions needed only in the generated `.app_build` crate (e.g. `esp-backtrace`, `esp-bootloader-esp-idf`, `embedded-test`) live in `[package.metadata.xtask-only-deps]` so they are co-located with the crates they apply to.
 
 ### Template files
