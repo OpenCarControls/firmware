@@ -79,6 +79,8 @@ Bonded phones reconnect in Mode B and re-encrypt via LL_ENC_REQ using the stored
 
 **Boards without a pairing button** (`pairing_button_pin` unset, e.g. the WiCAN profile) open the window at boot only while no phone is bonded, so first setup needs no hardware. The transport task reports how many bonds it loaded and the lifecycle task opens the window only for zero. Once a phone is bonded, a reboot (watchdog reset, brownout) leaves the window closed.
 
+That first-setup window closes as soon as the first bond is stored (and kept, i.e. not revoked by `max_bonded_phones`), instead of running its full timer, so a second phone can't bond in the time left. A stranger who bonds first makes the owner's pairing fail visibly instead of both phones ending up bonded. Because the window is then closed, the broken-bond wipe below no longer applies to that bond: if the phone loses its side of it, recovery is the same as for any bonded buttonless board. Windows opened with the pairing button are not closed early.
+
 Pairing uses `NoInputNoOutput` (Just Works): it has no MITM protection and no user confirmation, so any phone that can bond is trusted from then on. That is why the window must stay closed outside first setup and button presses.
 
 On a buttonless board with a bonded phone there is currently no way to open the window again: managing phones (`RemovePairedPhone`, `ClearPairedPhones`) needs an open window too. A deliberate action for that (a command from a bonded phone, or a physical one) is still to be designed and needs a contract change; until then such a board is reset by erasing its flash.
