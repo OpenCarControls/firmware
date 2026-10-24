@@ -79,8 +79,9 @@ pub use dispatch::{
 
 // Routing tasks
 pub use routing::{
-    ble_state_update, publish_single_state, publish_state_task, record_mqtt_activity,
-    reset_mqtt_throttle_for_tests, route_responses_task, route_single_response,
+    ble_state_update, latest_ble_state, publish_single_state, publish_state_task,
+    record_mqtt_activity, reset_latest_ble_state_for_tests, reset_mqtt_throttle_for_tests,
+    route_responses_task, route_single_response,
 };
 
 // Simulation

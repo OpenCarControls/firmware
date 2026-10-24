@@ -1,4 +1,7 @@
 use alloc::vec;
+use core::cell::RefCell;
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use portable_atomic::{AtomicU32, Ordering};
 
 use embassy_time::Instant;
@@ -90,6 +93,23 @@ pub fn ble_state_update(
     }
 }
 
+/// The last BLE state message published, so the BLE transport can resend it to
+/// an app that subscribes after it was sent (`notify` drops it for an
+/// unsubscribed peer).
+static LATEST_BLE_STATE: Mutex<CriticalSectionRawMutex, RefCell<Option<proto::DeviceToApp>>> =
+    Mutex::new(RefCell::new(None));
+
+/// The most recent BLE state update (full state, original timestamp), or
+/// `None` if the vehicle hasn't published one since boot.
+pub fn latest_ble_state() -> Option<proto::DeviceToApp> {
+    LATEST_BLE_STATE.lock(|latest| latest.borrow().clone())
+}
+
+/// Forgets the cached BLE state update. For use in tests only.
+pub fn reset_latest_ble_state_for_tests() {
+    LATEST_BLE_STATE.lock(|latest| *latest.borrow_mut() = None);
+}
+
 /// Publishes a single vehicle state update.
 /// - BLE receives the full state (basic + advanced).
 /// - MQTT receives basic only (`advanced_state_bytes` is always empty).
@@ -109,6 +129,7 @@ pub async fn publish_single_state(payload: VehicleStatePayload, timestamp_ms: u6
     // BLE: full state (basic + advanced)
     let basic = payload.basic.clone();
     let ble_msg = ble_state_update(timestamp_ms, pid, payload);
+    LATEST_BLE_STATE.lock(|latest| *latest.borrow_mut() = Some(ble_msg.clone()));
     if let Err(embassy_sync::channel::TrySendError::Full(msg)) = BLE_TX_CHANNEL.try_send(ble_msg) {
         // Channel full — evict the oldest stale state and replace with latest.
         let _ = BLE_TX_CHANNEL.try_receive();
