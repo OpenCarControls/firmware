@@ -14,16 +14,18 @@ mod hardware {
         pairing_button_pin: Option<u8>,
         pairing_button_hold_s: u32,
         pairing_window_s: u32,
+        first_setup_window_s: u32,
         max_bonded_phones: u8,
         controller_lease_ttl_s: u32,
     ) {
         core_interface::set_ble_controller_lease_ttl_s(controller_lease_ttl_s);
         core_interface::set_ble_max_bonded_phones(max_bonded_phones);
         log::info!(
-            "BLE lifecycle config loaded: button_gpio={:?}, hold_s={}, window_s={}, max_bonds={}, lease_ttl_s={}",
+            "BLE lifecycle config loaded: button_gpio={:?}, hold_s={}, window_s={}, first_setup_window_s={}, max_bonds={}, lease_ttl_s={}",
             pairing_button_pin,
             pairing_button_hold_s,
             pairing_window_s,
+            first_setup_window_s,
             max_bonded_phones,
             controller_lease_ttl_s
         );
@@ -91,11 +93,12 @@ mod hardware {
             // (no phone bonded yet). Once a phone is bonded, nothing opens it at boot.
             let bond_count = crate::ble::boot_pairing::BONDS_LOADED.wait().await;
             if crate::ble::boot_pairing::open_window_at_boot(bond_count) {
+                let first_setup_s = first_setup_window_s.max(1);
                 crate::ble::boot_pairing::mark_first_setup_window();
-                core_interface::open_pairing_window_for(window_s);
+                core_interface::open_pairing_window_for(first_setup_s);
                 log::info!(
                     "No pairing button defined and no phone bonded; BLE pairing window opened for {}s on boot",
-                    window_s
+                    first_setup_s
                 );
             } else {
                 log::info!(

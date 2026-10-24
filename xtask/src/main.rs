@@ -130,6 +130,7 @@ pub struct TransportBle {
 #[derive(Deserialize)]
 pub struct TransportBlePairing {
     pub pairing_window_seconds: u32,
+    pub first_setup_pairing_window_seconds: u32,
 }
 
 #[derive(Deserialize)]
@@ -460,6 +461,10 @@ pub fn validate_ble_transport_contract(transport: &TransportConfig) {
 
     if transport.ble.pairing.pairing_window_seconds == 0 {
         eprintln!("transport.toml ble.pairing.pairing_window_seconds must be > 0");
+        exit(1);
+    }
+    if transport.ble.pairing.first_setup_pairing_window_seconds == 0 {
+        eprintln!("transport.toml ble.pairing.first_setup_pairing_window_seconds must be > 0");
         exit(1);
     }
 }

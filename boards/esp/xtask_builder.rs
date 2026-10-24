@@ -466,6 +466,7 @@ impl TargetBuilder for Builder {
              const BLE_PAIRING_BUTTON_PIN: Option<u8> = {pair_btn};\n\
              const BLE_PAIRING_BUTTON_HOLD_S: u32 = {pair_hold};\n\
              const BLE_PAIRING_WINDOW_S: u32 = {pair_window};\n\
+             const BLE_FIRST_SETUP_PAIRING_WINDOW_S: u32 = {first_setup_window};\n\
              const BLE_MAX_BONDED_PHONES: u8 = {max_bonds};\n\
              const BLE_CONTROLLER_LEASE_TTL_S: u32 = {lease_ttl};",
             ble_name = ble_device_name,
@@ -475,6 +476,7 @@ impl TargetBuilder for Builder {
             },
             pair_hold = esp_hw.ble.pairing_button_hold_s,
             pair_window = transport.ble.pairing.pairing_window_seconds,
+            first_setup_window = transport.ble.pairing.first_setup_pairing_window_seconds,
             max_bonds = esp_hw.ble.max_bonded_phones,
             lease_ttl = esp_hw.ble.controller_lease_ttl_s,
         );
