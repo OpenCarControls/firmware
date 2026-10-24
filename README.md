@@ -105,7 +105,7 @@ The firmware is a Cargo workspace of independently compiled crates that cooperat
 | `cars/*` | Vehicle logic: CAN decoding, command handling, state encoding |
 | `xtask` | Build orchestrator: reads `config.toml`, generates `.app_build/`, invokes cargo |
 
-Details: [Architecture](docs/architecture.md) · [BLE](docs/ble.md) · [CAN bus](docs/can.md)
+Details: [Architecture](docs/architecture.md) · [BLE](docs/ble.md) · [CAN bus](docs/can.md) · [Vehicle commands](docs/commands.md)
 
 ## 📂 Project Structure
 

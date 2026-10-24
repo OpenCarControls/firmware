@@ -2,7 +2,7 @@
 
 Open Car Firmware is an embedded Rust monorepo for the hardware controller (ESP32 / Raspberry Pi). It handles CAN bus reading/writing, BLE/WiFi/LTE connections, and OTA updates.
 
-Related docs: [BLE](ble.md) · [CAN bus](can.md) · [Testing](testing.md) · [Releases & OTA](releases.md) · [Hardware setup](hardware-setup.md)
+Related docs: [BLE](ble.md) · [CAN bus](can.md) · [Vehicle commands](commands.md) · [Testing](testing.md) · [Releases & OTA](releases.md) · [Hardware setup](hardware-setup.md)
 
 ## Cargo workspace & xtask
 

@@ -12,6 +12,7 @@ mod channels;
 mod dispatch;
 mod lifecycle;
 mod pairing;
+mod preconditions;
 mod routing;
 #[cfg(debug_assertions)]
 mod simulation;
@@ -72,6 +73,12 @@ pub use can_access::{
 pub use can_log::{
     CAN_LOG_CHANNEL, CanLogFrame, CanLogSession, GvretCommand, GvretParser, SessionEnd,
     can_log_dropped_count, encode_gvret_frame, is_can_logging, log_can_frame, run_can_log_session,
+};
+
+// Command preconditions
+pub use preconditions::{
+    ActivityClock, Preconditions, Rejection, Requirement, Snapshot, rejection_response,
+    try_send_response,
 };
 
 // Pairing registry

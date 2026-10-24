@@ -4,6 +4,7 @@
 extern crate alloc;
 
 pub mod can;
+pub mod commands;
 use alloc::string::String;
 pub use can::{CAN_FILTERS, can_rx_task};
 use core_interface::{
@@ -286,33 +287,39 @@ pub fn encode_state(state: &EgmpCarState) -> VehicleStatePayload {
 pub async fn handle_basic_commands_task() {
     loop {
         let inbound = BASIC_CMD_CHANNEL.receiver().receive().await;
-        let (success, error_message) = match process_basic_command(inbound.bytes.as_slice()).await {
-            Ok(()) => (true, String::new()),
-            Err(e) => (false, String::from(e)),
-        };
-        let response = core_interface::proto::CommandResponse {
-            message_id: inbound.message_id,
-            success,
-            error_message,
-            response_data: None,
-            status_code: if success { 1 } else { 2 },
-        };
-        CMD_RESP_CHANNEL
-            .sender()
-            .send((inbound.transport, response))
-            .await;
+        let result = process_basic_command(inbound.bytes.as_slice()).await;
+        commands::respond(inbound.transport, inbound.message_id, result).await;
     }
 }
 
-pub async fn process_basic_command(bytes: &[u8]) -> Result<(), &'static str> {
-    let cmd = proto::BasicCommand::decode(bytes).map_err(|_| "Failed to decode BasicCommand")?;
-    match cmd.action {
-        Some(proto::basic_command::Action::DoorLockCommand(_)) => Err("Not implemented"),
-        Some(proto::basic_command::Action::ChargePortCommand(_)) => Err("Not implemented"),
-        Some(proto::basic_command::Action::FlashLightsCommand(_)) => Err("Not implemented"),
-        Some(proto::basic_command::Action::ClimateControlCommand(_)) => Err("Not implemented"),
-        Some(proto::basic_command::Action::WindowCommand(_)) => Err("Not implemented"),
-        None => Err("No action in BasicCommand"),
+/// Decodes a basic command, checks its preconditions (`commands::basic_preconditions`) and only
+/// then runs it.
+pub async fn process_basic_command(bytes: &[u8]) -> Result<(), commands::CommandError> {
+    use commands::CommandError;
+    let cmd = proto::BasicCommand::decode(bytes)
+        .map_err(|_| CommandError::Failed("Failed to decode BasicCommand"))?;
+    let action = cmd
+        .action
+        .ok_or(CommandError::Failed("No action in BasicCommand"))?;
+    commands::admit_basic(&action)
+        .await
+        .map_err(CommandError::Rejected)?;
+    match action {
+        proto::basic_command::Action::DoorLockCommand(_) => {
+            Err(CommandError::Failed("Not implemented"))
+        }
+        proto::basic_command::Action::ChargePortCommand(_) => {
+            Err(CommandError::Failed("Not implemented"))
+        }
+        proto::basic_command::Action::FlashLightsCommand(_) => {
+            Err(CommandError::Failed("Not implemented"))
+        }
+        proto::basic_command::Action::ClimateControlCommand(_) => {
+            Err(CommandError::Failed("Not implemented"))
+        }
+        proto::basic_command::Action::WindowCommand(_) => {
+            Err(CommandError::Failed("Not implemented"))
+        }
     }
 }
 
@@ -320,33 +327,25 @@ pub async fn process_basic_command(bytes: &[u8]) -> Result<(), &'static str> {
 pub async fn handle_advanced_commands_task() {
     loop {
         let inbound = ADVANCED_CMD_CHANNEL.receiver().receive().await;
-        let (success, error_message) =
-            match process_advanced_command(inbound.bytes.as_slice()).await {
-                Ok(()) => (true, String::new()),
-                Err(e) => (false, String::from(e)),
-            };
-        let response = core_interface::proto::CommandResponse {
-            message_id: inbound.message_id,
-            success,
-            error_message,
-            response_data: None,
-            status_code: if success { 1 } else { 2 },
-        };
-        CMD_RESP_CHANNEL
-            .sender()
-            .send((inbound.transport, response))
-            .await;
+        let result = process_advanced_command(inbound.bytes.as_slice()).await;
+        commands::respond(inbound.transport, inbound.message_id, result).await;
     }
 }
 
-pub async fn process_advanced_command(bytes: &[u8]) -> Result<(), &'static str> {
-    let cmd =
-        proto::AdvancedCommand::decode(bytes).map_err(|_| "Failed to decode AdvancedCommand")?;
-    match cmd.action {
-        Some(proto::advanced_command::Action::BatteryPreconditioningCommand(_)) => {
-            Err("Not implemented")
+/// Decodes an advanced command, checks its preconditions
+/// (`commands::advanced_preconditions`) and only then runs it.
+pub async fn process_advanced_command(bytes: &[u8]) -> Result<(), commands::CommandError> {
+    use commands::CommandError;
+    let cmd = proto::AdvancedCommand::decode(bytes)
+        .map_err(|_| CommandError::Failed("Failed to decode AdvancedCommand"))?;
+    let action = cmd
+        .action
+        .ok_or(CommandError::Failed("No action in AdvancedCommand"))?;
+    commands::admit_advanced(&action).map_err(CommandError::Rejected)?;
+    match action {
+        proto::advanced_command::Action::BatteryPreconditioningCommand(_) => {
+            Err(CommandError::Failed("Not implemented"))
         }
-        None => Err("No action in AdvancedCommand"),
     }
 }
 
