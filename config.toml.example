@@ -41,6 +41,9 @@ controller_lease_ttl_s = 15
 
 [hardware.pc.ble]
 device_name = "OpenCar"
+# The debug HTTP server has no authentication, so it only listens on localhost by default.
+# Use "0.0.0.0" to reach it from a phone, an emulator or from outside the dev container.
+http_bind = "127.0.0.1"
 http_port = 4242
 max_bonded_phones = 8
 paired_phones_file = "/tmp/opencar-paired-phones.txt"

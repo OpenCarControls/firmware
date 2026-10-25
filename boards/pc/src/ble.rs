@@ -326,14 +326,18 @@ async fn handle_request(
 }
 
 #[embassy_executor::task]
-pub async fn ble_http_task(port: u16, device_name: &'static str, pairing_window_s: u32) {
+pub async fn ble_http_task(
+    bind: &'static str,
+    port: u16,
+    device_name: &'static str,
+    pairing_window_s: u32,
+) {
     use std::io;
 
-    let addr = format!("0.0.0.0:{}", port);
-    let listener = match std::net::TcpListener::bind(&addr) {
+    let listener = match std::net::TcpListener::bind((bind, port)) {
         Ok(v) => v,
         Err(e) => {
-            log::error!("BLE test HTTP: bind failed on {}: {}", addr, e);
+            log::error!("BLE test HTTP: bind failed on {}:{}: {}", bind, port, e);
             return;
         }
     };
@@ -343,8 +347,9 @@ pub async fn ble_http_task(port: u16, device_name: &'static str, pairing_window_
     }
 
     log::info!(
-        "BLE test HTTP server ready on {} (device_name_base={})",
-        addr,
+        "BLE test HTTP server ready on {}:{} (device_name_base={})",
+        bind,
+        port,
         device_name
     );
 
