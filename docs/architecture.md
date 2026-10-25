@@ -11,8 +11,8 @@ The intermediary between transport layers (BLE/MQTT) and vehicle logic. Knows no
 
 *   Defines 12 static `Channel`s as the inter-crate contract (see [Channels](#channels)).
 *   Defines shared types: `Transport`, `InboundCommand`, `VehicleStatePayload`, `CanLogFrame`.
-*   Defines 4 pure-logic `#[embassy_executor::task]` functions: `process_ble_commands_task`, `process_mqtt_commands_task`, `route_responses_task`, `publish_state_task`.
-*   Exposes `pub fn passes_filter()`, `pub fn is_can_read_only()`, `pub fn set_can_read_only(bool)`, and the SavvyCAN logging API (`is_can_logging`, `log_can_frame`, `run_can_log_session`).
+*   Defines 5 pure-logic `#[embassy_executor::task]` functions: `process_ble_commands_task`, `process_mqtt_commands_task`, `route_responses_task`, `publish_state_task`, `publish_can_access_task`.
+*   Exposes `pub fn passes_filter()`, `pub fn is_can_read_only()`, `pub fn set_can_read_only(bool)`, the CAN read-write policy (car identity, owner approval, dev lock; see [CAN](can.md#read-write-policy)), and the SavvyCAN logging API (`is_can_logging`, `log_can_frame`, `run_can_log_session`).
 *   Has 4 inner async helpers (`handle_ble_message`, `handle_mqtt_message`, `route_single_response`, `publish_single_state`) extracted from the task loops so they can be unit-tested without running an executor.
 *   **`publish_single_state` is intentionally non-blocking:** it uses `try_send` on both `BLE_TX_CHANNEL` and `MQTT_TX_CHANNEL`; if either is full it evicts the oldest pending state update and enqueues the fresher one. This guarantees `publish_state_task` never stalls, keeping `VEHICLE_STATE_CHANNEL` always drainable and preventing a deadlock cascade through `state_update_task` and command-handler tasks.
 *   Uses `#![cfg_attr(not(test), no_std)]` so host tests compile without a `no_std` target.
@@ -42,6 +42,7 @@ The actual binary entry point. Generated fresh by `xtask` before every build fro
 
 *   The `board` and `platform` values in `config.toml` can be overridden at the CLI with `--board` and `--platform`, e.g. `cargo xtask build --board pc`.
 *   `--debug` produces an unoptimised build (no `--release`; default is release). The debug binary is what the VS Code probe-rs debugger launch config points at.
+*   `--production` builds a release image: the generated `main.rs` calls `core_interface::declare_production_build()`, which removes the CAN dev write lock (see [CAN](can.md#read-write-policy)). Only the release workflow passes it; every other build is a development build and keeps the lock. It is independent of `--debug`.
 *   **`config.toml` is gitignored.** It holds per-developer settings (WiFi credentials, CAN pins, etc.) and must never be committed. The tracked template is `config.toml.example`. On first invocation, if `config.toml` is absent and `config.toml.example` exists, xtask copies the example into place so a bare clone compiles without manual setup. This auto-copy only triggers for the default `"config.toml"` path — passing an explicit positional config path bypasses it.
 *   For ESP builds, the generated `.app_build/Cargo.toml` carries `esp-radio = { version = "0.18.0", features = ["wifi", "ble", "unstable"] }` and `esp-storage = { version = "0.9.0", features = ["critical-section"] }` as **direct** dependencies so xtask can forward chip features as `esp-radio/{mcu}` and `esp-storage/{mcu}`; it also pins `esp-alloc = "0.10.0"`.
 *   **`bitvec` patch (ESP):** the released `bitvec` 1.0 pulls in `radium`, which doesn't build for Xtensa (no 64-bit atomics), so the root `Cargo.toml` patches `bitvec` to a git rev. xtask copies that `[patch]` table into the generated `.app_build`/`.app_test_build` crates and deletes their `Cargo.lock` on every generation (ESP builder only) so the patch is always resolved afresh. The cost is that those builds aren't locked; both go away once a `bitvec` release with the fix ships (tracked with the reproducible-builds item in contracts#11).
@@ -61,7 +62,7 @@ The actual binary entry point. Generated fresh by `xtask` before every build fro
 | `BLE_TX_CHANNEL` | core → board | `DeviceToApp` | Outbound proto to BLE driver |
 | `MQTT_RX_CHANNEL` | board → core | `AppToDevice` | Raw inbound proto from MQTT driver |
 | `MQTT_TX_CHANNEL` | core → board | `DeviceToApp` | Outbound proto to MQTT driver |
-| `SYSTEM_COMMAND_CHANNEL` | core → board | `SystemCommand` | BLE only; board handles restart etc. |
+| `SYSTEM_COMMAND_CHANNEL` | core → board | `SystemCommand` | BLE only; board handles restart etc. (the CAN read-write commands are handled in core) |
 | `BASIC_CMD_CHANNEL` | core → vehicle | `InboundCommand` | From BLE (MQTT is rejected until authenticated) |
 | `ADVANCED_CMD_CHANNEL` | core → vehicle | `InboundCommand` | BLE only |
 | `CMD_RESP_CHANNEL` | vehicle → core | `(Transport, CommandResponse)` | Transport tag routes response back |

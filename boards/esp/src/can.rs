@@ -235,8 +235,11 @@ mod hardware {
                 }
                 Either4::First(Err(EspTwaiError::BusOff)) => {
                     stats.record_bus_off();
+                    // A bus fault relocks every bus: the vehicle has to validate the car
+                    // again before it can transmit.
+                    core_interface::set_can_read_only(true);
                     log::warn!(
-                        "CAN bus {}: TWAI bus-off, restarting controller in 1s",
+                        "CAN bus {}: TWAI bus-off, buses relocked, restarting controller in 1s",
                         bus_id
                     );
                     Timer::after(Duration::from_secs(1)).await;

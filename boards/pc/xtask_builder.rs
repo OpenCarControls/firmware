@@ -53,6 +53,13 @@ struct PcHardwareConfig {
     ble: PcBleConfig,
     #[serde(default)]
     can_buses: Vec<PcCanBus>,
+    /// Where the owner's CAN read-write approval is kept (the ESP keeps it in flash).
+    #[serde(default = "default_can_rw_approval_file")]
+    can_rw_approval_file: String,
+}
+
+fn default_can_rw_approval_file() -> String {
+    "/tmp/opencar-can-rw-approval.txt".to_string()
 }
 
 pub struct Builder;
@@ -202,6 +209,7 @@ impl TargetBuilder for Builder {
              const BLE_PAIRING_WINDOW_S: u32 = {pair_window};\n\
              const BLE_MAX_BONDED_PHONES: u8 = {max_bonds};\n\
              const BLE_PAIRED_PHONES_FILE: &str = \"{store_path}\";\n\
+             const CAN_RW_APPROVAL_FILE: &str = \"{approval_path}\";\n\
              const MQTT_CLIENT_ID: &str = \"{cid}\";\n\
              const MQTT_CMD_TOPIC: &str = \"{cmd_topic}\";\n\
              const MQTT_DATA_TOPIC: &str = \"{data_topic}\";\n\
@@ -214,6 +222,7 @@ impl TargetBuilder for Builder {
             pair_window = transport.ble.pairing.pairing_window_seconds,
             max_bonds = pc_hw.ble.max_bonded_phones,
             store_path = paired_phones_file,
+            approval_path = escape_rust_string(&pc_hw.can_rw_approval_file),
             cid = client_id,
             cmd_topic = mqtt_cmd_topic,
             data_topic = mqtt_data_topic,
@@ -257,7 +266,8 @@ impl TargetBuilder for Builder {
             .replace("{MTLS_CERTS}", &mtls_certs)
             .replace("{NETWORK_CONSTANTS}", &network_constants)
             .replace("{MQTT_DRIVER_SPAWN}", &mqtt_driver_spawn)
-            .replace("{CAN_LOGGER_SPAWN}", &can_logger_spawn);
+            .replace("{CAN_LOGGER_SPAWN}", &can_logger_spawn)
+            .replace("{BUILD_KIND_INIT}", crate::build_kind_init(config));
 
         fs::create_dir_all(".app_build/src").expect("Failed to create .app_build/src");
         fs::write(".app_build/Cargo.toml", cargo_toml).expect("Failed to write .app_build/Cargo.toml");

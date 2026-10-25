@@ -265,7 +265,7 @@ jobs:
           while IFS=$'\t' read -r -u 3 PROFILE MCU TRIPLE; do
             echo "::group::${PROFILE} (${MCU})"
             sed "s/^hardware_profile = .*/hardware_profile = \"${PROFILE}\"/" config.toml.example > config.toml
-            cargo xtask build --platform "$PLATFORM"
+            cargo xtask build --platform "$PLATFORM" --production
 
             OUT="open-car-${PLATFORM}-${PROFILE}-v${VERSION}.bin"
             espflash save-image --chip "$MCU" --merge ".app_build/target/${TRIPLE}/release/app-build" "./$OUT"

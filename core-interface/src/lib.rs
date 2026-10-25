@@ -6,6 +6,7 @@ pub mod proto {
 }
 
 mod can;
+mod can_access;
 mod can_log;
 mod channels;
 mod dispatch;
@@ -54,6 +55,17 @@ pub use can::{
     CanReadOnlyReceiver, can_read_only_receiver, confirm_car_identity, declare_can_fd_bus,
     is_can_bus_read_only, is_can_fd_bus, is_can_read_only, is_car_identity_confirmed,
     passes_filter, revoke_car_identity, set_can_read_only, vin_matches,
+};
+
+// CAN read-write policy (car fingerprint, owner approval, dev lock)
+pub use can_access::{
+    CanAccessError, CarDigest, approve_can_read_write, can_access_state, can_access_state_update,
+    can_read_write_approval, can_read_write_approval_to_store, confirm_car_fingerprint,
+    declare_production_build, has_can_dev_write_lock, is_can_dev_write_unlocked,
+    is_car_fingerprint_confirmed, publish_can_access_state_if_changed, publish_can_access_task,
+    resend_can_access_state, reset_can_access_for_tests, restore_can_read_write_approval,
+    revoke_can_read_write_approval, set_can_dev_write_unlocked,
+    try_take_can_read_write_approval_to_store,
 };
 
 // CAN logging (SavvyCAN / GVRET)

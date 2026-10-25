@@ -34,7 +34,7 @@ Hardware filters are set to accept-all where driver constraints apply (TWAI on E
 `init_twai` returns a `TwaiDriver` that just owns the TWAI peripheral and pins (`AnyTwai`/`AnyPin`, all `Send`, so it can cross to core 1). esp-hal only takes the operating mode at construction, so `run_twai_loop` builds a `TwaiConfiguration` from `reborrow()`s of those, calls `.into_async().start()` on the core it runs on (binding the TWAI interrupt there; `esp_hal::Async` itself is `!Send`), and rebuilds it whenever the mode has to change.
 
 *   RX is interrupt-driven (esp-hal ISR → 32-frame queue), which keeps frames from being lost on single-core chips while WiFi/BLE are busy.
-*   The session loop sleeps until a frame arrives, a TX frame is queued for this bus, the read-only flag changes, or the next RX stats report is due. TX waits are bounded to 100 ms, RX overruns clear the FIFO, and bus-off rebuilds the controller after 1 s.
+*   The session loop sleeps until a frame arrives, a TX frame is queued for this bus, the read-only flag changes, or the next RX stats report is due. TX waits are bounded to 100 ms, RX overruns clear the FIFO, and bus-off rebuilds the controller after 1 s. A bus-off also relocks every bus (`set_can_read_only(true)`), so the vehicle has to unlock again (see [Read-write policy](#read-write-policy)).
 *   Every 5 s each TWAI bus logs one `info` line with the frames received, how many matched the vehicle filters, RX errors (with the last error kind), overruns and bus-offs since the previous line. A silent bus logs zeros, so the serial console shows whether the car is sending anything. RX errors with no frames usually mean a wrong bitrate, a CAN FD bus or a wiring fault. MCP2515 buses don't have this log yet.
 *   The blocking `nb` path was dropped because esp-hal's blocking `receive()` never releases the FIFO after an overrun, so RX stays dead permanently.
 
@@ -68,14 +68,15 @@ The TWAI and MCP2515 are classic-CAN controllers: in normal mode they would erro
 
 ## Read-only mode
 
-**Purpose:** keep the device completely passive on the bus until the vehicle crate has positively identified the connected car. Where the controller supports it, read-only mode is enforced in hardware (listen-only mode): the device sends no frames, no ACKs and no error frames, so even a wrong bitrate cannot disturb the car's bus.
+**Purpose:** keep the device completely passive on the bus until the vehicle crate has positively identified the connected car and the [read-write policy](#read-write-policy) allows it. Where the controller supports it, read-only mode is enforced in hardware (listen-only mode): the device sends no frames, no ACKs and no error frames, so even a wrong bitrate cannot disturb the car's bus.
 
 **Flag:** `core-interface` — `static CAN_READ_ONLY: AtomicBool = AtomicBool::new(true)`. Defaults to `true` (locked) at boot so no frame can reach the bus before validation.
 
 **Public API (in `core-interface`):**
-*   `pub fn is_can_read_only() -> bool` — vehicle tasks call this to check whether TX is currently blocked. Also `true` while a CAN logging session is active or the car's identity is unconfirmed; both are checked on every read, so a racing unlock can't leave the bus open without a confirmed identity.
-*   `pub fn set_can_read_only(enabled: bool) -> bool` — vehicle tasks call this to unlock (`false`) after validating inbound CAN frames confirm the correct car, or re-lock (`true`) if an error or inconsistent data is detected at any time. Unlocking is **refused** (the bus stays read-only and the call returns `true`) until the car's identity has been confirmed, see below. Returns the resulting state.
-*   `confirm_car_identity()` / `revoke_car_identity()` / `is_car_identity_confirmed()` — the identity gate. `revoke_car_identity()` also re-locks the bus.
+*   `pub fn is_can_read_only() -> bool` — vehicle tasks call this to check whether TX is currently blocked. Also `true` while a CAN logging session is active or any condition of the [read-write policy](#read-write-policy) is unmet (car identity, owner approval, dev lock); all of it is checked on every read, so a racing unlock can't leave the bus open with a condition unmet.
+*   `pub fn set_can_read_only(enabled: bool) -> bool` — vehicle tasks call this to unlock (`false`) after validating inbound CAN frames confirm the correct car, or re-lock (`true`) if an error or inconsistent data is detected at any time. Unlocking is **refused** (the latch stays set) until the car's identity has been confirmed in both stages, see below. An accepted unlock still waits for the owner's approval and the dev lock. Returns the resulting state (`is_can_read_only()`).
+*   `confirm_car_identity()` / `revoke_car_identity()` / `is_car_identity_confirmed()` — the identity gate, first stage (the platform). `revoke_car_identity()` forgets both stages and re-locks the bus.
+*   `confirm_car_fingerprint(fingerprint)` / `is_car_fingerprint_confirmed()` — the second stage (the exact car), see below.
 *   `vin_matches(vin, prefixes)` — checks a VIN the car reported against the VINs a vehicle supports (well-formed 17 characters, then a prefix match: 3 characters for a manufacturer, longer for a model).
 
 ### Enforcement
@@ -93,15 +94,49 @@ Two layers:
 **PC / SocketCAN:** only the software drop applies. Listen-only is a property of the Linux CAN interface, configured with root privileges while the link is down (`ip link set can0 type can bitrate 500000 listen-only on`), and `vcan` does not support it. Configure it on the interface if a PC is attached to a real car.
 
 ### Car identity
-On every boot the device is passive until the vehicle has checked that it is plugged into a car it supports. `core-interface` enforces this: `set_can_read_only(false)` does nothing until the vehicle calls `confirm_car_identity()`, which starts unset at every boot. The vehicle decides how to confirm, from what the car itself reports; the VIN is the intended source (`vin_matches` with the VIN prefixes the vehicle supports). If the identity later changes (a different VIN, inconsistent data) the vehicle calls `revoke_car_identity()`, which also re-locks the bus.
+On every boot the device is passive until the vehicle has checked that it is plugged into a car it supports, and which car. `core-interface` enforces this in two stages, both unset at every boot, and `set_can_read_only(false)` does nothing until both are confirmed:
+
+1.  **Platform.** `confirm_car_identity()`: the vehicle recognised its own platform on the bus (it fingerprints the bus, e.g. "this is an E-GMP bus"), so the firmware matches the car. Commands written for one make never run on another.
+2.  **The exact car.** `confirm_car_fingerprint(fingerprint)`, only accepted after the first stage: bytes that are stable for this one car and differ between cars of the same model. The VIN where the bus carries it (`vin_matches` checks it against the VIN prefixes the vehicle supports), otherwise other identifiers unique to the car (ECU serial numbers, for example), never values that change like the odometer. The owner's approval is bound to it, so a configuration made for one car never runs on another, even the same model.
+
+The vehicle decides how to confirm both, from what the car itself reports; `core-interface` never interprets the fingerprint. If the identity later changes (a different VIN, inconsistent data) the vehicle calls `revoke_car_identity()`, which forgets both stages and re-locks the bus. If a repair changes what the fingerprint is made of (a replaced ECU), the car reads as a different car and the owner has to approve it again; that fails safe.
 
 E-GMP does not confirm an identity yet, so it never unlocks the bus. The VIN has to come from a passive broadcast: reading it with a diagnostic request would need a transmit, which read-only mode forbids. Which E-GMP message carries it is still to be found in a CAN log.
 
 ### Intended vehicle workflow
-1.  Boot: `CAN_READ_ONLY = true`, identity unconfirmed. Vehicle receives CAN frames via `can_rx_task`.
-2.  Vehicle reads the car's VIN from the frames and checks it with `vin_matches`; it also validates frame IDs, data ranges, or handshake frames against its expected car profile.
-3.  On success: `confirm_car_identity()`, then `set_can_read_only(false)` — CAN TX is now live.
+1.  Boot: `CAN_READ_ONLY = true`, identity unconfirmed, dev lock locked; the board restores the owner's approval from storage. Vehicle receives CAN frames via `can_rx_task`.
+2.  Vehicle fingerprints the bus (frame IDs, data ranges, handshake frames against its expected car profile) and calls `confirm_car_identity()`.
+3.  Vehicle identifies the exact car (the VIN, checked with `vin_matches`, or other unique identifiers) and calls `confirm_car_fingerprint(..)`, then `set_can_read_only(false)`. CAN TX is live once the owner has approved this car and, in a development build, the dev lock is unlocked; the vehicle doesn't need to ask again when that happens.
 4.  On any subsequent error or unexpected data: `revoke_car_identity()` re-engages the lock.
+
+## Read-write policy
+
+The device may transmit on the car's buses (read-write mode) only while **all** of these hold. `is_can_read_only()` derives the answer from them every time it is read (`can_access.rs`), so an unmet condition always reads as read-only:
+
+1.  **The car is identified**: both stages of [Car identity](#car-identity), platform and exact car.
+2.  **The owner approved read-write mode for this car.** Given once, after setup, from a bonded phone over BLE (`SetCanReadWriteApprovalCommand`), after the app has shown the risk. Refused while the car isn't identified, since it binds to the identified car.
+3.  **Development builds only: the dev lock is unlocked** (`SetCanDevWriteUnlockCommand`, from a bonded phone over BLE). It is locked at every boot and never stored, so a developer unlocks it deliberately each time. Release builds (`cargo xtask build --production`, which only the release workflow passes) have no dev lock and refuse the command; every other build is a development build, so a missing flag only adds a condition.
+
+On top of that, the vehicle must have asked to unlock (`set_can_read_only(false)`), and no SavvyCAN logging session may be active.
+
+**The approval** is stored as `SHA-256(domain ‖ platform_id ‖ fingerprint)` (`CarDigest`), so no VIN is stored, and it only applies while the identified car has the same digest. It survives reboots and pairing, removing or clearing phones; phones connecting or disconnecting change nothing. It stops applying when the device is moved to another car (the app shows "approved for another car" and the owner can approve this one, which replaces it), and it is cleared by revoking it from the app or by erasing the flash. Firmware for another platform hashes a different `platform_id`, so it never inherits an approval either. The ESP keeps it in flash next to the BLE bonds (see [BLE](ble.md#persistence-power-cycle)); the PC board in the file `[hardware.pc] can_rw_approval_file`. Until the board has restored it at boot, the device counts as not approved. `core-interface` hands every change to the board with `can_read_write_approval_to_store()`.
+
+**Who can change it:** only a bonded phone, over BLE. The dispatcher checks the transport-stamped `source_device_id` against the paired-phone registry (a phone that isn't bonded can still write while the pairing window is open) and answers with a `CommandResponse` (failed with the reason when refused). MQTT drops every `SystemCommand`, so it can never approve, revoke or unlock.
+
+**What relocks the bus:**
+
+| Event | Effect |
+|---|---|
+| Lost identity (`revoke_car_identity()`) | Relocked; the vehicle has to identify the car and unlock again |
+| Bus fault (TWAI bus-off) | Relocked (`set_can_read_only(true)`); the vehicle has to unlock again |
+| SavvyCAN session | Forced read-only while connected, and relocked afterwards |
+| Approval revoked, or the identified car isn't the approved one | Read-only at once; read-write again as soon as the approval matches |
+| Dev lock locked | Read-only at once; read-write again as soon as it is unlocked |
+| Reboot | Latch, identity and dev lock reset; the approval is kept |
+
+The approval and the dev lock are read-time conditions rather than a relock of the latch: the owner can lock and unlock without the vehicle having to validate the car again, and withdrawing either still closes the bus immediately.
+
+**What the app sees:** `SystemState.can_access` (`CanAccessState`): platform confirmed, car identified, the approval compared with this car (`NotApproved`, `Approved`, `OtherCar`, `AwaitingCar`), whether this build has the dev lock and whether it is unlocked, logging, and the effective `read_only`. It is BLE only, sent in a `StateUpdate` of its own (no vehicle state, so the vehicle's message size is unaffected) by `publish_can_access_task` whenever it changes (checked at least once a second), and again when the app subscribes. The fingerprint and the VIN are never sent.
 
 ## SavvyCAN logging
 

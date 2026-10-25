@@ -321,6 +321,7 @@ dependencies = [
  "portable-atomic",
  "prost",
  "prost-build",
+ "sha2",
  "toml",
 ]
 

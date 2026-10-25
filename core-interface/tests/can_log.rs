@@ -179,6 +179,9 @@ fn full_channel_counts_drops_instead_of_blocking() {
 fn session_forces_read_only_and_relocks_afterwards() {
     reset();
     core_interface::confirm_car_identity();
+    assert!(core_interface::confirm_car_fingerprint(b"TEST-CAR"));
+    core_interface::approve_can_read_write().unwrap();
+    core_interface::set_can_dev_write_unlocked(true).unwrap();
     set_can_read_only(false);
     assert!(!is_can_read_only());
 

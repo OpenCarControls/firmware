@@ -5,9 +5,14 @@ use core_interface::{is_can_read_only, set_can_read_only};
 /// Resets the flag to the boot default (true) so each test starts from a known
 /// state regardless of what a prior test left behind. With --test-threads=1 the
 /// tests run sequentially in the same process, sharing the global AtomicBool.
-/// The car identity is confirmed so tests can unlock; the identity tests revoke it.
+/// Every read-write condition is met (platform, car fingerprint, approval, dev lock) so
+/// tests can unlock; the identity tests revoke it. The policy itself is tested in
+/// `can_access.rs`.
 fn reset() {
     core_interface::confirm_car_identity();
+    assert!(core_interface::confirm_car_fingerprint(b"TEST-CAR"));
+    core_interface::approve_can_read_write().unwrap();
+    core_interface::set_can_dev_write_unlocked(true).unwrap();
     set_can_read_only(true);
 }
 
@@ -59,7 +64,13 @@ fn unlock_is_refused_until_identity_is_confirmed() {
     assert!(set_can_read_only(false), "unlock must be refused");
     assert!(is_can_read_only());
 
+    // The platform alone is not enough: the exact car has to be identified too.
     core_interface::confirm_car_identity();
+    assert!(
+        set_can_read_only(false),
+        "unlock must be refused without a car fingerprint"
+    );
+    assert!(core_interface::confirm_car_fingerprint(b"TEST-CAR"));
     assert!(!set_can_read_only(false));
     assert!(!is_can_read_only());
     reset();

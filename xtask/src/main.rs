@@ -19,6 +19,20 @@ pub struct Config {
     /// Populated at runtime from `[patch]` in the root `Cargo.toml`.
     #[serde(skip, default = "default_empty_toml_table")]
     pub workspace_patch: toml::Value,
+    /// `--production`: a release image. Set from the command line, not `config.toml`.
+    #[serde(skip)]
+    pub production: bool,
+}
+
+/// The line the generated `main.rs` runs after `core_interface::init`. A `--production`
+/// build declares itself, which removes the CAN dev write lock; every other build keeps
+/// the lock (one more condition before the device may transmit). See docs/can.md.
+pub fn build_kind_init(config: &Config) -> &'static str {
+    if config.production {
+        "    core_interface::declare_production_build();\n"
+    } else {
+        ""
+    }
 }
 
 fn default_empty_toml_table() -> toml::Value {
@@ -481,7 +495,7 @@ fn main() {
         "build" | "run" | "clippy" | "test" | "flash" | "ide" => {}
         _ => {
             eprintln!(
-                "Usage: cargo xtask <build|run|clippy|test|flash|ide> [config_file.toml] [--board <board>] [--platform <platform>] [--on-hardware] [--debug] [--port <port>] [--monitor]"
+                "Usage: cargo xtask <build|run|clippy|test|flash|ide> [config_file.toml] [--board <board>] [--platform <platform>] [--on-hardware] [--debug] [--production] [--port <port>] [--monitor]"
             );
             exit(1);
         }
@@ -493,6 +507,7 @@ fn main() {
     let mut override_platform: Option<String> = None;
     let mut on_hardware = false;
     let mut release = true;
+    let mut production = false;
     let mut flash_port: Option<String> = None;
     let mut flash_monitor = false;
 
@@ -510,6 +525,9 @@ fn main() {
             }
             "--debug" => {
                 release = false;
+            }
+            "--production" => {
+                production = true;
             }
             "--port" => {
                 flash_port = remaining.next().cloned();
@@ -578,6 +596,7 @@ fn main() {
         }
     }
 
+    config.production = production;
     if let Some(board) = override_board {
         config.target.board = Some(board);
     }

@@ -1,5 +1,6 @@
 mod ble;
 mod can;
+mod can_approval;
 mod can_logger;
 mod network;
 
@@ -7,6 +8,7 @@ use core_interface::SYSTEM_COMMAND_CHANNEL;
 
 pub use ble::{ble_http_task, set_ble_paired_store_path};
 pub use can::socket_can_task;
+pub use can_approval::{can_rw_approval_store_task, restore_can_rw_approval};
 pub use can_logger::can_logger_task;
 pub use network::mqtt_driver_task;
 
@@ -15,6 +17,8 @@ pub fn start(spawner: &embassy_executor::Spawner) {
     spawner.spawn(core_interface::process_mqtt_commands_task().unwrap());
     spawner.spawn(core_interface::route_responses_task().unwrap());
     spawner.spawn(core_interface::publish_state_task().unwrap());
+    spawner.spawn(core_interface::publish_can_access_task().unwrap());
+    spawner.spawn(can_rw_approval_store_task().unwrap());
     spawner.spawn(system_command_task().unwrap());
 }
 
@@ -99,7 +103,10 @@ pub async fn system_command_task() {
             Some(core_interface::proto::system_command::Action::UpdateCanDebugFilters(_)) => {
                 // Deprecated: dropped by core-interface, never forwarded here.
             }
-            None => {}
+            // Handled by core-interface's BLE dispatcher, never forwarded here.
+            Some(core_interface::proto::system_command::Action::SetCanReadWriteApproval(_))
+            | Some(core_interface::proto::system_command::Action::SetCanDevWriteUnlock(_))
+            | None => {}
         }
     }
 }
