@@ -103,6 +103,8 @@ The vehicle decides how to confirm both, from what the car itself reports; `core
 
 E-GMP does not confirm an identity yet, so it never unlocks the bus. The VIN has to come from a passive broadcast: reading it with a diagnostic request would need a transmit, which read-only mode forbids. Which E-GMP message carries it is still to be found in a CAN log.
 
+virtual-car has no real car to recognise: it identifies a simulated car with a fixed fingerprint at boot (`identify_simulated_car()`) and asks to unlock, so its commands work once the owner has approved it (and, in a development build, unlocked the dev lock). Every virtual-car device is the same car to the policy. It is for development only; don't run it on a device plugged into a real car.
+
 ### Intended vehicle workflow
 1.  Boot: `CAN_READ_ONLY = true`, identity unconfirmed, dev lock locked; the board restores the owner's approval from storage. Vehicle receives CAN frames via `can_rx_task`.
 2.  Vehicle fingerprints the bus (frame IDs, data ranges, handshake frames against its expected car profile) and calls `confirm_car_identity()`.
