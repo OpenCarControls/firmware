@@ -8,7 +8,7 @@ use core_interface::{
     can_access_state, can_read_write_approval, clear_paired_phones, confirm_car_fingerprint,
     confirm_car_identity, handle_ble_message, handle_mqtt_message, has_can_dev_write_lock, init,
     is_can_bus_read_only, is_can_dev_write_unlocked, is_can_read_only,
-    is_car_fingerprint_confirmed, proto, publish_can_access_state_if_changed, remove_paired_phone,
+    is_car_fingerprint_confirmed, proto, publish_can_access_state, remove_paired_phone,
     reset_can_access_for_tests, restore_can_read_write_approval, revoke_can_read_write_approval,
     revoke_car_identity, set_can_dev_write_unlocked, set_can_read_only,
     try_take_can_read_write_approval_to_store,
@@ -410,10 +410,10 @@ fn access_state_reports_each_condition() {
 }
 
 #[test]
-fn access_state_is_published_once_per_change_and_only_over_ble() {
+fn access_state_is_published_on_change_and_only_over_ble() {
     boot();
-    assert!(publish_can_access_state_if_changed(1));
-    assert!(!publish_can_access_state_if_changed(2), "unchanged");
+    assert!(publish_can_access_state(1));
+    assert!(!publish_can_access_state(2), "unchanged");
     let msg = BLE_TX_CHANNEL.try_receive().unwrap();
     let update = match msg.payload {
         Some(proto::device_to_app::Payload::StateUpdate(update)) => update,
@@ -424,7 +424,109 @@ fn access_state_is_published_once_per_change_and_only_over_ble() {
     assert_eq!(access.read_only, Some(true));
 
     identify(CAR_A);
-    assert!(publish_can_access_state_if_changed(3));
+    assert!(publish_can_access_state(3));
     assert!(MQTT_TX_CHANNEL.try_receive().is_err());
     drain_tx();
+}
+
+/// A message lost as the app subscribes, or a missed change notification, is replaced
+/// within `CAN_ACCESS_REPEAT_MS` even if nothing changes.
+#[test]
+fn an_unchanged_access_state_is_sent_again_periodically() {
+    use core_interface::CAN_ACCESS_REPEAT_MS;
+    boot();
+    assert!(publish_can_access_state(1_000));
+    assert!(!publish_can_access_state(1_000 + CAN_ACCESS_REPEAT_MS - 1));
+    assert!(publish_can_access_state(1_000 + CAN_ACCESS_REPEAT_MS));
+    assert!(BLE_TX_CHANNEL.try_receive().is_ok());
+    assert!(BLE_TX_CHANNEL.try_receive().is_ok());
+    assert!(BLE_TX_CHANNEL.try_receive().is_err());
+
+    // A full queue leaves it unsent, and the next call retries.
+    drain_tx();
+    while BLE_TX_CHANNEL
+        .try_send(core_interface::can_access_state_update(0))
+        .is_ok()
+    {}
+    assert!(!publish_can_access_state(1_000 + 3 * CAN_ACCESS_REPEAT_MS));
+    drain_tx();
+    assert!(publish_can_access_state(1_000 + 3 * CAN_ACCESS_REPEAT_MS));
+    drain_tx();
+}
+
+// ── Vehicle commands while read-only ──────────────────────────────────────────
+
+fn vehicle_cmd(advanced: bool) -> proto::AppToDevice {
+    proto::AppToDevice {
+        message_id: 11,
+        platform_id: PLATFORM_ID,
+        source_device_id: PHONE.to_vec(),
+        payload: Some(if advanced {
+            Payload::AdvancedCommandBytes(vec![1])
+        } else {
+            Payload::BasicCommandBytes(vec![1])
+        }),
+    }
+}
+
+/// While read-only, vehicle commands are answered with the reason instead of reaching
+/// the vehicle, which would otherwise report success for a command it never sent.
+#[test]
+fn vehicle_commands_are_refused_with_the_reason_while_read_only() {
+    use core_interface::{ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, can_read_only_reason};
+    boot();
+    embassy_futures::block_on(core_interface::reset_ble_controller_lease_for_tests());
+    embassy_futures::block_on(add_paired_phone(PHONE));
+
+    let mut reasons = Vec::new();
+    let mut refused = |expected: &str| {
+        assert_eq!(can_read_only_reason(), Some(expected));
+        for advanced in [false, true] {
+            embassy_futures::block_on(handle_ble_message(vehicle_cmd(advanced)));
+            let resp = ble_response();
+            assert!(!resp.success);
+            assert_eq!(resp.message_id, 11);
+            assert_eq!(resp.status_code, proto::CommandStatusCode::Failed as i32);
+            assert!(
+                resp.error_message.contains("read-only"),
+                "{}",
+                resp.error_message
+            );
+            assert!(
+                resp.error_message.contains(expected),
+                "{}",
+                resp.error_message
+            );
+        }
+        assert!(BASIC_CMD_CHANNEL.try_receive().is_err());
+        assert!(ADVANCED_CMD_CHANNEL.try_receive().is_err());
+        reasons.push(expected.to_string());
+    };
+
+    refused("the car platform is not recognised yet");
+    confirm_car_identity();
+    refused("the car is not identified yet");
+    assert!(confirm_car_fingerprint(CAR_A));
+    refused("control is not approved for this car");
+    approve_can_read_write().unwrap();
+    refused("the developer write lock is locked");
+    set_can_dev_write_unlocked(true).unwrap();
+    refused("the vehicle has not enabled control");
+    assert!(!set_can_read_only(false));
+    assert_eq!(can_read_only_reason(), None);
+
+    // Read-write: commands reach the vehicle again.
+    embassy_futures::block_on(handle_ble_message(vehicle_cmd(false)));
+    assert_eq!(BASIC_CMD_CHANNEL.try_receive().unwrap().message_id, 11);
+    embassy_futures::block_on(handle_ble_message(vehicle_cmd(true)));
+    assert_eq!(ADVANCED_CMD_CHANNEL.try_receive().unwrap().message_id, 11);
+
+    let session = CanLogSession::start().unwrap();
+    refused("CAN logging is active");
+    drop(session);
+
+    revoke_car_identity();
+    identify(CAR_B);
+    refused("control was approved for a different car");
+    assert_eq!(reasons.len(), 7);
 }

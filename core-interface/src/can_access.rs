@@ -237,6 +237,35 @@ pub fn reset_can_access_for_tests() {
     LAST_PUBLISHED.lock(|last| *last.borrow_mut() = None);
 }
 
+/// Why the device is read-only, in words for the app, or `None` while it may transmit.
+/// The first unmet condition, in the order the app's summary uses. Derived from
+/// [`crate::is_can_read_only`], so `None` exactly when that is `false`.
+pub fn can_read_only_reason() -> Option<&'static str> {
+    if !crate::can::is_can_read_only() {
+        return None;
+    }
+    Some(if crate::can_log::is_can_logging() {
+        "CAN logging is active"
+    } else if !crate::can::is_car_identity_confirmed() {
+        "the car platform is not recognised yet"
+    } else if !is_car_fingerprint_confirmed() {
+        "the car is not identified yet"
+    } else if can_read_write_approval() == proto::CanReadWriteApproval::OtherCar {
+        "control was approved for a different car"
+    } else if can_read_write_approval() != proto::CanReadWriteApproval::Approved {
+        "control is not approved for this car"
+    } else if is_can_dev_write_locked() {
+        "the developer write lock is locked"
+    } else {
+        // The vehicle's own lock: not unlocked yet, or relocked after a bus fault.
+        "the vehicle has not enabled control"
+    })
+}
+
+fn is_can_dev_write_locked() -> bool {
+    has_can_dev_write_lock() && !is_can_dev_write_unlocked()
+}
+
 // ── What the app sees ─────────────────────────────────────────────────────────
 
 /// The access state the app shows: which conditions hold and the effective state.
@@ -269,23 +298,38 @@ pub fn can_access_state_update(timestamp_ms: u64) -> proto::DeviceToApp {
     }
 }
 
-/// The last state sent to the app, so unchanged states aren't sent again.
-static LAST_PUBLISHED: Mutex<CriticalSectionRawMutex, RefCell<Option<proto::CanAccessState>>> =
-    Mutex::new(RefCell::new(None));
+/// How often the access state is sent again while unchanged. A message sent just as the
+/// app subscribes can be lost before its notification stream delivers anything, and the
+/// state may not change again for a long time; this bounds how long the app goes without it.
+pub const CAN_ACCESS_REPEAT_MS: u64 = 5_000;
+
+/// The last state queued for the app and when, so unchanged states aren't sent more often
+/// than every [`CAN_ACCESS_REPEAT_MS`].
+static LAST_PUBLISHED: Mutex<
+    CriticalSectionRawMutex,
+    RefCell<Option<(proto::CanAccessState, u64)>>,
+> = Mutex::new(RefCell::new(None));
 
 /// Queues [`can_access_state_update`] on BLE if the state changed since the last one
-/// queued. `try_send`: never blocks; a full queue leaves it unsent, to retry on the next
-/// call. Returns whether a message was queued.
-pub fn publish_can_access_state_if_changed(timestamp_ms: u64) -> bool {
+/// queued, or if that was [`CAN_ACCESS_REPEAT_MS`] or more ago. `try_send`: never blocks;
+/// a full queue leaves it unsent, to retry on the next call. Returns whether a message
+/// was queued.
+pub fn publish_can_access_state(timestamp_ms: u64) -> bool {
     let state = can_access_state();
-    if LAST_PUBLISHED.lock(|last| last.borrow().as_ref() == Some(&state)) {
+    let due = LAST_PUBLISHED.lock(|last| match last.borrow().as_ref() {
+        Some((sent, sent_at)) => {
+            *sent != state || timestamp_ms.saturating_sub(*sent_at) >= CAN_ACCESS_REPEAT_MS
+        }
+        None => true,
+    });
+    if !due {
         return false;
     }
     let msg = can_access_state_update(timestamp_ms);
     if BLE_TX_CHANNEL.try_send(msg).is_err() {
         return false;
     }
-    LAST_PUBLISHED.lock(|last| *last.borrow_mut() = Some(state));
+    LAST_PUBLISHED.lock(|last| *last.borrow_mut() = Some((state, timestamp_ms)));
     true
 }
 
@@ -295,12 +339,13 @@ pub fn resend_can_access_state() {
     CAN_ACCESS_CHANGED.signal(());
 }
 
-/// Publishes the access state over BLE whenever it changes. Also checks once a second,
-/// which retries a send that found the queue full.
+/// Publishes the access state over BLE whenever it changes, and every
+/// [`CAN_ACCESS_REPEAT_MS`] while it doesn't. Also checks once a second, which retries a
+/// send that found the queue full.
 #[embassy_executor::task]
 pub async fn publish_can_access_task() {
     loop {
-        publish_can_access_state_if_changed(Instant::now().as_millis());
+        publish_can_access_state(Instant::now().as_millis());
         let _ = embassy_futures::select::select(
             CAN_ACCESS_CHANGED.wait(),
             Timer::after(Duration::from_secs(1)),

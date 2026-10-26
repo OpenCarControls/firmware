@@ -36,6 +36,17 @@ fn ble_msg_with_source(
     }
 }
 
+/// Meets every CAN read-write condition, so vehicle commands are routed: they are
+/// refused while the device is read-only (tested in `can_access.rs`).
+fn allow_read_write() {
+    core_interface::confirm_car_identity();
+    assert!(core_interface::confirm_car_fingerprint(b"TEST-CAR"));
+    core_interface::approve_can_read_write().unwrap();
+    core_interface::set_can_dev_write_unlocked(true).unwrap();
+    core_interface::set_can_read_only(false);
+    assert!(!core_interface::is_can_read_only());
+}
+
 fn make_system_cmd() -> SystemCommand {
     SystemCommand {
         action: Some(proto::system_command::Action::RestartCommand(
@@ -86,6 +97,7 @@ fn ble_system_command_goes_to_system_channel() {
 #[test]
 fn ble_basic_command_bytes_goes_to_basic_channel_with_ble_transport() {
     init(PLATFORM_ID);
+    allow_read_write();
     embassy_futures::block_on(reset_ble_controller_lease_for_tests());
     let bytes = vec![0xAA, 0xBB];
     let source = vec![1, 2, 3, 4];
@@ -108,6 +120,7 @@ fn ble_basic_command_bytes_goes_to_basic_channel_with_ble_transport() {
 #[test]
 fn ble_advanced_command_bytes_goes_to_advanced_channel() {
     init(PLATFORM_ID);
+    allow_read_write();
     embassy_futures::block_on(reset_ble_controller_lease_for_tests());
     let bytes = vec![0xCC, 0xDD];
     let source = vec![1, 2, 3, 4];
@@ -140,6 +153,7 @@ fn ble_none_payload_drops_silently() {
 #[test]
 fn ble_basic_command_rejected_when_controller_lease_owned_by_another_phone() {
     init(PLATFORM_ID);
+    allow_read_write();
     embassy_futures::block_on(reset_ble_controller_lease_for_tests());
 
     let first = ble_msg_with_source(
@@ -177,6 +191,7 @@ fn ble_basic_command_rejected_when_controller_lease_owned_by_another_phone() {
 #[test]
 fn ble_basic_command_with_empty_source_device_id_is_rejected() {
     init(PLATFORM_ID);
+    allow_read_write();
     embassy_futures::block_on(reset_ble_controller_lease_for_tests());
 
     let msg = ble_msg(

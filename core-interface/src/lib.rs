@@ -59,13 +59,13 @@ pub use can::{
 
 // CAN read-write policy (car fingerprint, owner approval, dev lock)
 pub use can_access::{
-    CanAccessError, CarDigest, approve_can_read_write, can_access_state, can_access_state_update,
-    can_read_write_approval, can_read_write_approval_to_store, confirm_car_fingerprint,
-    declare_production_build, has_can_dev_write_lock, is_can_dev_write_unlocked,
-    is_car_fingerprint_confirmed, publish_can_access_state_if_changed, publish_can_access_task,
-    resend_can_access_state, reset_can_access_for_tests, restore_can_read_write_approval,
-    revoke_can_read_write_approval, set_can_dev_write_unlocked,
-    try_take_can_read_write_approval_to_store,
+    CAN_ACCESS_REPEAT_MS, CanAccessError, CarDigest, approve_can_read_write, can_access_state,
+    can_access_state_update, can_read_only_reason, can_read_write_approval,
+    can_read_write_approval_to_store, confirm_car_fingerprint, declare_production_build,
+    has_can_dev_write_lock, is_can_dev_write_unlocked, is_car_fingerprint_confirmed,
+    publish_can_access_state, publish_can_access_task, resend_can_access_state,
+    reset_can_access_for_tests, restore_can_read_write_approval, revoke_can_read_write_approval,
+    set_can_dev_write_unlocked, try_take_can_read_write_approval_to_store,
 };
 
 // CAN logging (SavvyCAN / GVRET)

@@ -89,6 +89,9 @@ mod hardware {
     /// How long the TX task waits for the MTU exchange before dropping a
     /// message. The exchange normally finishes within a second of encryption.
     const MTU_EXCHANGE_TIMEOUT_MS: u64 = 3000;
+    /// How long after the app subscribes to TX the latest state is sent again. The
+    /// resend sent at once was lost on Android (firmware#76 hardware test).
+    const SUBSCRIBE_RESEND_DELAY_MS: u64 = 500;
 
     const BLE_CONNECTIONS_MAX: usize = 1;
     const BLE_L2CAP_CHANNELS_MAX: usize = 3;
@@ -575,10 +578,17 @@ mod hardware {
 
         // Determine if this phone has a stored bond (RL active → bd_addr is identity).
         let bonds = stack.get_bond_information();
-        let is_known = bonds
+        let known_identity = bonds
             .iter()
-            .any(|b| b.identity.bd_addr == peer_bd_addr || b.identity.match_address(&peer_bd_addr));
+            .find(|b| b.identity.bd_addr == peer_bd_addr || b.identity.match_address(&peer_bd_addr))
+            .map(|b| b.identity.bd_addr);
+        let is_known = known_identity.is_some();
         let max_bonded_phones = core_interface::ble_max_bonded_phones();
+        // The address stamped as `source_device_id`: the bond's identity address, which
+        // the paired-phone registry holds, not the (possibly private, resolvable) address
+        // the phone connected with. Updated once a new bond is stored on this connection,
+        // so a phone that has just paired is recognised as bonded straight away.
+        let mut source_addr = known_identity.unwrap_or(peer_bd_addr);
 
         log::info!(
             "BLE gatt: peer {:02X?} connected — is_known={} pairing_open={}",
@@ -659,7 +669,7 @@ mod hardware {
                     apply_bond_op(op, stack, bond_store).await;
                     let hits_peer = match op {
                         BondOp::Clear => true,
-                        BondOp::Remove(addr) => addr == peer_bd_addr.0,
+                        BondOp::Remove(addr) => addr == peer_bd_addr.0 || addr == source_addr.0,
                     };
                     if hits_peer {
                         log::info!("BLE: disconnecting peer whose bond was revoked");
@@ -706,6 +716,7 @@ mod hardware {
                             &bond_info.identity.bd_addr.0,
                         ))
                         .await;
+                        source_addr = bond_info.identity.bd_addr;
                         log::info!(
                             "BLE: new bond stored inline for {:02X?}",
                             bond_info.identity.bd_addr.raw()
@@ -765,7 +776,7 @@ mod hardware {
                                 // address so the app cannot spoof its identity.
                                 let mut device_id = Vec::with_capacity(10);
                                 device_id.extend_from_slice(b"ble:");
-                                device_id.extend_from_slice(peer_bd_addr.raw());
+                                device_id.extend_from_slice(source_addr.raw());
                                 msg.source_device_id = device_id;
                                 BLE_RX_CHANNEL.send(msg).await;
                             }
@@ -819,8 +830,15 @@ mod hardware {
                     Either::First(msg) => msg,
                     // The app just subscribed: whatever was sent before went nowhere,
                     // so give it the current state now instead of at the next update.
-                    // The CAN access state follows through BLE_TX_CHANNEL.
+                    // Not at once: a notification sent right as the CCCD write is
+                    // accepted is lost before the app's notification stream is
+                    // listening (seen on Android). The CAN access state follows through
+                    // BLE_TX_CHANNEL, and is repeated every few seconds anyway.
                     Either::Second(()) => {
+                        embassy_time::Timer::after(embassy_time::Duration::from_millis(
+                            SUBSCRIBE_RESEND_DELAY_MS,
+                        ))
+                        .await;
                         core_interface::resend_can_access_state();
                         match core_interface::latest_ble_state() {
                             Some(msg) => msg,

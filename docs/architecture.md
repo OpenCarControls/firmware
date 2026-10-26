@@ -75,6 +75,8 @@ The actual binary entry point. Generated fresh by `xtask` before every build fro
 
 **`platform_id`** is a CRC32 of the proto package name (e.g. `0xF7544D7E` for `opencar.cars.virtual_car.v1`), pre-computed and stored in `contracts/.../meta.toml`. xtask injects it as a compile-time constant into `.app_build/src/main.rs`. `core_interface::init(platform_id)` stores it in an `AtomicU32`; the dispatcher tasks validate every inbound message against it and silently drop mismatches.
 
+**Read-only devices:** while the device is CAN read-only, both dispatchers answer `BasicCommandBytes` and `AdvancedCommandBytes` with a failed `CommandResponse` giving the reason instead of routing them (see [CAN](can.md#read-write-policy)).
+
 **MQTT restrictions:** `SystemCommand` and `AdvancedCommandBytes` are restricted to BLE and silently dropped from MQTT. `BasicCommandBytes` are **rejected for now** as well: MQTT commands aren't authenticated (anyone with the broker credentials, which ship in the app, could send or replay one), so `handle_mqtt_message` answers them with a failed `CommandResponse` saying so and never queues them to `BASIC_CMD_CHANNEL`. The gate is the `MQTT_COMMANDS_AUTHENTICATED` constant in `dispatch.rs`; remove it once MQTT commands are authenticated (contracts#8, firmware#16). State updates and heartbeats over MQTT are unaffected.
 
 ### Channel flow
