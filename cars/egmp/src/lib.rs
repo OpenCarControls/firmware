@@ -290,14 +290,14 @@ pub async fn handle_basic_commands_task() {
     loop {
         let inbound = BASIC_CMD_CHANNEL.receiver().receive().await;
         let result = process_basic_command(inbound.bytes.as_slice()).await;
-        commands::respond(inbound.transport, inbound.message_id, result).await;
+        core_interface::respond_to_command(inbound.transport, inbound.message_id, result).await;
     }
 }
 
-/// Decodes a basic command, checks its preconditions (`commands::basic_preconditions`) and only
+/// Decodes a basic command, checks its requirements (`commands::basic_requirements`) and only
 /// then runs it.
-pub async fn process_basic_command(bytes: &[u8]) -> Result<(), commands::CommandError> {
-    use commands::CommandError;
+pub async fn process_basic_command(bytes: &[u8]) -> Result<(), core_interface::CommandError> {
+    use core_interface::CommandError;
     let cmd = proto::BasicCommand::decode(bytes)
         .map_err(|_| CommandError::Failed("Failed to decode BasicCommand"))?;
     let action = cmd
@@ -330,14 +330,14 @@ pub async fn handle_advanced_commands_task() {
     loop {
         let inbound = ADVANCED_CMD_CHANNEL.receiver().receive().await;
         let result = process_advanced_command(inbound.bytes.as_slice()).await;
-        commands::respond(inbound.transport, inbound.message_id, result).await;
+        core_interface::respond_to_command(inbound.transport, inbound.message_id, result).await;
     }
 }
 
-/// Decodes an advanced command, checks its preconditions
-/// (`commands::advanced_preconditions`) and only then runs it.
-pub async fn process_advanced_command(bytes: &[u8]) -> Result<(), commands::CommandError> {
-    use commands::CommandError;
+/// Decodes an advanced command, checks its requirements
+/// (`commands::advanced_requirements`) and only then runs it.
+pub async fn process_advanced_command(bytes: &[u8]) -> Result<(), core_interface::CommandError> {
+    use core_interface::CommandError;
     let cmd = proto::AdvancedCommand::decode(bytes)
         .map_err(|_| CommandError::Failed("Failed to decode AdvancedCommand"))?;
     let action = cmd

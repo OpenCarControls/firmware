@@ -1,6 +1,6 @@
 //! Which of the vehicle's commands the device accepts right now, for the app to grey out.
 //!
-//! The vehicle crate evaluates each command's preconditions (`preconditions.rs`) against its
+//! The vehicle crate evaluates each command's requirements (`requirements.rs`) against its
 //! state and reports the result with [`report_command_availability`], about once a second.
 //! This module keeps the latest report and publishes it to the app over BLE like the CAN
 //! access state: when it changes, repeated while unchanged (a message sent as the app
@@ -13,6 +13,11 @@
 //! - a report older than [`REPORT_MAX_AGE_MS`] (the vehicle stopped reporting) counts as
 //!   unavailable too.
 //!
+//! MQTT apps are told too, for the basic commands only (advanced commands are BLE only), at
+//! the same rate as the MQTT state: every [`COMMAND_AVAILABILITY_REPEAT_MS`] while a client is
+//! active, once per MQTT idle period otherwise. MQTT commands are not authenticated yet, so the
+//! device rejects every one; until that changes they are all reported unavailable over MQTT.
+//!
 //! Commands are identified by their field number in the vehicle's command oneof, so this
 //! module stays vehicle-agnostic.
 
@@ -24,7 +29,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 
-use crate::channels::BLE_TX_CHANNEL;
+use crate::channels::{BLE_TX_CHANNEL, MQTT_TX_CHANNEL};
 use crate::proto;
 use crate::proto::CommandAvailabilityState as State;
 
@@ -62,6 +67,12 @@ static CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 /// The last state queued for the app and when, so unchanged states aren't sent more often
 /// than every [`COMMAND_AVAILABILITY_REPEAT_MS`].
 static LAST_PUBLISHED: Mutex<
+    CriticalSectionRawMutex,
+    RefCell<Option<(proto::CommandAvailability, u64)>>,
+> = Mutex::new(RefCell::new(None));
+
+/// The last state queued for MQTT and when, see [`LAST_PUBLISHED`].
+static LAST_MQTT_PUBLISHED: Mutex<
     CriticalSectionRawMutex,
     RefCell<Option<(proto::CommandAvailability, u64)>>,
 > = Mutex::new(RefCell::new(None));
@@ -163,9 +174,63 @@ pub fn publish_command_availability(timestamp_ms: u64) -> bool {
     true
 }
 
+/// What an MQTT app is told, given what a BLE app is told: the basic commands only, and none
+/// of them available while MQTT commands are rejected as unauthenticated.
+fn mqtt_view(ble: &proto::CommandAvailability) -> proto::CommandAvailability {
+    let mut basic = ble.basic.clone();
+    if !crate::dispatch::MQTT_COMMANDS_AUTHENTICATED {
+        for state in basic.values_mut() {
+            if *state != State::Unsupported as i32 {
+                *state = State::Unavailable as i32;
+            }
+        }
+    }
+    proto::CommandAvailability {
+        basic,
+        advanced: BTreeMap::new(),
+    }
+}
+
+/// What an MQTT app is told at `now_ms`, or `None` while the vehicle has not reported.
+pub fn mqtt_command_availability_at(now_ms: u64) -> Option<proto::CommandAvailability> {
+    command_availability_at(now_ms).map(|ble| mqtt_view(&ble))
+}
+
+/// Queues the availability on MQTT like [`publish_command_availability`] does on BLE, at the
+/// MQTT state's rate: while a client is active when it changed or [`COMMAND_AVAILABILITY_REPEAT_MS`]
+/// passed, otherwise once per MQTT idle period. `try_send`: never blocks the MQTT driver's
+/// queue; a full queue leaves it unsent, to retry on the next call.
+pub fn publish_command_availability_mqtt(timestamp_ms: u64) -> bool {
+    let Some(availability) = mqtt_command_availability_at(timestamp_ms) else {
+        return false;
+    };
+    let active = crate::routing::is_mqtt_active((timestamp_ms / 1000) as u32);
+    let due = LAST_MQTT_PUBLISHED.lock(|last| match last.borrow().as_ref() {
+        None => true,
+        Some((sent, sent_at)) => {
+            let elapsed = timestamp_ms.saturating_sub(*sent_at);
+            if active {
+                *sent != availability || elapsed >= COMMAND_AVAILABILITY_REPEAT_MS
+            } else {
+                elapsed >= u64::from(crate::routing::MQTT_IDLE_RATE_S) * 1_000
+            }
+        }
+    });
+    if !due {
+        return false;
+    }
+    let msg = command_availability_state_update(timestamp_ms, availability.clone());
+    if MQTT_TX_CHANNEL.try_send(msg).is_err() {
+        return false;
+    }
+    LAST_MQTT_PUBLISHED.lock(|last| *last.borrow_mut() = Some((availability, timestamp_ms)));
+    true
+}
+
 /// Sends the availability again even if unchanged, e.g. when the app subscribes.
 pub fn resend_command_availability() {
     LAST_PUBLISHED.lock(|last| *last.borrow_mut() = None);
+    LAST_MQTT_PUBLISHED.lock(|last| *last.borrow_mut() = None);
     CHANGED.signal(());
 }
 
@@ -173,17 +238,20 @@ pub fn resend_command_availability() {
 pub fn reset_command_availability_for_tests() {
     REPORT.lock(|report| *report.borrow_mut() = Report::default());
     LAST_PUBLISHED.lock(|last| *last.borrow_mut() = None);
+    LAST_MQTT_PUBLISHED.lock(|last| *last.borrow_mut() = None);
     CHANGED.reset();
 }
 
-/// Publishes the availability over BLE whenever it changes, and every
+/// Publishes the availability over BLE and MQTT whenever it changes, and every
 /// [`COMMAND_AVAILABILITY_REPEAT_MS`] while it doesn't. Also checks once a second, which
 /// retries a send that found the queue full and picks up a read-only flip or an expired
 /// report.
 #[embassy_executor::task]
 pub async fn publish_command_availability_task() {
     loop {
-        publish_command_availability(Instant::now().as_millis());
+        let now_ms = Instant::now().as_millis();
+        publish_command_availability(now_ms);
+        publish_command_availability_mqtt(now_ms);
         let _ =
             embassy_futures::select::select(CHANGED.wait(), Timer::after(Duration::from_secs(1)))
                 .await;

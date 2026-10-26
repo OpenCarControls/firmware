@@ -15,7 +15,7 @@ use crate::types::{Transport, VehicleStatePayload};
 /// Seconds of silence from any MQTT client before entering idle rate.
 const MQTT_ACTIVITY_WINDOW_S: u32 = 35;
 /// Minimum gap between MQTT state sends while no client is active.
-const MQTT_IDLE_RATE_S: u32 = 30;
+pub(crate) const MQTT_IDLE_RATE_S: u32 = 30;
 
 /// Uptime seconds of the most recent inbound MQTT message (command or heartbeat).
 static LAST_MQTT_RX_SECS: AtomicU32 = AtomicU32::new(0);
@@ -27,6 +27,12 @@ static LAST_MQTT_STATE_SECS: AtomicU32 = AtomicU32::new(0);
 /// so state updates continue to flow at full rate.
 pub fn record_mqtt_activity(secs: u32) {
     LAST_MQTT_RX_SECS.store(secs, Ordering::Relaxed);
+}
+
+/// Whether an MQTT client has been active within the last [`MQTT_ACTIVITY_WINDOW_S`] seconds,
+/// i.e. whether MQTT messages go out at the full rate or the idle rate.
+pub(crate) fn is_mqtt_active(now_secs: u32) -> bool {
+    now_secs.saturating_sub(LAST_MQTT_RX_SECS.load(Ordering::Relaxed)) <= MQTT_ACTIVITY_WINDOW_S
 }
 
 /// Resets MQTT throttle state to boot defaults. For use in tests only.

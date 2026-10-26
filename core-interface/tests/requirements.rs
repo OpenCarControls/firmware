@@ -1,6 +1,6 @@
 use core_interface::{
-    ActivityClock, CMD_RESP_CHANNEL, Preconditions, Rejection, Requirement, Snapshot, Transport,
-    proto, rejection_response, try_send_response,
+    ActivityClock, CMD_RESP_CHANNEL, CommandError, CommandRequirements, Rejection, Requirement,
+    Snapshot, Transport, proto, rejection_response, respond_to_command, try_send_response,
 };
 use embassy_time::{Duration, Instant};
 
@@ -18,8 +18,8 @@ fn parked(holds: Option<bool>) -> Requirement {
     Requirement::new(holds, "car is driving", "driving state unknown")
 }
 
-fn needs_parked(holds: Option<bool>) -> Preconditions {
-    Preconditions::new(MAX_AGE).require(parked(holds))
+fn needs_parked(holds: Option<bool>) -> CommandRequirements {
+    CommandRequirements::new(MAX_AGE).require(parked(holds))
 }
 
 #[test]
@@ -29,7 +29,10 @@ fn passes_when_gate_open_and_requirements_hold() {
 
 #[test]
 fn passes_with_no_requirements() {
-    assert_eq!(Preconditions::new(MAX_AGE).check(&open_gate()), Ok(()));
+    assert_eq!(
+        CommandRequirements::new(MAX_AGE).check(&open_gate()),
+        Ok(())
+    );
 }
 
 #[test]
@@ -83,7 +86,7 @@ fn state_at_exactly_the_limit_is_fresh_and_past_it_is_stale() {
         state_age: Some(MAX_AGE + Duration::from_millis(1)),
         ..open_gate()
     };
-    let p = Preconditions::new(MAX_AGE);
+    let p = CommandRequirements::new(MAX_AGE);
     assert_eq!(p.check(&at_limit), Ok(()));
     assert_eq!(p.check(&past_limit), Err(Rejection::StaleState));
 }
@@ -116,7 +119,7 @@ fn unknown_requirement_fails_closed() {
 
 #[test]
 fn requirements_are_checked_in_order() {
-    let p = Preconditions::new(MAX_AGE)
+    let p = CommandRequirements::new(MAX_AGE)
         .require(Requirement::new(Some(false), "first", "?"))
         .require(Requirement::new(Some(false), "second", "?"));
     assert_eq!(p.check(&open_gate()), Err(Rejection::Unmet("first")));
@@ -188,4 +191,53 @@ fn try_send_response_never_blocks_on_a_full_channel() {
     // The channel holds 4: the rest were dropped rather than waited for.
     assert_eq!(sent, 4);
     while CMD_RESP_CHANNEL.try_receive().is_ok() {}
+}
+
+fn answer(message_id: u64, result: Result<(), CommandError>) {
+    embassy_futures::block_on(respond_to_command(Transport::Ble, message_id, result));
+}
+
+fn take_response() -> proto::CommandResponse {
+    CMD_RESP_CHANNEL.try_receive().expect("a response").1
+}
+
+#[test]
+fn every_outcome_gets_a_response_with_its_status_code() {
+    while CMD_RESP_CHANNEL.try_receive().is_ok() {}
+
+    answer(1, Ok(()));
+    let ok = take_response();
+    assert!(ok.success);
+    assert_eq!(ok.status_code, proto::CommandStatusCode::Ok as i32);
+
+    answer(2, Err(CommandError::Failed("Not implemented")));
+    let failed = take_response();
+    assert!(!failed.success);
+    assert_eq!(failed.error_message, "Not implemented");
+    assert_eq!(failed.status_code, proto::CommandStatusCode::Failed as i32);
+
+    answer(3, Err(CommandError::Rejected(Rejection::StaleState)));
+    let rejected = take_response();
+    assert!(!rejected.success);
+    assert_eq!(rejected.message_id, 3);
+    assert_eq!(rejected.error_message, Rejection::StaleState.message());
+    assert_eq!(
+        rejected.status_code,
+        proto::CommandStatusCode::RejectedUnavailable as i32
+    );
+}
+
+#[test]
+fn a_rejection_does_not_wait_for_a_full_response_channel() {
+    while CMD_RESP_CHANNEL.try_receive().is_ok() {}
+    for id in 0..4 {
+        answer(id, Ok(()));
+    }
+    // Would hang forever if a rejection awaited the full channel.
+    answer(99, Err(CommandError::Rejected(Rejection::StaleState)));
+    let mut ids = Vec::new();
+    while let Ok((_, response)) = CMD_RESP_CHANNEL.try_receive() {
+        ids.push(response.message_id);
+    }
+    assert_eq!(ids, [0, 1, 2, 3], "the rejection was dropped, not queued");
 }

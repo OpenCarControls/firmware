@@ -1,8 +1,8 @@
-//! Shared command preconditions: the check every vehicle command runs before it builds a frame.
+//! Shared command requirements: the check every vehicle command runs before it builds a frame.
 //!
 //! This module knows nothing about cars. A vehicle crate declares what each command needs as a
-//! [`Preconditions`] (how fresh its state must be, plus a list of [`Requirement`]s it evaluated
-//! from its own state), and calls [`Preconditions::check`] with a [`Snapshot`] of the gate
+//! [`CommandRequirements`] (how fresh its state must be, plus a list of [`Requirement`]s it evaluated
+//! from its own state), and calls [`CommandRequirements::check`] with a [`Snapshot`] of the gate
 //! inputs. A command that doesn't hold gets a [`Rejection`] with a clear message, which
 //! [`rejection_response`] turns into a failed `CommandResponse` and [`try_send_response`]
 //! queues without ever blocking.
@@ -123,22 +123,22 @@ impl Requirement {
 
 /// What a command needs before its frames may be built.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Preconditions {
+pub struct CommandRequirements {
     /// The state must have been refreshed at most this long ago.
     pub max_state_age: Duration,
-    pub requirements: Vec<Requirement>,
+    pub required: Vec<Requirement>,
 }
 
-impl Preconditions {
+impl CommandRequirements {
     pub fn new(max_state_age: Duration) -> Self {
         Self {
             max_state_age,
-            requirements: Vec::new(),
+            required: Vec::new(),
         }
     }
 
     pub fn require(mut self, requirement: Requirement) -> Self {
-        self.requirements.push(requirement);
+        self.required.push(requirement);
         self
     }
 
@@ -153,7 +153,7 @@ impl Preconditions {
             Some(age) if age > self.max_state_age => return Err(Rejection::StaleState),
             Some(_) => {}
         }
-        for requirement in &self.requirements {
+        for requirement in &self.required {
             match requirement.holds {
                 Some(true) => {}
                 Some(false) => return Err(Rejection::Unmet(requirement.unmet)),
@@ -221,4 +221,48 @@ pub fn rejection_response(message_id: u64, rejection: &Rejection) -> proto::Comm
 /// the app a retry; nothing was sent to the car.
 pub fn try_send_response(transport: Transport, response: proto::CommandResponse) -> bool {
     CMD_RESP_CHANNEL.try_send((transport, response)).is_ok()
+}
+
+// ── Answering a command ───────────────────────────────────────────────────────
+
+/// Why a command did not succeed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommandError {
+    /// The requirements did not hold. Nothing was built or sent to the car.
+    Rejected(Rejection),
+    /// The command was admitted but failed (decode error, not implemented, ...).
+    Failed(&'static str),
+}
+
+/// Answers a command from a vehicle's handler. A response is always produced, also for a
+/// rejected command.
+///
+/// A rejection is queued with `try_send` ([`try_send_response`]): nothing was done, so losing
+/// it only costs the app a retry. Commands that ran, and ones that failed, keep the blocking
+/// send so their result is not lost.
+pub async fn respond_to_command(
+    transport: Transport,
+    message_id: u64,
+    result: Result<(), CommandError>,
+) {
+    let (success, error_message) = match result {
+        Ok(()) => (true, String::new()),
+        Err(CommandError::Rejected(rejection)) => {
+            try_send_response(transport, rejection_response(message_id, &rejection));
+            return;
+        }
+        Err(CommandError::Failed(message)) => (false, String::from(message)),
+    };
+    let response = proto::CommandResponse {
+        message_id,
+        success,
+        error_message,
+        response_data: None,
+        status_code: if success {
+            proto::CommandStatusCode::Ok
+        } else {
+            proto::CommandStatusCode::Failed
+        } as i32,
+    };
+    CMD_RESP_CHANNEL.sender().send((transport, response)).await;
 }

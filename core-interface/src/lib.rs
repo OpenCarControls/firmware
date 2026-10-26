@@ -13,7 +13,7 @@ mod channels;
 mod dispatch;
 mod lifecycle;
 mod pairing;
-mod preconditions;
+mod requirements;
 mod routing;
 #[cfg(debug_assertions)]
 mod simulation;
@@ -79,15 +79,16 @@ pub use can_log::{
 // Command availability
 pub use availability::{
     COMMAND_AVAILABILITY_REPEAT_MS, CommandKind, REPORT_MAX_AGE_MS, command_availability,
-    command_availability_at, command_availability_state_update, publish_command_availability,
+    command_availability_at, command_availability_state_update, mqtt_command_availability_at,
+    publish_command_availability, publish_command_availability_mqtt,
     publish_command_availability_task, report_command_availability, report_command_availability_at,
     resend_command_availability, reset_command_availability_for_tests,
 };
 
-// Command preconditions
-pub use preconditions::{
-    ActivityClock, Preconditions, Rejection, Requirement, Snapshot, rejection_response,
-    try_send_response,
+// Command requirements
+pub use requirements::{
+    ActivityClock, CommandError, CommandRequirements, Rejection, Requirement, Snapshot,
+    rejection_response, respond_to_command, try_send_response,
 };
 
 // Pairing registry

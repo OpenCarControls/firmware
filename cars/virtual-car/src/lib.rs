@@ -1,7 +1,6 @@
 #![cfg_attr(not(test), no_std)]
 extern crate alloc;
 
-use alloc::string::String;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Timer};
@@ -9,8 +8,9 @@ use embedded_can::{Id, StandardId};
 use prost::Message;
 
 use core_interface::{
-    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, CAN_RX_CHANNEL, CMD_RESP_CHANNEL, CanFilter, CanFrame,
-    VEHICLE_STATE_CHANNEL, VehicleStatePayload,
+    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, CAN_RX_CHANNEL, CanFilter, CanFrame, CommandError,
+    CommandRequirements, Requirement, Snapshot, VEHICLE_STATE_CHANNEL, VehicleStatePayload,
+    respond_to_command,
 };
 
 pub mod proto {
@@ -80,7 +80,7 @@ pub fn tick_simulation(state: &mut VirtualCarState, tick: u64) {
     }
 }
 
-static CAR_STATE: Mutex<CriticalSectionRawMutex, VirtualCarState> =
+pub static CAR_STATE: Mutex<CriticalSectionRawMutex, VirtualCarState> =
     Mutex::new(VirtualCarState::new());
 
 /// The simulated car's fingerprint. There is no real car to recognise, so every
@@ -222,30 +222,21 @@ async fn send_can_request(id: StandardId, data: &[u8]) {
 pub async fn handle_basic_commands_task() {
     loop {
         let inbound = BASIC_CMD_CHANNEL.receiver().receive().await;
-        let (success, error_message) = match process_basic_command(inbound.bytes.as_slice()).await {
-            Ok(()) => (true, String::new()),
-            Err(e) => (false, String::from(e)),
-        };
-        let response = core_interface::proto::CommandResponse {
-            message_id: inbound.message_id,
-            success,
-            error_message,
-            response_data: None,
-            status_code: if success { 1 } else { 2 },
-        };
-        CMD_RESP_CHANNEL
-            .sender()
-            .send((inbound.transport, response))
-            .await;
+        let result = process_basic_command(inbound.bytes.as_slice()).await;
+        respond_to_command(inbound.transport, inbound.message_id, result).await;
     }
 }
 
-pub async fn process_basic_command(bytes: &[u8]) -> Result<(), &'static str> {
-    let cmd = proto::BasicCommand::decode(bytes).map_err(|_| "Failed to decode BasicCommand")?;
+pub async fn process_basic_command(bytes: &[u8]) -> Result<(), CommandError> {
+    let cmd = proto::BasicCommand::decode(bytes)
+        .map_err(|_| CommandError::Failed("Failed to decode BasicCommand"))?;
     match cmd.action {
         Some(proto::basic_command::Action::DoorLock(door_lock)) => {
             let payload = {
                 let mut state = CAR_STATE.lock().await;
+                door_lock_requirements(&state)
+                    .check(&SIMULATED_SNAPSHOT)
+                    .map_err(CommandError::Rejected)?;
                 state.are_doors_locked = Some(door_lock.lock);
                 encode_state(&state)
                 // MutexGuard is dropped here, before the channel send below
@@ -253,7 +244,7 @@ pub async fn process_basic_command(bytes: &[u8]) -> Result<(), &'static str> {
             VEHICLE_STATE_CHANNEL.sender().send(payload).await;
             Ok(())
         }
-        None => Err("No action in BasicCommand"),
+        None => Err(CommandError::Failed("No action in BasicCommand")),
     }
 }
 
@@ -263,28 +254,14 @@ pub async fn process_basic_command(bytes: &[u8]) -> Result<(), &'static str> {
 pub async fn handle_advanced_commands_task() {
     loop {
         let inbound = ADVANCED_CMD_CHANNEL.receiver().receive().await;
-        let (success, error_message) =
-            match process_advanced_command(inbound.bytes.as_slice()).await {
-                Ok(()) => (true, String::new()),
-                Err(e) => (false, String::from(e)),
-            };
-        let response = core_interface::proto::CommandResponse {
-            message_id: inbound.message_id,
-            success,
-            error_message,
-            response_data: None,
-            status_code: if success { 1 } else { 2 },
-        };
-        CMD_RESP_CHANNEL
-            .sender()
-            .send((inbound.transport, response))
-            .await;
+        let result = process_advanced_command(inbound.bytes.as_slice()).await;
+        respond_to_command(inbound.transport, inbound.message_id, result).await;
     }
 }
 
-pub async fn process_advanced_command(bytes: &[u8]) -> Result<(), &'static str> {
-    let cmd =
-        proto::AdvancedCommand::decode(bytes).map_err(|_| "Failed to decode AdvancedCommand")?;
+pub async fn process_advanced_command(bytes: &[u8]) -> Result<(), CommandError> {
+    let cmd = proto::AdvancedCommand::decode(bytes)
+        .map_err(|_| CommandError::Failed("Failed to decode AdvancedCommand"))?;
     match cmd.action {
         Some(proto::advanced_command::Action::ToggleCustomState1(_)) => {
             let payload = {
@@ -295,23 +272,51 @@ pub async fn process_advanced_command(bytes: &[u8]) -> Result<(), &'static str> 
             VEHICLE_STATE_CHANNEL.sender().send(payload).await;
             Ok(())
         }
-        None => Err("No action in AdvancedCommand"),
+        None => Err(CommandError::Failed("No action in AdvancedCommand")),
     }
 }
 
-/// The simulated car has no CAN bus and always fresh state, so its commands are available
-/// whenever the device accepts commands at all; `core-interface` holds them back while it is
-/// read-only (the dispatcher refuses them then too). Ids are the field numbers in the
-/// `BasicCommand` / `AdvancedCommand` oneof.
+/// The ids of the virtual car's commands: their field numbers in the `BasicCommand` /
+/// `AdvancedCommand` oneof. A test pins them to the wire.
 pub const DOOR_LOCK_COMMAND_ID: u32 = 1;
 pub const TOGGLE_CUSTOM_STATE1_COMMAND_ID: u32 = 1;
 
-/// Tells `core-interface` which commands are available. Called every second.
-pub fn report_availability() {
-    use core_interface::proto::CommandAvailabilityState::Available;
+/// The simulated car has no CAN bus and its state is always fresh, so the only inputs of the
+/// requirements check that matter are the car's requirements themselves. That the device is
+/// read-write is enforced by the dispatcher, and `core-interface` holds the availability back
+/// while it is read-only.
+const SIMULATED_SNAPSHOT: Snapshot = Snapshot {
+    read_only_reason: None,
+    state_age: Some(Duration::from_ticks(0)),
+};
+
+/// What the door lock command needs. Locking while the simulated car drives is refused so
+/// that the app's greyed-out buttons and rejection messages can be tried without a car: start
+/// the simulation (it drives for ≈75 s of every ≈100 s cycle).
+fn door_lock_requirements(state: &VirtualCarState) -> CommandRequirements {
+    CommandRequirements::new(Duration::from_secs(1)).require(Requirement::new(
+        state.is_driving.map(|driving| !driving),
+        "command rejected: the car is driving",
+        "command rejected: the car's driving state is not known yet",
+    ))
+}
+
+/// Tells `core-interface` which commands are available, from the same requirements the
+/// handlers check. Called every second.
+pub async fn report_availability() {
+    use core_interface::proto::CommandAvailabilityState::{Available, Unavailable};
+    let door_lock = {
+        let state = CAR_STATE.lock().await;
+        door_lock_requirements(&state)
+            .check(&SIMULATED_SNAPSHOT)
+            .is_ok()
+    };
     core_interface::report_command_availability(
         core_interface::CommandKind::Basic,
-        &[(DOOR_LOCK_COMMAND_ID, Available)],
+        &[(
+            DOOR_LOCK_COMMAND_ID,
+            if door_lock { Available } else { Unavailable },
+        )],
     );
     core_interface::report_command_availability(
         core_interface::CommandKind::Advanced,
@@ -334,7 +339,7 @@ pub async fn state_update_task() {
     let mut seconds: u64 = 0;
     loop {
         Timer::after(Duration::from_secs(1)).await;
-        report_availability();
+        report_availability().await;
         seconds += 1;
         if !seconds.is_multiple_of(STATE_UPDATE_SECONDS) {
             continue;
