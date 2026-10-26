@@ -9,8 +9,7 @@ const MAX_AGE: Duration = Duration::from_secs(10);
 /// A snapshot that passes the gate: identity confirmed, bus unlocked, state 1 s old.
 fn open_gate() -> Snapshot {
     Snapshot {
-        identity_confirmed: true,
-        can_read_only: false,
+        read_only_reason: None,
         state_age: Some(Duration::from_secs(1)),
     }
 }
@@ -34,28 +33,32 @@ fn passes_with_no_requirements() {
 }
 
 #[test]
-fn unconfirmed_identity_is_reported_before_read_only() {
+fn read_only_rejects_with_the_reason() {
     let snapshot = Snapshot {
-        identity_confirmed: false,
-        can_read_only: true,
+        read_only_reason: Some("the developer write lock is locked"),
         ..open_gate()
     };
+    let rejection = needs_parked(Some(true)).check(&snapshot).unwrap_err();
     assert_eq!(
-        needs_parked(Some(true)).check(&snapshot),
-        Err(Rejection::IdentityNotConfirmed)
+        rejection,
+        Rejection::ReadOnly("the developer write lock is locked")
+    );
+    assert_eq!(
+        rejection.message(),
+        "command rejected: the device is read-only: the developer write lock is locked"
     );
 }
 
 #[test]
-fn read_only_rejects_even_with_confirmed_identity() {
+fn read_only_is_reported_before_staleness_and_requirements() {
     let snapshot = Snapshot {
-        can_read_only: true,
-        ..open_gate()
+        read_only_reason: Some("CAN logging is active"),
+        state_age: None,
     };
-    assert_eq!(
-        needs_parked(Some(true)).check(&snapshot),
-        Err(Rejection::CanReadOnly)
-    );
+    assert!(matches!(
+        needs_parked(Some(false)).check(&snapshot),
+        Err(Rejection::ReadOnly(_))
+    ));
 }
 
 #[test]
@@ -139,31 +142,31 @@ fn activity_clock_ages() {
 }
 
 #[test]
-fn snapshot_capture_reads_the_live_gate() {
+fn snapshot_capture_reads_the_live_policy() {
     let clock = ActivityClock::new();
+    core_interface::reset_can_access_for_tests();
     core_interface::revoke_car_identity();
     let snapshot = Snapshot::capture(&clock);
-    assert!(!snapshot.identity_confirmed);
-    assert!(snapshot.can_read_only);
+    assert_eq!(
+        snapshot.read_only_reason,
+        core_interface::can_read_only_reason()
+    );
+    assert!(snapshot.read_only_reason.is_some());
     assert_eq!(snapshot.state_age, None);
 
-    core_interface::confirm_car_identity();
-    core_interface::set_can_read_only(false);
     clock.touch();
-    let snapshot = Snapshot::capture(&clock);
-    assert!(snapshot.identity_confirmed);
-    assert!(!snapshot.can_read_only);
-    assert!(snapshot.state_age.is_some());
-
-    core_interface::revoke_car_identity();
+    assert!(Snapshot::capture(&clock).state_age.is_some());
 }
 
 #[test]
 fn rejection_response_is_failed_with_the_message() {
-    let response = rejection_response(7, &Rejection::CanReadOnly);
+    let response = rejection_response(7, &Rejection::ReadOnly("CAN logging is active"));
     assert_eq!(response.message_id, 7);
     assert!(!response.success);
-    assert_eq!(response.error_message, Rejection::CanReadOnly.message());
+    assert_eq!(
+        response.error_message,
+        Rejection::ReadOnly("CAN logging is active").message()
+    );
     assert_eq!(
         response.status_code,
         proto::CommandStatusCode::Failed as i32

@@ -3,10 +3,16 @@
 //! This module knows nothing about cars. A vehicle crate declares what each command needs as a
 //! [`Preconditions`] (how fresh its state must be, plus a list of [`Requirement`]s it evaluated
 //! from its own state), and calls [`Preconditions::check`] with a [`Snapshot`] of the gate
-//! inputs. A command that doesn't hold gets a [`Rejection`] with a fixed message, which
+//! inputs. A command that doesn't hold gets a [`Rejection`] with a clear message, which
 //! [`rejection_response`] turns into a failed `CommandResponse` and [`try_send_response`]
 //! queues without ever blocking.
+//!
+//! The BLE/MQTT dispatcher already refuses commands while the device is read-only (the CAN
+//! read-write policy, `can_access.rs`). The check here repeats that against the live flag,
+//! because a command can wait in the queue while the policy changes, and adds what only the
+//! vehicle knows: how fresh its state is and what the car must be doing.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::Cell;
@@ -74,20 +80,18 @@ impl Default for ActivityClock {
 /// The inputs of the gate at the moment a command arrives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Snapshot {
-    /// [`is_car_identity_confirmed`](crate::is_car_identity_confirmed).
-    pub identity_confirmed: bool,
-    /// [`is_can_read_only`](crate::is_can_read_only).
-    pub can_read_only: bool,
+    /// Why the device is read-only, `None` while it may transmit
+    /// ([`can_read_only_reason`](crate::can_read_only_reason)).
+    pub read_only_reason: Option<&'static str>,
     /// Time since the vehicle last heard from the car; `None` if it never has.
     pub state_age: Option<Duration>,
 }
 
 impl Snapshot {
-    /// Reads the live read-only flag and identity gate, plus the age from `clock`.
+    /// Reads the live read-write policy, plus the age from `clock`.
     pub fn capture(clock: &ActivityClock) -> Self {
         Self {
-            identity_confirmed: crate::is_car_identity_confirmed(),
-            can_read_only: crate::is_can_read_only(),
+            read_only_reason: crate::can_read_only_reason(),
             state_age: clock.age(),
         }
     }
@@ -139,15 +143,10 @@ impl Preconditions {
     }
 
     /// Checks the gate, in this order, and returns the first reason the command can't run:
-    /// car identity, CAN read-only, state freshness, then each requirement in the order added.
+    /// the device is read-only, state freshness, then each requirement in the order added.
     pub fn check(&self, snapshot: &Snapshot) -> Result<(), Rejection> {
-        // Identity before read-only: `is_can_read_only()` is also true while the identity is
-        // unconfirmed, and the identity is the more useful message.
-        if !snapshot.identity_confirmed {
-            return Err(Rejection::IdentityNotConfirmed);
-        }
-        if snapshot.can_read_only {
-            return Err(Rejection::CanReadOnly);
+        if let Some(reason) = snapshot.read_only_reason {
+            return Err(Rejection::ReadOnly(reason));
         }
         match snapshot.state_age {
             None => return Err(Rejection::NoCarData),
@@ -170,8 +169,8 @@ impl Preconditions {
 /// Why a command was not run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rejection {
-    IdentityNotConfirmed,
-    CanReadOnly,
+    /// The device must not transmit; carries the reason, e.g. "the car is not identified yet".
+    ReadOnly(&'static str),
     /// The vehicle has not heard from the car since boot.
     NoCarData,
     /// The last word from the car is older than the command allows, e.g. the car is asleep or
@@ -184,17 +183,17 @@ pub enum Rejection {
 }
 
 impl Rejection {
-    pub const fn message(&self) -> &'static str {
+    /// The message for the app. The read-only wording matches the dispatcher's.
+    pub fn message(&self) -> String {
         match self {
-            Rejection::IdentityNotConfirmed => {
-                "command rejected: the car has not been identified yet"
+            Rejection::ReadOnly(reason) => {
+                format!("command rejected: the device is read-only: {reason}")
             }
-            Rejection::CanReadOnly => "command rejected: the CAN bus is read-only",
-            Rejection::NoCarData => "command rejected: no data from the car yet",
-            Rejection::StaleState => {
-                "command rejected: car state is out of date (car asleep or CAN bus silent)"
-            }
-            Rejection::Unmet(message) | Rejection::Unknown(message) => message,
+            Rejection::NoCarData => String::from("command rejected: no data from the car yet"),
+            Rejection::StaleState => String::from(
+                "command rejected: car state is out of date (car asleep or CAN bus silent)",
+            ),
+            Rejection::Unmet(message) | Rejection::Unknown(message) => String::from(*message),
         }
     }
 }
@@ -207,7 +206,7 @@ pub fn rejection_response(message_id: u64, rejection: &Rejection) -> proto::Comm
     proto::CommandResponse {
         message_id,
         success: false,
-        error_message: String::from(rejection.message()),
+        error_message: rejection.message(),
         response_data: None,
         status_code: proto::CommandStatusCode::Failed as i32,
     }

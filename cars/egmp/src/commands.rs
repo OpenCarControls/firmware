@@ -160,8 +160,7 @@ mod tests {
 
     fn open_gate() -> Snapshot {
         Snapshot {
-            identity_confirmed: true,
-            can_read_only: false,
+            read_only_reason: None,
             state_age: Some(FRESH),
         }
     }
@@ -298,9 +297,22 @@ mod tests {
 
     // ── Through the handlers (shares the process-global gate and CAR_STATE) ──
 
+    /// Boot state: nothing identified, approved or unlocked, so the device is read-only.
+    fn boot() {
+        core_interface::reset_can_access_for_tests();
+        core_interface::revoke_car_identity();
+        core_interface::set_can_read_only(true);
+        while CMD_RESP_CHANNEL.try_receive().is_ok() {}
+    }
+
+    /// Every condition of the read-write policy met, and the car heard just now.
     fn open_the_gate() {
+        boot();
         core_interface::confirm_car_identity();
-        core_interface::set_can_read_only(false);
+        assert!(core_interface::confirm_car_fingerprint(b"TEST-CAR"));
+        core_interface::approve_can_read_write().unwrap();
+        core_interface::set_can_dev_write_unlocked(true).unwrap();
+        assert!(!core_interface::set_can_read_only(false));
         CAR_ACTIVITY.touch_at(Instant::now());
     }
 
@@ -313,18 +325,21 @@ mod tests {
 
     fn error_message(result: Result<(), CommandError>) -> String {
         match result {
-            Err(CommandError::Rejected(r)) => String::from(r.message()),
+            Err(CommandError::Rejected(r)) => r.message(),
             Err(CommandError::Failed(m)) => String::from(m),
             Ok(()) => String::from("ok"),
         }
     }
 
     #[test]
-    fn handler_rejects_before_not_implemented_while_identity_unconfirmed() {
-        core_interface::revoke_car_identity();
+    fn handler_rejects_before_not_implemented_while_read_only() {
+        boot();
         let bytes = encode(Action::FlashLightsCommand(proto::FlashLightsCommand {}));
         let message = error_message(block_on(crate::process_basic_command(&bytes)));
-        assert_eq!(message, Rejection::IdentityNotConfirmed.message());
+        assert_eq!(
+            message,
+            "command rejected: the device is read-only: the car platform is not recognised yet"
+        );
     }
 
     #[test]
@@ -333,24 +348,22 @@ mod tests {
         let bytes = encode(Action::FlashLightsCommand(proto::FlashLightsCommand {}));
         let message = error_message(block_on(crate::process_basic_command(&bytes)));
         assert_eq!(message, "Not implemented");
-        core_interface::revoke_car_identity();
+        boot();
     }
 
     #[test]
     fn handler_rejects_when_the_bus_was_never_heard() {
-        core_interface::confirm_car_identity();
-        core_interface::set_can_read_only(false);
+        open_the_gate();
         CAR_ACTIVITY.reset();
         let bytes = encode(Action::FlashLightsCommand(proto::FlashLightsCommand {}));
         let message = error_message(block_on(crate::process_basic_command(&bytes)));
         assert_eq!(message, Rejection::NoCarData.message());
-        core_interface::revoke_car_identity();
+        boot();
     }
 
     #[test]
     fn rejected_command_is_always_answered() {
-        core_interface::revoke_car_identity();
-        while CMD_RESP_CHANNEL.try_receive().is_ok() {}
+        boot();
         let bytes = encode(Action::FlashLightsCommand(proto::FlashLightsCommand {}));
         block_on(respond(
             Transport::Ble,
@@ -360,9 +373,10 @@ mod tests {
         let (_, response) = CMD_RESP_CHANNEL.try_receive().expect("a response");
         assert_eq!(response.message_id, 9);
         assert!(!response.success);
-        assert_eq!(
-            response.error_message,
-            Rejection::IdentityNotConfirmed.message()
+        assert!(
+            response
+                .error_message
+                .starts_with("command rejected: the device is read-only")
         );
     }
 
