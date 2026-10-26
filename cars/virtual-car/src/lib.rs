@@ -299,6 +299,29 @@ pub async fn process_advanced_command(bytes: &[u8]) -> Result<(), &'static str> 
     }
 }
 
+/// The simulated car has no CAN bus and always fresh state, so its commands are available
+/// whenever the device accepts commands at all; `core-interface` holds them back while it is
+/// read-only (the dispatcher refuses them then too). Ids are the field numbers in the
+/// `BasicCommand` / `AdvancedCommand` oneof.
+pub const DOOR_LOCK_COMMAND_ID: u32 = 1;
+pub const TOGGLE_CUSTOM_STATE1_COMMAND_ID: u32 = 1;
+
+/// Tells `core-interface` which commands are available. Called every second.
+pub fn report_availability() {
+    use core_interface::proto::CommandAvailabilityState::Available;
+    core_interface::report_command_availability(
+        core_interface::CommandKind::Basic,
+        &[(DOOR_LOCK_COMMAND_ID, Available)],
+    );
+    core_interface::report_command_availability(
+        core_interface::CommandKind::Advanced,
+        &[(TOGGLE_CUSTOM_STATE1_COMMAND_ID, Available)],
+    );
+}
+
+/// Seconds between simulated state updates.
+const STATE_UPDATE_SECONDS: u64 = 5;
+
 /// Periodically advances the simulation by one tick and pushes the resulting
 /// state to `VEHICLE_STATE_CHANNEL`. Fires every 5 seconds (20 ticks ≈ 100 s
 /// per full drive cycle). Primary state mutations are still driven by
@@ -308,8 +331,14 @@ pub async fn process_advanced_command(bytes: &[u8]) -> Result<(), &'static str> 
 pub async fn state_update_task() {
     identify_simulated_car();
     let mut tick: u64 = 0;
+    let mut seconds: u64 = 0;
     loop {
-        Timer::after(Duration::from_secs(5)).await;
+        Timer::after(Duration::from_secs(1)).await;
+        report_availability();
+        seconds += 1;
+        if !seconds.is_multiple_of(STATE_UPDATE_SECONDS) {
+            continue;
+        }
         let payload = {
             #[allow(unused_mut)]
             let mut state = CAR_STATE.lock().await;

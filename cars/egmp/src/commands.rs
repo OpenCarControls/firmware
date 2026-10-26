@@ -3,9 +3,11 @@
 //! the command. The table of preconditions per command is in `docs/commands.md`.
 
 use alloc::string::String;
+use alloc::vec::Vec;
+use core_interface::proto::CommandAvailabilityState as Availability;
 use core_interface::{
-    ActivityClock, CMD_RESP_CHANNEL, Preconditions, Rejection, Requirement, Snapshot, Transport,
-    rejection_response, try_send_response,
+    ActivityClock, CMD_RESP_CHANNEL, CommandKind, Preconditions, Rejection, Requirement, Snapshot,
+    Transport, rejection_response, report_command_availability, try_send_response,
 };
 use embassy_time::Duration;
 
@@ -93,6 +95,94 @@ pub fn advanced_preconditions(action: &proto::advanced_command::Action) -> Preco
             Preconditions::new(MAX_STATE_AGE)
         }
     }
+}
+
+// ── Availability ──────────────────────────────────────────────────────────────
+
+/// The commands as the app identifies them: the field number in the `BasicCommand` /
+/// `AdvancedCommand` oneof of `egmp.proto`. A test pins them to the wire.
+pub mod command_id {
+    pub const DOOR_LOCK: u32 = 1;
+    pub const CHARGE_PORT: u32 = 2;
+    pub const FLASH_LIGHTS: u32 = 3;
+    pub const CLIMATE_CONTROL: u32 = 4;
+    pub const WINDOW: u32 = 5;
+    pub const BATTERY_PRECONDITIONING: u32 = 1;
+}
+
+/// Each basic command with the requests the app can make of it. A command is available when
+/// at least one of them would be accepted: the door lock command, for example, is available
+/// while either locking or unlocking would change something.
+fn basic_variants() -> Vec<(u32, Vec<Action>)> {
+    use command_id::*;
+    alloc::vec![
+        (
+            DOOR_LOCK,
+            [true, false]
+                .map(|lock| Action::DoorLockCommand(proto::DoorLockCommand { lock }))
+                .into()
+        ),
+        (
+            CHARGE_PORT,
+            [true, false]
+                .map(|open| Action::ChargePortCommand(proto::ChargePortCommand { open }))
+                .into()
+        ),
+        (
+            FLASH_LIGHTS,
+            alloc::vec![Action::FlashLightsCommand(proto::FlashLightsCommand {})]
+        ),
+        (
+            CLIMATE_CONTROL,
+            alloc::vec![Action::ClimateControlCommand(
+                proto::ClimateControlCommand::default()
+            )]
+        ),
+        (
+            WINDOW,
+            alloc::vec![Action::WindowCommand(proto::WindowCommand::default())]
+        ),
+    ]
+}
+
+fn availability(accepted: bool) -> Availability {
+    if accepted {
+        Availability::Available
+    } else {
+        Availability::Unavailable
+    }
+}
+
+/// What the app is told about each basic command: available exactly when
+/// [`basic_preconditions`] would let the command through.
+pub fn basic_availability(state: &EgmpCarState, snapshot: &Snapshot) -> Vec<(u32, Availability)> {
+    basic_variants()
+        .into_iter()
+        .map(|(id, actions)| {
+            let accepted = actions
+                .iter()
+                .any(|action| basic_preconditions(action, state).check(snapshot).is_ok());
+            (id, availability(accepted))
+        })
+        .collect()
+}
+
+/// What the app is told about each advanced command, see [`basic_availability`].
+pub fn advanced_availability(snapshot: &Snapshot) -> Vec<(u32, Availability)> {
+    let action = proto::advanced_command::Action::BatteryPreconditioningCommand(
+        proto::BatteryPreconditioningCommand { enable: true },
+    );
+    let accepted = advanced_preconditions(&action).check(snapshot).is_ok();
+    alloc::vec![(command_id::BATTERY_PRECONDITIONING, availability(accepted))]
+}
+
+/// Evaluates every command against the live car state and tells `core-interface`, which
+/// publishes it to the app. Called about once a second by `state_update_task`.
+pub async fn report_availability() {
+    let snapshot = Snapshot::capture(&CAR_ACTIVITY);
+    let basic = basic_availability(&*CAR_STATE.lock().await, &snapshot);
+    report_command_availability(CommandKind::Basic, &basic);
+    report_command_availability(CommandKind::Advanced, &advanced_availability(&snapshot));
 }
 
 // ── Admission ─────────────────────────────────────────────────────────────────
@@ -397,5 +487,176 @@ mod tests {
             Err(CommandError::Rejected(Rejection::StaleState)),
         ));
         while CMD_RESP_CHANNEL.try_receive().is_ok() {}
+    }
+    // ── Availability ──
+
+    fn avail(list: &[(u32, Availability)], id: u32) -> Availability {
+        list.iter()
+            .find(|(i, _)| *i == id)
+            .expect("command listed")
+            .1
+    }
+
+    #[test]
+    fn command_ids_are_the_wire_field_numbers() {
+        use command_id::*;
+        let first_field = |bytes: alloc::vec::Vec<u8>| u32::from(bytes[0] >> 3);
+        let basic = |action| first_field(encode(action));
+        assert_eq!(basic(lock(true)), DOOR_LOCK);
+        assert_eq!(basic(charge_port(true)), CHARGE_PORT);
+        assert_eq!(
+            basic(Action::FlashLightsCommand(proto::FlashLightsCommand {})),
+            FLASH_LIGHTS
+        );
+        assert_eq!(
+            basic(Action::ClimateControlCommand(
+                proto::ClimateControlCommand::default()
+            )),
+            CLIMATE_CONTROL
+        );
+        assert_eq!(
+            basic(Action::WindowCommand(proto::WindowCommand::default())),
+            WINDOW
+        );
+        let advanced = proto::AdvancedCommand {
+            action: Some(
+                proto::advanced_command::Action::BatteryPreconditioningCommand(
+                    proto::BatteryPreconditioningCommand { enable: true },
+                ),
+            ),
+        }
+        .encode_to_vec();
+        assert_eq!(first_field(advanced), BATTERY_PRECONDITIONING);
+    }
+
+    #[test]
+    fn every_basic_command_is_listed() {
+        let ids: alloc::vec::Vec<u32> = basic_availability(&parked(), &open_gate())
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(ids, [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn parked_car_with_known_state_has_everything_available() {
+        let state = EgmpCarState {
+            are_doors_locked: Some(true),
+            charge_port_state: Some(ChargePortState::Closed),
+            ..parked()
+        };
+        let list = basic_availability(&state, &open_gate());
+        assert!(list.iter().all(|(_, a)| *a == Availability::Available));
+        assert_eq!(
+            advanced_availability(&open_gate()),
+            [(command_id::BATTERY_PRECONDITIONING, Availability::Available)]
+        );
+    }
+
+    #[test]
+    fn driving_makes_the_charge_port_and_windows_unavailable_only() {
+        let state = EgmpCarState {
+            are_doors_locked: Some(true),
+            charge_port_state: Some(ChargePortState::Closed),
+            ..driving()
+        };
+        let list = basic_availability(&state, &open_gate());
+        assert_eq!(
+            avail(&list, command_id::CHARGE_PORT),
+            Availability::Unavailable
+        );
+        assert_eq!(avail(&list, command_id::WINDOW), Availability::Unavailable);
+        assert_eq!(avail(&list, command_id::DOOR_LOCK), Availability::Available);
+        assert_eq!(
+            avail(&list, command_id::FLASH_LIGHTS),
+            Availability::Available
+        );
+    }
+
+    #[test]
+    fn unknown_state_makes_the_commands_that_need_it_unavailable() {
+        let list = basic_availability(&EgmpCarState::new(), &open_gate());
+        assert_eq!(
+            avail(&list, command_id::DOOR_LOCK),
+            Availability::Unavailable
+        );
+        assert_eq!(
+            avail(&list, command_id::CHARGE_PORT),
+            Availability::Unavailable
+        );
+        assert_eq!(
+            avail(&list, command_id::FLASH_LIGHTS),
+            Availability::Available
+        );
+    }
+
+    #[test]
+    fn a_silent_or_read_only_device_makes_everything_unavailable() {
+        let stale = Snapshot {
+            state_age: Some(MAX_STATE_AGE + Duration::from_secs(1)),
+            ..open_gate()
+        };
+        let read_only = Snapshot {
+            read_only_reason: Some("the car is not identified yet"),
+            ..open_gate()
+        };
+        for snapshot in [stale, read_only] {
+            assert!(
+                basic_availability(&parked(), &snapshot)
+                    .iter()
+                    .all(|(_, a)| *a == Availability::Unavailable)
+            );
+            assert!(
+                advanced_availability(&snapshot)
+                    .iter()
+                    .all(|(_, a)| *a == Availability::Unavailable)
+            );
+        }
+    }
+
+    #[test]
+    fn availability_matches_what_the_handler_accepts() {
+        // The app greys out exactly the commands the handler would reject.
+        for state in [driving(), parked(), EgmpCarState::new()] {
+            let list = basic_availability(&state, &open_gate());
+            for (id, variants) in basic_variants() {
+                let accepted = variants
+                    .iter()
+                    .any(|a| basic_preconditions(a, &state).check(&open_gate()).is_ok());
+                assert_eq!(avail(&list, id) == Availability::Available, accepted);
+            }
+        }
+    }
+
+    #[test]
+    fn reported_availability_reaches_core_and_follows_the_policy() {
+        use core_interface::command_availability;
+        core_interface::reset_command_availability_for_tests();
+        open_the_gate();
+        {
+            let mut state = block_on(CAR_STATE.lock());
+            *state = EgmpCarState {
+                are_doors_locked: Some(false),
+                charge_port_state: Some(ChargePortState::Closed),
+                ..parked()
+            };
+        }
+        block_on(report_availability());
+        let shown = command_availability().expect("reported");
+        assert_eq!(
+            shown.basic[&command_id::DOOR_LOCK],
+            Availability::Available as i32
+        );
+
+        // Read-only again: core holds everything back without waiting for a new report.
+        boot();
+        let shown = command_availability().expect("reported");
+        assert!(
+            shown
+                .basic
+                .values()
+                .all(|a| *a == Availability::Unavailable as i32)
+        );
+        *block_on(CAR_STATE.lock()) = EgmpCarState::new();
     }
 }

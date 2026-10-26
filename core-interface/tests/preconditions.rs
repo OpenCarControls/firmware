@@ -159,7 +159,7 @@ fn snapshot_capture_reads_the_live_policy() {
 }
 
 #[test]
-fn rejection_response_is_failed_with_the_message() {
+fn rejection_response_is_unavailable_with_the_message() {
     let response = rejection_response(7, &Rejection::ReadOnly("CAN logging is active"));
     assert_eq!(response.message_id, 7);
     assert!(!response.success);
@@ -169,7 +169,7 @@ fn rejection_response_is_failed_with_the_message() {
     );
     assert_eq!(
         response.status_code,
-        proto::CommandStatusCode::Failed as i32
+        proto::CommandStatusCode::RejectedUnavailable as i32
     );
 }
 

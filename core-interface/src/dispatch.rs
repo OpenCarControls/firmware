@@ -147,7 +147,7 @@ fn read_only_rejection(message_id: u64) -> Option<proto::DeviceToApp> {
                     "command rejected: the device is read-only: {reason}"
                 ),
                 response_data: None,
-                status_code: proto::CommandStatusCode::Failed as i32,
+                status_code: proto::CommandStatusCode::RejectedUnavailable as i32,
             },
         )),
     })

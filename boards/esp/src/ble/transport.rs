@@ -840,6 +840,7 @@ mod hardware {
                         ))
                         .await;
                         core_interface::resend_can_access_state();
+                        core_interface::resend_command_availability();
                         match core_interface::latest_ble_state() {
                             Some(msg) => msg,
                             None => continue,

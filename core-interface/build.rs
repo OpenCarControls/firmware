@@ -5,7 +5,8 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-changed=../contracts/opencar/core/v1/system.proto");
     println!("cargo:rerun-if-changed=../contracts/opencar/core/v1/transport.toml");
 
-    prost_build::compile_protos(
+    // `BTreeMap` for proto maps: the default `HashMap` needs std, and this crate is no_std.
+    prost_build::Config::new().btree_map(["."]).compile_protos(
         &["../contracts/opencar/core/v1/core.proto"],
         &["../contracts/"],
     )?;

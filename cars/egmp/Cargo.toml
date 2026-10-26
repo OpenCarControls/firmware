@@ -24,4 +24,8 @@ build-utils = { path = "../../build-utils" }
 [dev-dependencies]
 critical-section = { workspace = true }
 embassy-futures = { workspace = true }
+# The host time driver, for tests that read the clock.
+embassy-time = { workspace = true, features = ["std"] }
+# Supplies `__pender` for the host tests.
+embassy-executor = { workspace = true, features = ["platform-std", "executor-thread"] }
 

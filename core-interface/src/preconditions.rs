@@ -200,15 +200,15 @@ impl Rejection {
 
 // ── Responses ─────────────────────────────────────────────────────────────────
 
-/// The failed `CommandResponse` for a rejected command. It uses the generic `Failed` status
-/// code until the dedicated one from contracts#13 exists.
+/// The failed `CommandResponse` for a rejected command, with the dedicated
+/// `REJECTED_UNAVAILABLE` status code so the app can tell it from a failure.
 pub fn rejection_response(message_id: u64, rejection: &Rejection) -> proto::CommandResponse {
     proto::CommandResponse {
         message_id,
         success: false,
         error_message: rejection.message(),
         response_data: None,
-        status_code: proto::CommandStatusCode::Failed as i32,
+        status_code: proto::CommandStatusCode::RejectedUnavailable as i32,
     }
 }
 

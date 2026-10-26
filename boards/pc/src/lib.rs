@@ -18,6 +18,7 @@ pub fn start(spawner: &embassy_executor::Spawner) {
     spawner.spawn(core_interface::route_responses_task().unwrap());
     spawner.spawn(core_interface::publish_state_task().unwrap());
     spawner.spawn(core_interface::publish_can_access_task().unwrap());
+    spawner.spawn(core_interface::publish_command_availability_task().unwrap());
     spawner.spawn(can_rw_approval_store_task().unwrap());
     spawner.spawn(system_command_task().unwrap());
 }
