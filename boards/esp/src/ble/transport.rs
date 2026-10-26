@@ -52,7 +52,7 @@ mod hardware {
     use embassy_embedded_hal::adapter::BlockingAsync;
     use embassy_futures::{
         join::join,
-        select::{Either, Either3, select, select3},
+        select::{Either, Either4, select, select4},
     };
     use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
     use embassy_sync::signal::Signal;
@@ -89,6 +89,9 @@ mod hardware {
     /// How long the TX task waits for the MTU exchange before dropping a
     /// message. The exchange normally finishes within a second of encryption.
     const MTU_EXCHANGE_TIMEOUT_MS: u64 = 3000;
+    /// How long after the app subscribes to TX the latest state is sent again. The
+    /// resend sent at once was lost on Android (firmware#76 hardware test).
+    const SUBSCRIBE_RESEND_DELAY_MS: u64 = 500;
 
     const BLE_CONNECTIONS_MAX: usize = 1;
     const BLE_L2CAP_CHANNELS_MAX: usize = 3;
@@ -149,9 +152,22 @@ mod hardware {
         let flash_raw = flash_raw.multicore_auto_park();
         let mut flash_async = BlockingAsync::new(flash_raw);
         let capacity = flash_async.capacity();
-        let bond_store_range =
-            (capacity - 2 * FlashStorage::SECTOR_SIZE as usize) as u32..capacity as u32;
-        let mut bond_store = BondStore::new(&mut flash_async, bond_store_range);
+        let sector = FlashStorage::SECTOR_SIZE as usize;
+        let bond_store_range = (capacity - 2 * sector) as u32..capacity as u32;
+        let approval_range = (capacity - 4 * sector) as u32..(capacity - 2 * sector) as u32;
+        let mut bond_store = BondStore::new(&mut flash_async, bond_store_range, approval_range);
+
+        // Before the BLE stack starts, so no command can race the restore.
+        let approval = bond_store.load_can_rw_approval().await;
+        log::info!(
+            "CAN approval store: read-write mode {}",
+            if approval.is_some() {
+                "approved for a car"
+            } else {
+                "not approved"
+            }
+        );
+        core_interface::restore_can_read_write_approval(approval);
 
         let loaded_bonds = bond_store.load_bonds().await;
         crate::ble::boot_pairing::BONDS_LOADED.signal(loaded_bonds.len());
@@ -218,6 +234,11 @@ mod hardware {
                 loop {
                     while let Ok(op) = BOND_OPS.try_receive() {
                         apply_bond_op(op, &stack, &mut bond_store).await;
+                    }
+                    if let Some(approval) =
+                        core_interface::try_take_can_read_write_approval_to_store()
+                    {
+                        let _ = bond_store.store_can_rw_approval(approval).await;
                     }
 
                     let pairing_open = core_interface::is_pairing_window_open();
@@ -557,10 +578,17 @@ mod hardware {
 
         // Determine if this phone has a stored bond (RL active → bd_addr is identity).
         let bonds = stack.get_bond_information();
-        let is_known = bonds
+        let known_identity = bonds
             .iter()
-            .any(|b| b.identity.bd_addr == peer_bd_addr || b.identity.match_address(&peer_bd_addr));
+            .find(|b| b.identity.bd_addr == peer_bd_addr || b.identity.match_address(&peer_bd_addr))
+            .map(|b| b.identity.bd_addr);
+        let is_known = known_identity.is_some();
         let max_bonded_phones = core_interface::ble_max_bonded_phones();
+        // The address stamped as `source_device_id`: the bond's identity address, which
+        // the paired-phone registry holds, not the (possibly private, resolvable) address
+        // the phone connected with. Updated once a new bond is stored on this connection,
+        // so a phone that has just paired is recognised as bonded straight away.
+        let mut source_addr = known_identity.unwrap_or(peer_bd_addr);
 
         log::info!(
             "BLE gatt: peer {:02X?} connected — is_known={} pairing_open={}",
@@ -622,14 +650,26 @@ mod hardware {
                     embassy_time::Timer::after(embassy_time::Duration::from_millis(100)).await
                 }
             };
-            let event = match select3(conn.next(), BOND_OPS.receive(), encryption_poll).await {
-                Either3::First(event) => event,
-                Either3::Third(()) => continue,
-                Either3::Second(op) => {
+            let event = match select4(
+                conn.next(),
+                BOND_OPS.receive(),
+                encryption_poll,
+                core_interface::can_read_write_approval_to_store(),
+            )
+            .await
+            {
+                Either4::First(event) => event,
+                Either4::Third(()) => continue,
+                // Approvals arrive over this connection, so persist them while it lasts.
+                Either4::Fourth(approval) => {
+                    let _ = bond_store.store_can_rw_approval(approval).await;
+                    continue;
+                }
+                Either4::Second(op) => {
                     apply_bond_op(op, stack, bond_store).await;
                     let hits_peer = match op {
                         BondOp::Clear => true,
-                        BondOp::Remove(addr) => addr == peer_bd_addr.0,
+                        BondOp::Remove(addr) => addr == peer_bd_addr.0 || addr == source_addr.0,
                     };
                     if hits_peer {
                         log::info!("BLE: disconnecting peer whose bond was revoked");
@@ -676,6 +716,7 @@ mod hardware {
                             &bond_info.identity.bd_addr.0,
                         ))
                         .await;
+                        source_addr = bond_info.identity.bd_addr;
                         log::info!(
                             "BLE: new bond stored inline for {:02X?}",
                             bond_info.identity.bd_addr.raw()
@@ -735,7 +776,7 @@ mod hardware {
                                 // address so the app cannot spoof its identity.
                                 let mut device_id = Vec::with_capacity(10);
                                 device_id.extend_from_slice(b"ble:");
-                                device_id.extend_from_slice(peer_bd_addr.raw());
+                                device_id.extend_from_slice(source_addr.raw());
                                 msg.source_device_id = device_id;
                                 BLE_RX_CHANNEL.send(msg).await;
                             }
@@ -789,10 +830,21 @@ mod hardware {
                     Either::First(msg) => msg,
                     // The app just subscribed: whatever was sent before went nowhere,
                     // so give it the current state now instead of at the next update.
-                    Either::Second(()) => match core_interface::latest_ble_state() {
-                        Some(msg) => msg,
-                        None => continue,
-                    },
+                    // Not at once: a notification sent right as the CCCD write is
+                    // accepted is lost before the app's notification stream is
+                    // listening (seen on Android). The CAN access state follows through
+                    // BLE_TX_CHANNEL, and is repeated every few seconds anyway.
+                    Either::Second(()) => {
+                        embassy_time::Timer::after(embassy_time::Duration::from_millis(
+                            SUBSCRIBE_RESEND_DELAY_MS,
+                        ))
+                        .await;
+                        core_interface::resend_can_access_state();
+                        match core_interface::latest_ble_state() {
+                            Some(msg) => msg,
+                            None => continue,
+                        }
+                    }
                 }
             };
 

@@ -5,8 +5,13 @@
 //! back to the `trouble-host` stack so paired phones can re-encrypt without
 //! triggering a full re-pairing procedure.
 //!
-//! Storage layout: the store occupies the last two NOR flash sectors (fixed end-of-
-//! flash regions — see docs/ble.md for the planned migration to named partitions).
+//! The same flash also holds the owner's CAN read-write approval (see docs/can.md),
+//! in a separate range, since the BLE task owns the flash and the approval arrives
+//! over BLE.
+//!
+//! Storage layout: the bonds occupy the last two NOR flash sectors and the approval the
+//! two before them (fixed end-of-flash regions — see docs/ble.md for the planned
+//! migration to named partitions).
 
 use sequential_storage::map::{SerializationError, Value};
 use trouble_host::connection::SecurityLevel;
@@ -77,29 +82,151 @@ impl<'a> Value<'a> for StoredBond {
     }
 }
 
+/// The owner's CAN read-write approval: the digest of the approved car
+/// (`core_interface::CarDigest`).
+///
+/// Byte layout (33 bytes total):
+/// - [0]      format version (1)
+/// - [1..33]  car digest
+#[cfg_attr(not(feature = "hardware"), allow(dead_code))]
+pub(in crate::ble) struct StoredApproval(pub [u8; 32]);
+
+#[cfg_attr(not(feature = "hardware"), allow(dead_code))]
+const APPROVAL_FORMAT_VERSION: u8 = 1;
+
+impl<'a> Value<'a> for StoredApproval {
+    fn serialize_into(&self, buffer: &mut [u8]) -> Result<usize, SerializationError> {
+        if buffer.len() < 33 {
+            return Err(SerializationError::BufferTooSmall);
+        }
+        buffer[0] = APPROVAL_FORMAT_VERSION;
+        buffer[1..33].copy_from_slice(&self.0);
+        Ok(33)
+    }
+
+    fn deserialize_from(buffer: &'a [u8]) -> Result<Self, SerializationError> {
+        if buffer.len() < 33 {
+            return Err(SerializationError::BufferTooSmall);
+        }
+        // An unknown format reads as no approval: the owner approves again.
+        if buffer[0] != APPROVAL_FORMAT_VERSION {
+            return Err(SerializationError::InvalidFormat);
+        }
+        Ok(StoredApproval(buffer[1..33].try_into().unwrap()))
+    }
+}
+
 #[cfg(feature = "hardware")]
 mod hardware {
     use core::ops::Range;
     use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlash};
     use sequential_storage::{
         cache::NoCache,
-        map::{fetch_all_items, remove_item, store_item},
+        map::{fetch_all_items, fetch_item, remove_item, store_item},
     };
     use trouble_host::prelude::{BdAddr, BondInformation};
 
-    use super::StoredBond;
+    use super::{StoredApproval, StoredBond};
+
+    /// The approval is the only item in its range.
+    const APPROVAL_KEY: u8 = 0;
 
     /// Wraps a flash NorFlash storage backend and a flash range, and provides
     /// async load / store / remove operations for `BondInformation` records.
     /// Each bond is keyed by the peer's 6-byte Bluetooth device address.
+    /// Also holds the CAN read-write approval, in `approval_range`.
     pub(in crate::ble) struct BondStore<'a, S: NorFlash + MultiwriteNorFlash> {
         storage: &'a mut S,
         range: Range<u32>,
+        approval_range: Range<u32>,
     }
 
     impl<'a, S: NorFlash + MultiwriteNorFlash> BondStore<'a, S> {
-        pub(in crate::ble) fn new(storage: &'a mut S, range: Range<u32>) -> Self {
-            Self { storage, range }
+        pub(in crate::ble) fn new(
+            storage: &'a mut S,
+            range: Range<u32>,
+            approval_range: Range<u32>,
+        ) -> Self {
+            Self {
+                storage,
+                range,
+                approval_range,
+            }
+        }
+
+        /// Load the CAN read-write approval. `None` if there is none, or on any flash
+        /// error (erased, corrupt or an unknown format), which leaves the bus read-only.
+        pub(in crate::ble) async fn load_can_rw_approval(&mut self) -> Option<[u8; 32]> {
+            let mut data_buffer = [0u8; 64];
+            match fetch_item::<u8, StoredApproval, _>(
+                self.storage,
+                self.approval_range.clone(),
+                &mut NoCache::new(),
+                &mut data_buffer,
+                &APPROVAL_KEY,
+            )
+            .await
+            {
+                Ok(approval) => approval.map(|a| a.0),
+                Err(e) => {
+                    log::warn!("CAN approval store: load failed ({:?}), not approved", e);
+                    None
+                }
+            }
+        }
+
+        /// Persist the CAN read-write approval (`Some`) or erase it (`None`). If the range
+        /// can't be written (corrupt, or left over from something else), it is erased
+        /// and the write tried once more: the range holds nothing but the approval.
+        pub(in crate::ble) async fn store_can_rw_approval(
+            &mut self,
+            approval: Option<[u8; 32]>,
+        ) -> Result<(), ()> {
+            if self.write_can_rw_approval(approval).await.is_ok() {
+                return Ok(());
+            }
+            log::warn!("CAN approval store: write failed, erasing its range and retrying");
+            if let Err(e) =
+                sequential_storage::erase_all(self.storage, self.approval_range.clone()).await
+            {
+                log::error!("CAN approval store: erase failed: {:?}", e);
+                return Err(());
+            }
+            match approval {
+                Some(_) => self.write_can_rw_approval(approval).await,
+                // Erasing the range already removed it.
+                None => Ok(()),
+            }
+        }
+
+        async fn write_can_rw_approval(&mut self, approval: Option<[u8; 32]>) -> Result<(), ()> {
+            let mut data_buffer = [0u8; 64];
+            let result = match approval {
+                Some(digest) => {
+                    store_item(
+                        self.storage,
+                        self.approval_range.clone(),
+                        &mut NoCache::new(),
+                        &mut data_buffer,
+                        &APPROVAL_KEY,
+                        &StoredApproval(digest),
+                    )
+                    .await
+                }
+                None => {
+                    remove_item::<u8, _>(
+                        self.storage,
+                        self.approval_range.clone(),
+                        &mut NoCache::new(),
+                        &mut data_buffer,
+                        &APPROVAL_KEY,
+                    )
+                    .await
+                }
+            };
+            result.map_err(|e| {
+                log::error!("CAN approval store: write failed: {:?}", e);
+            })
         }
 
         /// Load all stored bonds from flash. Returns an empty vec on any flash error.
@@ -238,6 +365,31 @@ mod tests {
             assert!(restored.is_bonded);
             assert_eq!(serialize(restored), bytes);
         }
+    }
+
+    /// Pins the approval's on-flash layout: changing it would make devices forget the
+    /// owner's approval after a firmware update.
+    #[test]
+    fn approval_layout_and_round_trip() {
+        let digest: [u8; 32] = core::array::from_fn(|i| i as u8);
+        let mut buf = [0u8; 33];
+        assert_eq!(StoredApproval(digest).serialize_into(&mut buf), Ok(33));
+        assert_eq!(buf[0], 1);
+        assert_eq!(buf[1..33], digest);
+        let StoredApproval(restored) = StoredApproval::deserialize_from(&buf).unwrap();
+        assert_eq!(restored, digest);
+    }
+
+    #[test]
+    fn approval_with_unknown_format_or_short_buffer_is_rejected() {
+        let mut buf = [0u8; 33];
+        buf[0] = 2;
+        assert!(StoredApproval::deserialize_from(&buf).is_err());
+        assert!(StoredApproval::deserialize_from(&buf[..32]).is_err());
+        assert_eq!(
+            StoredApproval([0; 32]).serialize_into(&mut [0u8; 32]),
+            Err(SerializationError::BufferTooSmall)
+        );
     }
 
     #[test]

@@ -83,6 +83,21 @@ pub fn tick_simulation(state: &mut VirtualCarState, tick: u64) {
 static CAR_STATE: Mutex<CriticalSectionRawMutex, VirtualCarState> =
     Mutex::new(VirtualCarState::new());
 
+/// The simulated car's fingerprint. There is no real car to recognise, so every
+/// virtual-car device identifies this same car, and the owner's approval for it
+/// carries over to any device running virtual-car (never to another platform).
+const SIMULATED_CAR_FINGERPRINT: &[u8] = b"virtual-car";
+
+/// Identifies the simulated car and asks for read-write mode, as a real vehicle does
+/// once it has recognised the car on the bus. Commands are still refused until the
+/// owner approves this car and, in development builds, unlocks the dev lock (see
+/// docs/can.md, "Read-write policy").
+pub fn identify_simulated_car() {
+    core_interface::confirm_car_identity();
+    core_interface::confirm_car_fingerprint(SIMULATED_CAR_FINGERPRINT);
+    core_interface::set_can_read_only(false);
+}
+
 pub fn encode_state(state: &VirtualCarState) -> VehicleStatePayload {
     let basic = proto::BasicState {
         odometer: state.odometer,
@@ -288,9 +303,10 @@ pub async fn process_advanced_command(bytes: &[u8]) -> Result<(), &'static str> 
 /// state to `VEHICLE_STATE_CHANNEL`. Fires every 5 seconds (20 ticks ≈ 100 s
 /// per full drive cycle). Primary state mutations are still driven by
 /// `can_rx_task` and command handlers; this task keeps the app updated even
-/// when no CAN frames are present.
+/// when no CAN frames are present. Identifies the simulated car first.
 #[embassy_executor::task]
 pub async fn state_update_task() {
+    identify_simulated_car();
     let mut tick: u64 = 0;
     loop {
         Timer::after(Duration::from_secs(5)).await;
@@ -319,6 +335,20 @@ mod tests {
         let mut s = VirtualCarState::new();
         f(&mut s);
         s
+    }
+
+    #[test]
+    fn simulated_car_is_identified_but_stays_read_only_until_approved() {
+        identify_simulated_car();
+        assert!(core_interface::is_car_fingerprint_confirmed());
+        assert!(core_interface::is_can_read_only());
+
+        core_interface::approve_can_read_write().unwrap();
+        core_interface::set_can_dev_write_unlocked(true).unwrap();
+        assert!(!core_interface::is_can_read_only());
+
+        core_interface::revoke_car_identity();
+        core_interface::reset_can_access_for_tests();
     }
 
     #[test]

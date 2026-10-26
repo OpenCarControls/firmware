@@ -38,6 +38,8 @@ controller_lease_ttl_s = 15
 # bitrate = 500000  # TWAI only: 125000, 250000, 500000 (default) or 1000000. xtask checks it against the vehicle.
 
 # [hardware.pc]
+# Where the owner's CAN read-write approval is kept (the ESP keeps it in flash).
+# can_rw_approval_file = "/tmp/opencar-can-rw-approval.txt"
 
 [hardware.pc.ble]
 device_name = "OpenCar"

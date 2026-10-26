@@ -666,7 +666,8 @@ impl TargetBuilder for Builder {
             .replace("{BLE_DRIVER_SPAWN}", &ble_driver_spawn)
             .replace("{MQTT_DRIVER_SPAWN}", &mqtt_driver_spawn)
             .replace("{CAN_LOGGER_SPAWN}", &can_logger_spawn)
-            .replace("{IDLE_LOOP}", &idle_loop);
+            .replace("{IDLE_LOOP}", &idle_loop)
+            .replace("{BUILD_KIND_INIT}", crate::build_kind_init(config));
 
         let target_arch = mcu_to_target_arch(&esp_hw.mcu);
         let cargo_config = if target_arch.starts_with("xtensa") {

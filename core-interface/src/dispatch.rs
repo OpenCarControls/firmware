@@ -70,6 +70,89 @@ async fn send_not_controller_response(message_id: u64) {
         .await;
 }
 
+/// Answers a CAN read-write policy command. `Err` carries the reason shown to the user.
+async fn send_system_command_response(message_id: u64, result: Result<(), &'static str>) {
+    let (success, error_message, status_code) = match result {
+        Ok(()) => (true, String::new(), proto::CommandStatusCode::Ok),
+        Err(reason) => (
+            false,
+            String::from(reason),
+            proto::CommandStatusCode::Failed,
+        ),
+    };
+    BLE_TX_CHANNEL
+        .sender()
+        .send(proto::DeviceToApp {
+            timestamp_ms: embassy_time::Instant::now().as_millis(),
+            platform_id: crate::PLATFORM_ID.load(Ordering::Relaxed),
+            payload: Some(proto::device_to_app::Payload::CommandResponse(
+                proto::CommandResponse {
+                    message_id,
+                    success,
+                    error_message,
+                    response_data: None,
+                    status_code: status_code as i32,
+                },
+            )),
+        })
+        .await;
+}
+
+/// The CAN read-write policy commands change whether the device may transmit on the
+/// car's bus, so only a bonded phone may send them. `source_device_id` is the one the
+/// transport stamped, never the app's: on ESP, a phone that isn't bonded can still write
+/// while the pairing window is open.
+const NOT_BONDED: &str = "command rejected: only a bonded phone can change CAN read-write mode";
+
+async fn handle_can_read_write_approval(
+    source_device_id: &[u8],
+    approved: bool,
+) -> Result<(), &'static str> {
+    if !crate::pairing::is_phone_paired(source_device_id).await {
+        return Err(NOT_BONDED);
+    }
+    if approved {
+        crate::can_access::approve_can_read_write().map_err(|e| e.message())
+    } else {
+        crate::can_access::revoke_can_read_write_approval();
+        Ok(())
+    }
+}
+
+async fn handle_can_dev_write_unlock(
+    source_device_id: &[u8],
+    unlocked: bool,
+) -> Result<(), &'static str> {
+    if !crate::pairing::is_phone_paired(source_device_id).await {
+        return Err(NOT_BONDED);
+    }
+    crate::can_access::set_can_dev_write_unlocked(unlocked).map_err(|e| e.message())
+}
+
+/// Vehicle commands act on the car, so they are refused while the device must not
+/// transmit (the CAN read-write policy, see `can_access.rs`), with the reason. Refusing
+/// them here means every vehicle, the simulator included, reports a read-only device
+/// truthfully instead of claiming a command it never sent worked. System commands
+/// (approval, dev lock, pairing) are not gated.
+fn read_only_rejection(message_id: u64) -> Option<proto::DeviceToApp> {
+    let reason = crate::can_access::can_read_only_reason()?;
+    Some(proto::DeviceToApp {
+        timestamp_ms: embassy_time::Instant::now().as_millis(),
+        platform_id: crate::PLATFORM_ID.load(Ordering::Relaxed),
+        payload: Some(proto::device_to_app::Payload::CommandResponse(
+            proto::CommandResponse {
+                message_id,
+                success: false,
+                error_message: alloc::format!(
+                    "command rejected: the device is read-only: {reason}"
+                ),
+                response_data: None,
+                status_code: proto::CommandStatusCode::Failed as i32,
+            },
+        )),
+    })
+}
+
 pub async fn reset_ble_controller_lease_for_tests() {
     let mut lease = BLE_CONTROLLER_LEASE.lock().await;
     lease.owner_device_id.clear();
@@ -84,8 +167,13 @@ pub async fn reset_ble_controller_lease_for_tests() {
 ///   - `restart_command` → `SYSTEM_COMMAND_CHANNEL` (board handles it)
 ///   - `set_can_debug_enabled` / `update_can_debug_filters` → dropped (deprecated: the
 ///     BLE CAN debug stream is gone, CAN logging goes to SavvyCAN instead)
+///   - `set_can_read_write_approval` / `set_can_dev_write_unlock` → handled here (the CAN
+///     read-write policy), from a bonded phone only, and answered with a `CommandResponse`
 /// - `basic_command_bytes` → `BASIC_CMD_CHANNEL` (Transport::Ble)
 /// - `advanced_command_bytes` → `ADVANCED_CMD_CHANNEL` (Transport::Ble)
+///
+/// Basic and advanced commands are answered with a failed `CommandResponse` instead,
+/// giving the reason, while the device is CAN read-only.
 ///
 /// Messages with a mismatched `platform_id` are silently dropped.
 pub async fn handle_ble_message(msg: proto::AppToDevice) {
@@ -138,9 +226,21 @@ pub async fn handle_ble_message(msg: proto::AppToDevice) {
                     })
                     .await;
             }
+            Some(proto::system_command::Action::SetCanReadWriteApproval(cmd)) => {
+                let result = handle_can_read_write_approval(&source_device_id, cmd.approved).await;
+                send_system_command_response(msg.message_id, result).await;
+            }
+            Some(proto::system_command::Action::SetCanDevWriteUnlock(cmd)) => {
+                let result = handle_can_dev_write_unlock(&source_device_id, cmd.unlocked).await;
+                send_system_command_response(msg.message_id, result).await;
+            }
             None => {}
         },
         Some(proto::app_to_device::Payload::BasicCommandBytes(bytes)) => {
+            if let Some(rejection) = read_only_rejection(msg.message_id) {
+                BLE_TX_CHANNEL.sender().send(rejection).await;
+                return;
+            }
             if !ble_controller_allows(&source_device_id, embassy_time::Instant::now().as_millis())
                 .await
             {
@@ -158,6 +258,10 @@ pub async fn handle_ble_message(msg: proto::AppToDevice) {
                 .await;
         }
         Some(proto::app_to_device::Payload::AdvancedCommandBytes(bytes)) => {
+            if let Some(rejection) = read_only_rejection(msg.message_id) {
+                BLE_TX_CHANNEL.sender().send(rejection).await;
+                return;
+            }
             if !ble_controller_allows(&source_device_id, embassy_time::Instant::now().as_millis())
                 .await
             {
@@ -221,7 +325,8 @@ fn send_mqtt_unauthenticated_response(message_id: u64) {
 /// `BASIC_CMD_CHANNEL` (Transport::Mqtt) once MQTT commands are authenticated;
 /// until then they are answered with a failed `CommandResponse` instead.
 /// `SystemCommand` and `advanced_command_bytes` are silently dropped — both
-/// are restricted to BLE only.
+/// are restricted to BLE only. That includes the CAN read-write approval and the dev
+/// lock: MQTT can never approve or unlock read-write mode.
 /// `heartbeat` carries no payload and is not routed; its presence alone resets
 /// the MQTT activity window so state updates continue at full rate.
 pub async fn handle_mqtt_message(msg: proto::AppToDevice) {
@@ -234,6 +339,10 @@ pub async fn handle_mqtt_message(msg: proto::AppToDevice) {
     if let Some(proto::app_to_device::Payload::BasicCommandBytes(bytes)) = msg.payload {
         if !MQTT_COMMANDS_AUTHENTICATED {
             send_mqtt_unauthenticated_response(msg.message_id);
+            return;
+        }
+        if let Some(rejection) = read_only_rejection(msg.message_id) {
+            let _ = MQTT_TX_CHANNEL.try_send(rejection);
             return;
         }
         BASIC_CMD_CHANNEL

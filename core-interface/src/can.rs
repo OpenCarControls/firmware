@@ -39,13 +39,16 @@ pub fn can_read_only_receiver() -> Option<CanReadOnlyReceiver> {
 ///
 /// Also `true` for as long as a CAN logging session is active (see
 /// [`crate::is_can_logging`]), whatever the vehicle asks for, and for as long as the
-/// car's identity is unconfirmed (see [`is_car_identity_confirmed`]). Both are checked
-/// here, when the flag is read, so a racing `set_can_read_only(false)` can't leave the
-/// bus unlocked without a confirmed identity.
+/// read-write policy doesn't allow it: the car's platform and exact identity confirmed
+/// (see [`is_car_identity_confirmed`] and [`crate::confirm_car_fingerprint`]), the
+/// owner's approval for that car and, in development builds, the dev lock unlocked (see
+/// `can_access.rs`). All of it is checked here, when the flag is read, so a racing
+/// `set_can_read_only(false)` can't leave the bus unlocked with a condition unmet.
 pub fn is_can_read_only() -> bool {
     CAN_READ_ONLY.load(Ordering::Relaxed)
         || crate::can_log::is_can_logging()
         || !is_car_identity_confirmed()
+        || !crate::can_access::allows_read_write()
 }
 
 /// Enables or disables CAN read-only mode.
@@ -61,20 +64,28 @@ pub fn is_can_read_only() -> bool {
 /// inconsistent data is detected at any point.
 ///
 /// Leaving read-only mode (`enabled == false`) is refused, and the bus stays locked,
-/// until the vehicle has confirmed the car's identity with [`confirm_car_identity`].
+/// until the vehicle has confirmed the car's platform with [`confirm_car_identity`] and
+/// the exact car with [`crate::confirm_car_fingerprint`].
 /// An unlock request while a CAN logging session is active is ignored too, not deferred:
 /// the vehicle has to validate the car again once the session is over.
-/// Returns the resulting read-only state.
+/// An accepted unlock still waits for the owner's approval and, in development builds,
+/// the dev lock: the bus leaves read-only mode once both allow it, and returns to it as
+/// soon as either is withdrawn, without the vehicle asking again.
+/// Returns the resulting read-only state ([`is_can_read_only`]).
 pub fn set_can_read_only(enabled: bool) -> bool {
-    let enabled = enabled || crate::can_log::is_can_logging() || !is_car_identity_confirmed();
+    let enabled = enabled
+        || crate::can_log::is_can_logging()
+        || !crate::can_access::is_car_fingerprint_confirmed();
     CAN_READ_ONLY.store(enabled, Ordering::Relaxed);
     notify_can_read_only_changed();
-    enabled
+    is_can_read_only()
 }
 
-/// Wakes the board CAN drivers so they re-read [`is_can_read_only`].
+/// Wakes the board CAN drivers so they re-read [`is_can_read_only`], and the access
+/// state publisher.
 pub(crate) fn notify_can_read_only_changed() {
     CAN_READ_ONLY_WATCH.sender().send(is_can_read_only());
+    crate::can_access::CAN_ACCESS_CHANGED.signal(());
 }
 
 // ── Car identity ──────────────────────────────────────────────────────────────
@@ -89,16 +100,19 @@ pub fn is_car_identity_confirmed() -> bool {
     CAR_IDENTITY_CONFIRMED.load(Ordering::Relaxed)
 }
 
-/// Records that the connected car is one the vehicle supports. This only makes
-/// `set_can_read_only(false)` possible; it does not unlock the bus by itself.
+/// Records that the connected car is one the vehicle supports: its platform matched on
+/// the bus. The first of two stages; [`crate::confirm_car_fingerprint`] then identifies
+/// the exact car. Neither unlocks the bus by itself.
 pub fn confirm_car_identity() {
     CAR_IDENTITY_CONFIRMED.store(true, Ordering::Relaxed);
+    notify_can_read_only_changed();
 }
 
-/// Forgets the confirmation and re-locks the bus. Call it when the car's identity
-/// changes or can't be trusted any more (a different VIN, inconsistent data).
+/// Forgets the confirmation (both stages) and re-locks the bus. Call it when the car's
+/// identity changes or can't be trusted any more (a different VIN, inconsistent data).
 pub fn revoke_car_identity() {
     CAR_IDENTITY_CONFIRMED.store(false, Ordering::Relaxed);
+    crate::can_access::forget_car();
     set_can_read_only(true);
 }
 
@@ -184,6 +198,9 @@ mod tests {
     #[test]
     fn unconfirmed_identity_reads_as_read_only_even_if_flag_is_unlocked() {
         confirm_car_identity();
+        assert!(crate::confirm_car_fingerprint(b"TEST-CAR"));
+        crate::approve_can_read_write().unwrap();
+        crate::set_can_dev_write_unlocked(true).unwrap();
         assert!(!set_can_read_only(false));
         assert!(!is_can_read_only());
 
@@ -193,5 +210,6 @@ mod tests {
         assert!(is_can_bus_read_only(0));
 
         set_can_read_only(true);
+        crate::reset_can_access_for_tests();
     }
 }

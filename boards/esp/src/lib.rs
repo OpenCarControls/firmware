@@ -53,6 +53,7 @@ mod hardware {
         spawner.spawn(core_interface::process_mqtt_commands_task().unwrap());
         spawner.spawn(core_interface::route_responses_task().unwrap());
         spawner.spawn(core_interface::publish_state_task().unwrap());
+        spawner.spawn(core_interface::publish_can_access_task().unwrap());
         spawner.spawn(system_command_task().unwrap());
     }
 
@@ -106,6 +107,9 @@ mod hardware {
                 #[allow(deprecated)]
                 Some(core_interface::proto::system_command::Action::SetCanDebugEnabled(_))
                 | Some(core_interface::proto::system_command::Action::UpdateCanDebugFilters(_))
+                // Handled by core-interface's BLE dispatcher, never forwarded here.
+                | Some(core_interface::proto::system_command::Action::SetCanReadWriteApproval(_))
+                | Some(core_interface::proto::system_command::Action::SetCanDevWriteUnlock(_))
                 | None => {}
             }
         }
