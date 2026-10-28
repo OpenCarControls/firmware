@@ -4,6 +4,7 @@
 extern crate alloc;
 
 pub mod can;
+pub mod commands;
 use alloc::string::String;
 pub use can::{CAN_FILTERS, can_rx_task};
 use core_interface::{
@@ -13,7 +14,7 @@ use core_interface::{
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
-use embassy_time::{Duration, Timer, with_timeout};
+use embassy_time::{Duration, Instant, Timer, with_timeout};
 use prost::Message;
 
 pub mod proto {
@@ -227,6 +228,8 @@ pub(crate) static STATE_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::n
 const STATE_MIN_PUBLISH_INTERVAL: Duration = Duration::from_millis(250);
 /// State is re-published at this interval even when nothing changed.
 const STATE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+/// How often the command availability is evaluated and reported.
+const AVAILABILITY_INTERVAL: Duration = Duration::from_secs(1);
 
 pub fn encode_state(state: &EgmpCarState) -> VehicleStatePayload {
     let basic = proto::BasicState {
@@ -286,33 +289,39 @@ pub fn encode_state(state: &EgmpCarState) -> VehicleStatePayload {
 pub async fn handle_basic_commands_task() {
     loop {
         let inbound = BASIC_CMD_CHANNEL.receiver().receive().await;
-        let (success, error_message) = match process_basic_command(inbound.bytes.as_slice()).await {
-            Ok(()) => (true, String::new()),
-            Err(e) => (false, String::from(e)),
-        };
-        let response = core_interface::proto::CommandResponse {
-            message_id: inbound.message_id,
-            success,
-            error_message,
-            response_data: None,
-            status_code: if success { 1 } else { 2 },
-        };
-        CMD_RESP_CHANNEL
-            .sender()
-            .send((inbound.transport, response))
-            .await;
+        let result = process_basic_command(inbound.bytes.as_slice()).await;
+        core_interface::respond_to_command(inbound.transport, inbound.message_id, result).await;
     }
 }
 
-pub async fn process_basic_command(bytes: &[u8]) -> Result<(), &'static str> {
-    let cmd = proto::BasicCommand::decode(bytes).map_err(|_| "Failed to decode BasicCommand")?;
-    match cmd.action {
-        Some(proto::basic_command::Action::DoorLockCommand(_)) => Err("Not implemented"),
-        Some(proto::basic_command::Action::ChargePortCommand(_)) => Err("Not implemented"),
-        Some(proto::basic_command::Action::FlashLightsCommand(_)) => Err("Not implemented"),
-        Some(proto::basic_command::Action::ClimateControlCommand(_)) => Err("Not implemented"),
-        Some(proto::basic_command::Action::WindowCommand(_)) => Err("Not implemented"),
-        None => Err("No action in BasicCommand"),
+/// Decodes a basic command, checks its requirements (`commands::basic_requirements`) and only
+/// then runs it.
+pub async fn process_basic_command(bytes: &[u8]) -> Result<(), core_interface::CommandError> {
+    use core_interface::CommandError;
+    let cmd = proto::BasicCommand::decode(bytes)
+        .map_err(|_| CommandError::Failed("Failed to decode BasicCommand"))?;
+    let action = cmd
+        .action
+        .ok_or(CommandError::Failed("No action in BasicCommand"))?;
+    commands::admit_basic(&action)
+        .await
+        .map_err(CommandError::Rejected)?;
+    match action {
+        proto::basic_command::Action::DoorLockCommand(_) => {
+            Err(CommandError::Failed("Not implemented"))
+        }
+        proto::basic_command::Action::ChargePortCommand(_) => {
+            Err(CommandError::Failed("Not implemented"))
+        }
+        proto::basic_command::Action::FlashLightsCommand(_) => {
+            Err(CommandError::Failed("Not implemented"))
+        }
+        proto::basic_command::Action::ClimateControlCommand(_) => {
+            Err(CommandError::Failed("Not implemented"))
+        }
+        proto::basic_command::Action::WindowCommand(_) => {
+            Err(CommandError::Failed("Not implemented"))
+        }
     }
 }
 
@@ -320,33 +329,25 @@ pub async fn process_basic_command(bytes: &[u8]) -> Result<(), &'static str> {
 pub async fn handle_advanced_commands_task() {
     loop {
         let inbound = ADVANCED_CMD_CHANNEL.receiver().receive().await;
-        let (success, error_message) =
-            match process_advanced_command(inbound.bytes.as_slice()).await {
-                Ok(()) => (true, String::new()),
-                Err(e) => (false, String::from(e)),
-            };
-        let response = core_interface::proto::CommandResponse {
-            message_id: inbound.message_id,
-            success,
-            error_message,
-            response_data: None,
-            status_code: if success { 1 } else { 2 },
-        };
-        CMD_RESP_CHANNEL
-            .sender()
-            .send((inbound.transport, response))
-            .await;
+        let result = process_advanced_command(inbound.bytes.as_slice()).await;
+        core_interface::respond_to_command(inbound.transport, inbound.message_id, result).await;
     }
 }
 
-pub async fn process_advanced_command(bytes: &[u8]) -> Result<(), &'static str> {
-    let cmd =
-        proto::AdvancedCommand::decode(bytes).map_err(|_| "Failed to decode AdvancedCommand")?;
-    match cmd.action {
-        Some(proto::advanced_command::Action::BatteryPreconditioningCommand(_)) => {
-            Err("Not implemented")
+/// Decodes an advanced command, checks its requirements
+/// (`commands::advanced_requirements`) and only then runs it.
+pub async fn process_advanced_command(bytes: &[u8]) -> Result<(), core_interface::CommandError> {
+    use core_interface::CommandError;
+    let cmd = proto::AdvancedCommand::decode(bytes)
+        .map_err(|_| CommandError::Failed("Failed to decode AdvancedCommand"))?;
+    let action = cmd
+        .action
+        .ok_or(CommandError::Failed("No action in AdvancedCommand"))?;
+    commands::admit_advanced(&action).map_err(CommandError::Rejected)?;
+    match action {
+        proto::advanced_command::Action::BatteryPreconditioningCommand(_) => {
+            Err(CommandError::Failed("Not implemented"))
         }
-        None => Err("No action in AdvancedCommand"),
     }
 }
 
@@ -437,6 +438,27 @@ pub fn tick_simulation(state: &mut EgmpCarState, tick: u64) {
     }
 }
 
+/// Waits for a CAN-driven state change (`false`) or the heartbeat (`true`). On the way it
+/// reports the command availability every `AVAILABILITY_INTERVAL`, which also covers what
+/// changes without a CAN frame: the car going silent, or the read-write policy.
+async fn wait_for_state_change_or_heartbeat() -> bool {
+    let deadline = Instant::now() + STATE_HEARTBEAT_INTERVAL;
+    loop {
+        commands::report_availability().await;
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left == Duration::MIN {
+            return true;
+        }
+        if with_timeout(left.min(AVAILABILITY_INTERVAL), STATE_CHANGED.wait())
+            .await
+            .is_ok()
+        {
+            commands::report_availability().await;
+            return false;
+        }
+    }
+}
+
 /// Publishes the vehicle state on every heartbeat, and shortly after CAN-driven changes
 /// (rate-limited to one publish per `STATE_MIN_PUBLISH_INTERVAL`).
 #[embassy_executor::task]
@@ -447,9 +469,7 @@ pub async fn state_update_task() {
     let mut was_simulating = false;
     loop {
         #[allow(unused_variables)]
-        let is_heartbeat = with_timeout(STATE_HEARTBEAT_INTERVAL, STATE_CHANGED.wait())
-            .await
-            .is_err();
+        let is_heartbeat = wait_for_state_change_or_heartbeat().await;
         let payload = {
             #[allow(unused_mut)]
             let mut state = CAR_STATE.lock().await;

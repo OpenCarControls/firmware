@@ -735,7 +735,9 @@ pub async fn handle_can_frame(frame: CanFrame) {
 pub async fn can_rx_task() {
     let receiver = CAN_RX_CHANNEL.receiver();
     loop {
-        handle_can_frame(receiver.receive().await).await;
+        let frame = receiver.receive().await;
+        crate::commands::CAR_ACTIVITY.touch();
+        handle_can_frame(frame).await;
     }
 }
 

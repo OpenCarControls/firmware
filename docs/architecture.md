@@ -2,7 +2,7 @@
 
 Open Car Firmware is an embedded Rust monorepo for the hardware controller (ESP32 / Raspberry Pi). It handles CAN bus reading/writing, BLE/WiFi/LTE connections, and OTA updates.
 
-Related docs: [BLE](ble.md) · [CAN bus](can.md) · [Testing](testing.md) · [Releases & OTA](releases.md) · [Hardware setup](hardware-setup.md)
+Related docs: [BLE](ble.md) · [CAN bus](can.md) · [Vehicle commands](commands.md) · [Testing](testing.md) · [Releases & OTA](releases.md) · [Hardware setup](hardware-setup.md)
 
 ## Cargo workspace & xtask
 
@@ -11,7 +11,7 @@ The intermediary between transport layers (BLE/MQTT) and vehicle logic. Knows no
 
 *   Defines 12 static `Channel`s as the inter-crate contract (see [Channels](#channels)).
 *   Defines shared types: `Transport`, `InboundCommand`, `VehicleStatePayload`, `CanLogFrame`.
-*   Defines 5 pure-logic `#[embassy_executor::task]` functions: `process_ble_commands_task`, `process_mqtt_commands_task`, `route_responses_task`, `publish_state_task`, `publish_can_access_task`.
+*   Defines 6 pure-logic `#[embassy_executor::task]` functions: `process_ble_commands_task`, `process_mqtt_commands_task`, `route_responses_task`, `publish_state_task`, `publish_can_access_task`, `publish_command_availability_task`.
 *   Exposes `pub fn passes_filter()`, `pub fn is_can_read_only()`, `pub fn set_can_read_only(bool)`, the CAN read-write policy (car identity, owner approval, dev lock; see [CAN](can.md#read-write-policy)), and the SavvyCAN logging API (`is_can_logging`, `log_can_frame`, `run_can_log_session`).
 *   Has 4 inner async helpers (`handle_ble_message`, `handle_mqtt_message`, `route_single_response`, `publish_single_state`) extracted from the task loops so they can be unit-tested without running an executor.
 *   **`publish_single_state` is intentionally non-blocking:** it uses `try_send` on both `BLE_TX_CHANNEL` and `MQTT_TX_CHANNEL`; if either is full it evicts the oldest pending state update and enqueues the fresher one. This guarantees `publish_state_task` never stalls, keeping `VEHICLE_STATE_CHANNEL` always drainable and preventing a deadlock cascade through `state_update_task` and command-handler tasks.

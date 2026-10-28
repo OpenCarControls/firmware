@@ -147,7 +147,7 @@ fn read_only_rejection(message_id: u64) -> Option<proto::DeviceToApp> {
                     "command rejected: the device is read-only: {reason}"
                 ),
                 response_data: None,
-                status_code: proto::CommandStatusCode::Failed as i32,
+                status_code: proto::CommandStatusCode::RejectedUnavailable as i32,
             },
         )),
     })
@@ -298,7 +298,7 @@ pub async fn process_ble_commands_task() {
 /// with the broker credentials (which ship in the app) could publish one, or
 /// replay a captured one. Until they are (contracts#8, firmware#16), basic
 /// commands from MQTT are rejected. Remove the gate together with this flag.
-const MQTT_COMMANDS_AUTHENTICATED: bool = false;
+pub(crate) const MQTT_COMMANDS_AUTHENTICATED: bool = false;
 
 /// Answers a rejected MQTT command. `try_send`: the MQTT driver must never be
 /// stalled by a full queue, and the app can retry or notice the missing reply.

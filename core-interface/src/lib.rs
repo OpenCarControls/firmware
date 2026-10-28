@@ -5,6 +5,7 @@ pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/opencar.core.v1.rs"));
 }
 
+mod availability;
 mod can;
 mod can_access;
 mod can_log;
@@ -12,6 +13,7 @@ mod channels;
 mod dispatch;
 mod lifecycle;
 mod pairing;
+mod requirements;
 mod routing;
 #[cfg(debug_assertions)]
 mod simulation;
@@ -72,6 +74,21 @@ pub use can_access::{
 pub use can_log::{
     CAN_LOG_CHANNEL, CanLogFrame, CanLogSession, GvretCommand, GvretParser, SessionEnd,
     can_log_dropped_count, encode_gvret_frame, is_can_logging, log_can_frame, run_can_log_session,
+};
+
+// Command availability
+pub use availability::{
+    COMMAND_AVAILABILITY_REPEAT_MS, CommandKind, REPORT_MAX_AGE_MS, command_availability,
+    command_availability_at, command_availability_state_update, mqtt_command_availability_at,
+    publish_command_availability, publish_command_availability_mqtt,
+    publish_command_availability_task, report_command_availability, report_command_availability_at,
+    resend_command_availability, reset_command_availability_for_tests,
+};
+
+// Command requirements
+pub use requirements::{
+    ActivityClock, CommandError, CommandRequirements, Rejection, Requirement, Snapshot,
+    rejection_response, respond_to_command, try_send_response,
 };
 
 // Pairing registry

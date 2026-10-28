@@ -486,7 +486,10 @@ fn vehicle_commands_are_refused_with_the_reason_while_read_only() {
             let resp = ble_response();
             assert!(!resp.success);
             assert_eq!(resp.message_id, 11);
-            assert_eq!(resp.status_code, proto::CommandStatusCode::Failed as i32);
+            assert_eq!(
+                resp.status_code,
+                proto::CommandStatusCode::RejectedUnavailable as i32
+            );
             assert!(
                 resp.error_message.contains("read-only"),
                 "{}",
