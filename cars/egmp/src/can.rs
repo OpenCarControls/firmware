@@ -181,6 +181,11 @@ pub const CAN_FILTERS: &[CanFilter] = &[
         id: Id::Standard(StandardId::new(929).unwrap()),
         mask: 0x7FF,
     }, // TIRE_PRESSURES
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(930).unwrap()),
+        mask: 0x7FF,
+    }, // TIRE_PRESSURE_UNIT
 ];
 
 // ── Vehicle Tasks ─────────────────────────────────────────────────────────────
@@ -444,12 +449,29 @@ fn regen_level(raw: m_can::RegenStatusRegenLevel) -> Option<u32> {
 
 const KPA_PER_PSI: f32 = 6.894_757;
 
-/// Maps a `Tire_Pressure_*` raw value in whole psi. `None` for Not_Available (255), sent until
-/// the tire sensors report a minute or two into a drive, so the last known pressure is kept.
-fn tire_pressure_kpa(psi: u8) -> Option<f32> {
-    match psi {
+/// Last tire pressure unit, which comes in a separate message from the pressures.
+static TIRE_UNIT: embassy_sync::blocking_mutex::Mutex<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    core::cell::Cell<Option<m_can::TirePressureUnitTirePressureUnit>>,
+> = embassy_sync::blocking_mutex::Mutex::new(core::cell::Cell::new(None));
+
+/// Maps a `Tire_Pressure_*` raw value, in the unit set for the cluster: whole psi, kPa / 5 or
+/// bar x 10. `None` for Not_Available (255), sent until the tire sensors report a minute or two
+/// into a drive, and until the unit is known, so the last known pressure is kept.
+fn tire_pressure_kpa(
+    raw: u8,
+    unit: Option<m_can::TirePressureUnitTirePressureUnit>,
+) -> Option<f32> {
+    use m_can::TirePressureUnitTirePressureUnit as Unit;
+    let kpa_per_step = match unit? {
+        Unit::Psi => KPA_PER_PSI,
+        Unit::Kpa => 5.0,
+        Unit::Bar => 10.0,
+        Unit::_Other(_) => return None,
+    };
+    match raw {
         255 => None,
-        psi => Some(psi as f32 * KPA_PER_PSI),
+        raw => Some(raw as f32 * kpa_per_step),
     }
 }
 
@@ -706,16 +728,24 @@ pub async fn handle_can_frame(frame: CanFrame) {
                     state.regen_mode = Some(mode);
                 }
             }
+            m_can::Messages::TirePressureUnit(m) => {
+                TIRE_UNIT.lock(|cell| cell.set(Some(m.tire_pressure_unit())));
+            }
             m_can::Messages::TirePressures(m) => {
                 // Front right and rear right are assumed from the usual order (see the DBC).
-                state.front_left_tire_pressure_kpa = tire_pressure_kpa(m.tire_pressure_fl_raw())
-                    .or(state.front_left_tire_pressure_kpa);
-                state.front_right_tire_pressure_kpa = tire_pressure_kpa(m.tire_pressure_fr_raw())
-                    .or(state.front_right_tire_pressure_kpa);
-                state.rear_left_tire_pressure_kpa = tire_pressure_kpa(m.tire_pressure_rl_raw())
-                    .or(state.rear_left_tire_pressure_kpa);
-                state.rear_right_tire_pressure_kpa = tire_pressure_kpa(m.tire_pressure_rr_raw())
-                    .or(state.rear_right_tire_pressure_kpa);
+                let unit = TIRE_UNIT.lock(|cell| cell.get());
+                state.front_left_tire_pressure_kpa =
+                    tire_pressure_kpa(m.tire_pressure_fl_raw(), unit)
+                        .or(state.front_left_tire_pressure_kpa);
+                state.front_right_tire_pressure_kpa =
+                    tire_pressure_kpa(m.tire_pressure_fr_raw(), unit)
+                        .or(state.front_right_tire_pressure_kpa);
+                state.rear_left_tire_pressure_kpa =
+                    tire_pressure_kpa(m.tire_pressure_rl_raw(), unit)
+                        .or(state.rear_left_tire_pressure_kpa);
+                state.rear_right_tire_pressure_kpa =
+                    tire_pressure_kpa(m.tire_pressure_rr_raw(), unit)
+                        .or(state.rear_right_tire_pressure_kpa);
             }
             // TODO: Unmapped BasicState fields:
             // - is_rear_window_defrost_on (not on this bus; Rear_Defrost_State in BO 593 is noise)
@@ -1293,10 +1323,13 @@ mod tests {
         assert_eq!(state().regen_mode, Some(RegenMode::Manual));
     }
 
-    /// log_33: only the front left tire deflated to 32 psi; log_03 before the sensors report.
+    /// log_33: only the front left tire deflated to 32 psi; log_03 before the sensors report;
+    /// log_40: the cluster's unit switched to kPa, bar and back to psi.
     #[test]
     fn tire_pressures() {
         let state = || embassy_futures::block_on(CAR_STATE.lock()).clone();
+        const PSI: [u8; 8] = [0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        feed(930, PSI);
         feed(929, [0x3A, 0x5F, 0x9F, 0x00, 0x23, 0x23, 0x23, 0x23]);
         feed(929, [0x99, 0xF8, 0x7C, 0x00, 0x20, 0x23, 0x23, 0x23]);
         let s = state();
@@ -1310,6 +1343,31 @@ mod tests {
             state().front_left_tire_pressure_kpa,
             s.front_left_tire_pressure_kpa
         );
+
+        // The same tires in each unit: 240/230 kPa, 2.4/2.3 bar, 35/34 psi.
+        let front_rear = |unit: [u8; 8], pressures: [u8; 8]| {
+            feed(930, unit);
+            feed(929, pressures);
+            let s = state();
+            (
+                s.front_left_tire_pressure_kpa.unwrap(),
+                s.rear_left_tire_pressure_kpa.unwrap(),
+                s.front_right_tire_pressure_kpa.unwrap(),
+                s.rear_right_tire_pressure_kpa.unwrap(),
+            )
+        };
+        let kpa = front_rear(
+            [0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+            [0x15, 0xBB, 0xC6, 0x00, 0x30, 0x2E, 0x30, 0x2E],
+        );
+        assert_eq!(kpa, (240.0, 240.0, 230.0, 230.0));
+        let bar = front_rear(
+            [0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+            [0x7E, 0x17, 0xDC, 0x00, 0x18, 0x17, 0x18, 0x17],
+        );
+        assert_eq!(bar, (240.0, 240.0, 230.0, 230.0));
+        let psi = front_rear(PSI, [0xF4, 0xAB, 0xEB, 0x00, 0x23, 0x22, 0x23, 0x22]);
+        assert!((psi.0 - 241.3).abs() < 0.1 && (psi.2 - 234.4).abs() < 0.1);
     }
 
     #[test]
