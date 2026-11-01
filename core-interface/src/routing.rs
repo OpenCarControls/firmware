@@ -2,11 +2,16 @@ use alloc::vec;
 use core::cell::RefCell;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use portable_atomic::{AtomicU32, Ordering};
+use embassy_sync::channel::{Channel, TrySendError};
+use portable_atomic::{AtomicBool, AtomicU32, Ordering};
 
+use core::task::Poll;
 use embassy_time::Instant;
 
-use crate::channels::{BLE_TX_CHANNEL, CMD_RESP_CHANNEL, MQTT_TX_CHANNEL, VEHICLE_STATE_CHANNEL};
+use crate::channels::{
+    BLE_STATE_TX, BLE_TX_CHANNEL, CMD_RESP_CHANNEL, MQTT_STATE_TX, MQTT_TX_CHANNEL,
+    VEHICLE_STATE_CHANNEL,
+};
 use crate::proto;
 use crate::types::{Transport, VehicleStatePayload};
 
@@ -41,10 +46,114 @@ pub fn reset_mqtt_throttle_for_tests() {
     LAST_MQTT_STATE_SECS.store(0, Ordering::Relaxed);
 }
 
+// ── Transport links ───────────────────────────────────────────────────────────
+
+/// Whether a transport can deliver messages right now: a phone is connected over
+/// BLE, or the MQTT session with the broker is up. Boards report it with
+/// [`set_link_up`]. A message for a transport whose link is down is dropped, and
+/// whatever is queued when a link goes down is cleared: it was meant for the peer
+/// that left, never the next one.
+struct Link {
+    up: AtomicBool,
+    /// Bumped each time the link goes down, so a send that waited for room can
+    /// tell the peer it was meant for is gone, even if another one connected since.
+    generation: AtomicU32,
+}
+
+static BLE_LINK: Link = Link {
+    up: AtomicBool::new(false),
+    generation: AtomicU32::new(0),
+};
+static MQTT_LINK: Link = Link {
+    up: AtomicBool::new(false),
+    generation: AtomicU32::new(0),
+};
+
+fn link(transport: Transport) -> &'static Link {
+    match transport {
+        Transport::Ble => &BLE_LINK,
+        Transport::Mqtt => &MQTT_LINK,
+    }
+}
+
+fn tx_channel(
+    transport: Transport,
+) -> &'static Channel<CriticalSectionRawMutex, proto::DeviceToApp, 4> {
+    match transport {
+        Transport::Ble => &BLE_TX_CHANNEL,
+        Transport::Mqtt => &MQTT_TX_CHANNEL,
+    }
+}
+
+/// Called by the board's transport driver when its link comes up (a phone
+/// connected, the MQTT session is ready) and when it goes down. Going down clears
+/// that transport's TX queue.
+pub fn set_link_up(transport: Transport, up: bool) {
+    let link = link(transport);
+    if up {
+        link.up.store(true, Ordering::Relaxed);
+    } else {
+        link.up.store(false, Ordering::Relaxed);
+        link.generation.fetch_add(1, Ordering::Relaxed);
+        while tx_channel(transport).try_receive().is_ok() {}
+    }
+}
+
+/// Whether the board reported `transport`'s link as up.
+pub fn is_link_up(transport: Transport) -> bool {
+    link(transport).up.load(Ordering::Relaxed)
+}
+
+/// Queues `msg` on `transport`'s TX queue without waiting. Dropped if the link is
+/// down or the queue is full. Returns whether it was queued.
+pub(crate) fn try_send_to(transport: Transport, msg: proto::DeviceToApp) -> bool {
+    is_link_up(transport) && tx_channel(transport).try_send(msg).is_ok()
+}
+
+/// Queues `msg` on `transport`'s TX queue, waiting for room while the link stays
+/// up. Dropped if the link is down, or goes down before there is room. Returns
+/// whether it was queued. A waiting send is woken by any receive, including the
+/// clear in [`set_link_up`], so it can never outlive the peer it was meant for.
+pub(crate) async fn send_to(transport: Transport, msg: proto::DeviceToApp) -> bool {
+    let link = link(transport);
+    let channel = tx_channel(transport);
+    let generation = link.generation.load(Ordering::Relaxed);
+    let mut msg = Some(msg);
+    core::future::poll_fn(|cx| {
+        loop {
+            if !link.up.load(Ordering::Relaxed)
+                || link.generation.load(Ordering::Relaxed) != generation
+            {
+                return Poll::Ready(false);
+            }
+            let Some(next) = msg.take() else {
+                return Poll::Ready(false);
+            };
+            match channel.try_send(next) {
+                Ok(()) => return Poll::Ready(true),
+                Err(TrySendError::Full(back)) => msg = Some(back),
+            }
+            if channel.poll_ready_to_send(cx).is_pending() {
+                return Poll::Pending;
+            }
+        }
+    })
+    .await
+}
+
+/// Resets both links to their boot state (down). For use in tests only.
+pub fn reset_links_for_tests() {
+    set_link_up(Transport::Ble, false);
+    set_link_up(Transport::Mqtt, false);
+}
+
 // ── Response Router ───────────────────────────────────────────────────────────
 
 /// Routes a single command response to BLE or MQTT based on the transport tag.
-/// `timestamp_ms` is passed explicitly so callers (and tests) control the clock.
+/// The response goes back on the transport the command came in on; if that link is
+/// down, or goes down while the response waits for room, it is dropped (the app
+/// re-reads the state). `timestamp_ms` is passed explicitly so callers (and tests)
+/// control the clock.
 pub async fn route_single_response(
     transport: Transport,
     response: proto::CommandResponse,
@@ -55,10 +164,7 @@ pub async fn route_single_response(
         platform_id: crate::PLATFORM_ID.load(Ordering::Relaxed),
         payload: Some(proto::device_to_app::Payload::CommandResponse(response)),
     };
-    match transport {
-        Transport::Ble => BLE_TX_CHANNEL.sender().send(msg).await,
-        Transport::Mqtt => MQTT_TX_CHANNEL.sender().send(msg).await,
-    }
+    send_to(transport, msg).await;
 }
 
 /// Reads command responses from `CMD_RESP_CHANNEL` and routes each as a
@@ -122,13 +228,12 @@ pub fn reset_latest_ble_state_for_tests() {
 ///
 /// `timestamp_ms` is passed explicitly so callers (and tests) control the clock.
 ///
-/// Both TX channels are written non-blocking. State updates are ephemeral —
-/// the latest reading always supersedes older ones. If a channel is full
-/// (e.g. BLE is pull-based and nobody has polled yet, or the MQTT broker is
-/// temporarily unreachable), the oldest pending message is evicted to make
-/// room for the fresher state. This ensures `publish_state_task` never blocks,
-/// which would otherwise stall `VEHICLE_STATE_CHANNEL` and deadlock every
-/// producer task (`state_update_task`, command handlers).
+/// State updates don't go through the TX queues: each transport has a single-value
+/// slot (`BLE_STATE_TX`, `MQTT_STATE_TX`) that the newest update overwrites, since
+/// the latest reading always supersedes older ones. This never blocks, so
+/// `publish_state_task` can't stall `VEHICLE_STATE_CHANNEL` and every producer task
+/// behind it (`state_update_task`, command handlers), and a state update can never
+/// push a command response out of a queue.
 pub async fn publish_single_state(payload: VehicleStatePayload, timestamp_ms: u64) {
     let pid = crate::PLATFORM_ID.load(Ordering::Relaxed);
 
@@ -136,11 +241,7 @@ pub async fn publish_single_state(payload: VehicleStatePayload, timestamp_ms: u6
     let basic = payload.basic.clone();
     let ble_msg = ble_state_update(timestamp_ms, pid, payload);
     LATEST_BLE_STATE.lock(|latest| *latest.borrow_mut() = Some(ble_msg.clone()));
-    if let Err(embassy_sync::channel::TrySendError::Full(msg)) = BLE_TX_CHANNEL.try_send(ble_msg) {
-        // Channel full — evict the oldest stale state and replace with latest.
-        let _ = BLE_TX_CHANNEL.try_receive();
-        let _ = BLE_TX_CHANNEL.try_send(msg);
-    }
+    BLE_STATE_TX.signal(ble_msg);
 
     // MQTT: basic only (advanced is BLE-exclusive), throttled when no client is active.
     let now_secs = (timestamp_ms / 1000) as u32;
@@ -167,13 +268,7 @@ pub async fn publish_single_state(payload: VehicleStatePayload, timestamp_ms: u6
                 },
             )),
         };
-        if let Err(embassy_sync::channel::TrySendError::Full(msg)) =
-            MQTT_TX_CHANNEL.try_send(mqtt_msg)
-        {
-            // Channel full — evict the oldest stale state and replace with latest.
-            let _ = MQTT_TX_CHANNEL.try_receive();
-            let _ = MQTT_TX_CHANNEL.try_send(msg);
-        }
+        MQTT_STATE_TX.signal(mqtt_msg);
         LAST_MQTT_STATE_SECS.store(now_secs, Ordering::Relaxed);
     }
 }

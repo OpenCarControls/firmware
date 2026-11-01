@@ -12,7 +12,7 @@ mod hardware {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use core_interface::{MQTT_RX_CHANNEL, MQTT_TX_CHANNEL, proto};
+    use core_interface::{MQTT_RX_CHANNEL, MQTT_STATE_TX, MQTT_TX_CHANNEL, Transport, proto};
     use embassy_net::{Runner, Stack, StackResources, tcp::TcpSocket};
     use esp_radio::wifi::sta::StationConfig;
     use esp_radio::wifi::{
@@ -164,13 +164,19 @@ mod hardware {
             })?;
 
         log::info!("MQTT: ready");
+        core_interface::set_link_up(Transport::Mqtt, true);
 
         let keepalive = Duration::from_secs(55);
         let mut last_ping = Instant::now();
         let data_topic_name = TopicName::new_unchecked(MqttString::from_str_unchecked(data_topic));
 
         loop {
-            while let Ok(msg) = MQTT_TX_CHANNEL.try_receive() {
+            // Responses and system state first, then the newest vehicle state.
+            while let Some(msg) = MQTT_TX_CHANNEL
+                .try_receive()
+                .ok()
+                .or_else(|| MQTT_STATE_TX.try_take())
+            {
                 let mut buf = Vec::<u8>::new();
                 if msg.encode(&mut buf).is_ok() {
                     let t = data_topic_name.as_borrowed();
@@ -286,6 +292,8 @@ mod hardware {
             {
                 log::info!("MQTT: session ended, reconnecting in 5s");
             }
+            // Drops what was queued for this session instead of sending it on the next.
+            core_interface::set_link_up(Transport::Mqtt, false);
             Timer::after(Duration::from_secs(5)).await;
         }
     }

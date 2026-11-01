@@ -7,12 +7,20 @@ use core_interface::{
         SystemCommand, UpdateCanDebugFilters, UpsertPairedPhoneCommand, app_to_device::Payload,
         system_command::Action,
     },
-    reset_ble_controller_lease_for_tests,
+    reset_ble_controller_lease_for_tests, reset_recent_commands_for_tests, set_link_up,
 };
 
 const PLATFORM_ID: u32 = 0xDEAD_BEEF;
 const WRONG_ID: u32 = 0x0000_0001;
 const MSG_ID: u64 = 42;
+
+/// Fresh dispatcher state: no commands seen yet (tests reuse `MSG_ID`), both links up.
+fn setup() {
+    init(PLATFORM_ID);
+    reset_recent_commands_for_tests();
+    set_link_up(Transport::Ble, true);
+    set_link_up(Transport::Mqtt, true);
+}
 
 fn ble_msg(platform_id: u32, payload: Option<Payload>) -> proto::AppToDevice {
     proto::AppToDevice {
@@ -59,7 +67,7 @@ fn make_system_cmd() -> SystemCommand {
 
 #[test]
 fn ble_wrong_platform_id_drops_message() {
-    init(PLATFORM_ID);
+    setup();
     let bytes = vec![1u8, 2, 3];
     let msg = ble_msg(WRONG_ID, Some(Payload::BasicCommandBytes(bytes)));
     embassy_futures::block_on(handle_ble_message(msg));
@@ -68,7 +76,7 @@ fn ble_wrong_platform_id_drops_message() {
 
 #[test]
 fn mqtt_wrong_platform_id_drops_message() {
-    init(PLATFORM_ID);
+    setup();
     let bytes = vec![1u8, 2, 3];
     let msg = ble_msg(WRONG_ID, Some(Payload::BasicCommandBytes(bytes)));
     embassy_futures::block_on(handle_mqtt_message(msg));
@@ -79,7 +87,7 @@ fn mqtt_wrong_platform_id_drops_message() {
 
 #[test]
 fn ble_system_command_goes_to_system_channel() {
-    init(PLATFORM_ID);
+    setup();
     let cmd = make_system_cmd();
     let msg = ble_msg(PLATFORM_ID, Some(Payload::SystemCommand(cmd)));
     embassy_futures::block_on(handle_ble_message(msg));
@@ -96,7 +104,7 @@ fn ble_system_command_goes_to_system_channel() {
 
 #[test]
 fn ble_basic_command_bytes_goes_to_basic_channel_with_ble_transport() {
-    init(PLATFORM_ID);
+    setup();
     allow_read_write();
     embassy_futures::block_on(reset_ble_controller_lease_for_tests());
     let bytes = vec![0xAA, 0xBB];
@@ -119,7 +127,7 @@ fn ble_basic_command_bytes_goes_to_basic_channel_with_ble_transport() {
 
 #[test]
 fn ble_advanced_command_bytes_goes_to_advanced_channel() {
-    init(PLATFORM_ID);
+    setup();
     allow_read_write();
     embassy_futures::block_on(reset_ble_controller_lease_for_tests());
     let bytes = vec![0xCC, 0xDD];
@@ -142,7 +150,7 @@ fn ble_advanced_command_bytes_goes_to_advanced_channel() {
 
 #[test]
 fn ble_none_payload_drops_silently() {
-    init(PLATFORM_ID);
+    setup();
     let msg = ble_msg(PLATFORM_ID, None);
     embassy_futures::block_on(handle_ble_message(msg));
     assert!(BASIC_CMD_CHANNEL.try_receive().is_err());
@@ -152,7 +160,7 @@ fn ble_none_payload_drops_silently() {
 
 #[test]
 fn ble_basic_command_rejected_when_controller_lease_owned_by_another_phone() {
-    init(PLATFORM_ID);
+    setup();
     allow_read_write();
     embassy_futures::block_on(reset_ble_controller_lease_for_tests());
 
@@ -190,7 +198,7 @@ fn ble_basic_command_rejected_when_controller_lease_owned_by_another_phone() {
 
 #[test]
 fn ble_basic_command_with_empty_source_device_id_is_rejected() {
-    init(PLATFORM_ID);
+    setup();
     allow_read_write();
     embassy_futures::block_on(reset_ble_controller_lease_for_tests());
 
@@ -219,7 +227,7 @@ fn ble_basic_command_with_empty_source_device_id_is_rejected() {
 
 #[test]
 fn mqtt_basic_command_is_rejected_until_mqtt_is_authenticated() {
-    init(PLATFORM_ID);
+    setup();
     while MQTT_TX_CHANNEL.try_receive().is_ok() {}
     let mut msg = ble_msg(
         PLATFORM_ID,
@@ -247,7 +255,7 @@ fn mqtt_basic_command_is_rejected_until_mqtt_is_authenticated() {
 
 #[test]
 fn mqtt_system_command_silently_dropped() {
-    init(PLATFORM_ID);
+    setup();
     let msg = ble_msg(PLATFORM_ID, Some(Payload::SystemCommand(make_system_cmd())));
     embassy_futures::block_on(handle_mqtt_message(msg));
     assert!(SYSTEM_COMMAND_CHANNEL.try_receive().is_err());
@@ -256,7 +264,7 @@ fn mqtt_system_command_silently_dropped() {
 
 #[test]
 fn mqtt_advanced_command_bytes_silently_dropped() {
-    init(PLATFORM_ID);
+    setup();
     let bytes = vec![0xFF];
     let msg = ble_msg(PLATFORM_ID, Some(Payload::AdvancedCommandBytes(bytes)));
     embassy_futures::block_on(handle_mqtt_message(msg));
@@ -272,7 +280,7 @@ fn mqtt_advanced_command_bytes_silently_dropped() {
 #[test]
 #[allow(deprecated)]
 fn ble_deprecated_can_debug_commands_are_ignored() {
-    init(PLATFORM_ID);
+    setup();
     while SYSTEM_COMMAND_CHANNEL.try_receive().is_ok() {}
 
     for bus_ids in [vec![], vec![0], vec![8], vec![255, 1_000_000]] {
@@ -306,7 +314,7 @@ fn ble_deprecated_can_debug_commands_are_ignored() {
 
 #[test]
 fn ble_restart_command_still_forwarded_to_system_channel_when_debug_available() {
-    init(PLATFORM_ID);
+    setup();
     let msg = ble_msg(
         PLATFORM_ID,
         Some(Payload::SystemCommand(SystemCommand {
@@ -322,7 +330,7 @@ fn ble_restart_command_still_forwarded_to_system_channel_when_debug_available() 
 
 #[test]
 fn ble_list_paired_phones_forwarded_to_system_channel() {
-    init(PLATFORM_ID);
+    setup();
     let msg = ble_msg(
         PLATFORM_ID,
         Some(Payload::SystemCommand(SystemCommand {
@@ -338,7 +346,7 @@ fn ble_list_paired_phones_forwarded_to_system_channel() {
 
 #[test]
 fn ble_remove_paired_phone_forwarded_to_system_channel() {
-    init(PLATFORM_ID);
+    setup();
     let msg = ble_msg(
         PLATFORM_ID,
         Some(Payload::SystemCommand(SystemCommand {
@@ -359,7 +367,7 @@ fn ble_remove_paired_phone_forwarded_to_system_channel() {
 
 #[test]
 fn ble_clear_paired_phones_forwarded_to_system_channel() {
-    init(PLATFORM_ID);
+    setup();
     let msg = ble_msg(
         PLATFORM_ID,
         Some(Payload::SystemCommand(SystemCommand {
@@ -378,7 +386,7 @@ fn ble_clear_paired_phones_forwarded_to_system_channel() {
 
 #[test]
 fn ble_upsert_paired_phone_forwarded_to_system_channel() {
-    init(PLATFORM_ID);
+    setup();
     let msg = ble_msg(
         PLATFORM_ID,
         Some(Payload::SystemCommand(SystemCommand {
@@ -395,4 +403,53 @@ fn ble_upsert_paired_phone_forwarded_to_system_channel() {
         received.action,
         Some(Action::UpsertPairedPhone(_))
     ));
+}
+
+// ── Duplicate commands ────────────────────────────────────────────────────────
+
+#[test]
+fn ble_repeated_command_runs_once() {
+    setup();
+    allow_read_write();
+    embassy_futures::block_on(reset_ble_controller_lease_for_tests());
+    let source = vec![1, 2, 3, 4];
+    for _ in 0..2 {
+        let msg = ble_msg_with_source(
+            PLATFORM_ID,
+            source.clone(),
+            Some(Payload::BasicCommandBytes(vec![0xAA])),
+        );
+        embassy_futures::block_on(handle_ble_message(msg));
+    }
+    assert!(BASIC_CMD_CHANNEL.try_receive().is_ok());
+    assert!(
+        BASIC_CMD_CHANNEL.try_receive().is_err(),
+        "the repeat must be dropped"
+    );
+}
+
+#[test]
+fn ble_repeated_system_command_runs_once() {
+    setup();
+    for _ in 0..2 {
+        let msg = ble_msg(PLATFORM_ID, Some(Payload::SystemCommand(make_system_cmd())));
+        embassy_futures::block_on(handle_ble_message(msg));
+    }
+    assert!(SYSTEM_COMMAND_CHANNEL.try_receive().is_ok());
+    assert!(SYSTEM_COMMAND_CHANNEL.try_receive().is_err());
+}
+
+#[test]
+fn mqtt_redelivered_command_is_answered_once() {
+    setup();
+    while MQTT_TX_CHANNEL.try_receive().is_ok() {}
+    for _ in 0..2 {
+        let msg = ble_msg(PLATFORM_ID, Some(Payload::BasicCommandBytes(vec![1])));
+        embassy_futures::block_on(handle_mqtt_message(msg));
+    }
+    assert!(MQTT_TX_CHANNEL.try_receive().is_ok());
+    assert!(
+        MQTT_TX_CHANNEL.try_receive().is_err(),
+        "a QoS 1 redelivery must not be handled again"
+    );
 }

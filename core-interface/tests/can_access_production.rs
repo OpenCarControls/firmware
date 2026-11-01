@@ -42,6 +42,7 @@ fn release_builds_reject_the_dev_unlock_command() {
     declare_production_build();
     let phone = b"ble:\x01\x02\x03\x04\x05\x06";
     embassy_futures::block_on(add_paired_phone(phone));
+    core_interface::set_link_up(core_interface::Transport::Ble, true);
     while BLE_TX_CHANNEL.try_receive().is_ok() {}
 
     embassy_futures::block_on(handle_ble_message(proto::AppToDevice {
