@@ -186,6 +186,11 @@ pub const CAN_FILTERS: &[CanFilter] = &[
         id: Id::Standard(StandardId::new(930).unwrap()),
         mask: 0x7FF,
     }, // TIRE_PRESSURE_UNIT
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(1928).unwrap()),
+        mask: 0x7FF,
+    }, // 0x788: the head unit's diagnostic answers, for `identity.rs`
     // Only checked by `platform.rs` (with 896, 898 and 899 above), not decoded.
     CanFilter {
         bus_id: 0,
@@ -558,6 +563,7 @@ pub async fn handle_can_frame(frame: CanFrame) {
         Id::Extended(id) => id.as_raw(),
     };
     crate::platform::track_platform(id, &frame.data[..frame.dlc as usize]);
+    crate::identity::track_identity(id, &frame.data[..frame.dlc as usize]);
 
     if let Ok(message) = m_can::Messages::from_can_message(id, &frame.data[..frame.dlc as usize]) {
         let mut state = CAR_STATE.lock().await;
