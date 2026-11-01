@@ -68,7 +68,7 @@ The TWAI and MCP2515 are classic-CAN controllers: in normal mode they would erro
 
 ## Read-only mode
 
-**Purpose:** keep the device completely passive on the bus until the vehicle crate has positively identified the connected car and the [read-write policy](#read-write-policy) allows it. Where the controller supports it, read-only mode is enforced in hardware (listen-only mode): the device sends no frames, no ACKs and no error frames, so even a wrong bitrate cannot disturb the car's bus.
+**Purpose:** keep the device completely passive on the bus until the vehicle crate has positively identified the connected car and the [read-write policy](#read-write-policy) allows it. Where the controller supports it, read-only mode is enforced in hardware (listen-only mode): the device sends no frames, no ACKs and no error frames, so even a wrong bitrate cannot disturb the car's bus. The one exception before the car is identified is the [identity probe](#identity-probe).
 
 **Flag:** `core-interface` — `static CAN_READ_ONLY: AtomicBool = AtomicBool::new(true)`. Defaults to `true` (locked) at boot so no frame can reach the bus before validation.
 
@@ -82,11 +82,11 @@ The TWAI and MCP2515 are classic-CAN controllers: in normal mode they would erro
 ### Enforcement
 Two layers:
 
-1.  **Hardware listen-only (ESP):** the board CAN loops are woken by `can_read_only_receiver()` (a `Watch` raised by `set_can_read_only`) and re-check `is_can_read_only()` to keep the controller's mode in sync. The MCP2515 loop additionally wakes every 10 ms.
+1.  **Hardware listen-only (ESP):** the board CAN loops are woken by `can_read_only_receiver()` (a `Watch` raised by `set_can_read_only` and by an identity probe window opening or closing) and re-check `is_can_bus_listen_only(bus_id)` to keep the controller's mode in sync: listen-only while the bus is read-only (`is_can_bus_read_only(bus_id)`), unless a probe window is open on it. The MCP2515 loop additionally wakes every 10 ms.
     *   TWAI: `run_twai_loop` rebuilds the driver in `TwaiMode::ListenOnly` / `TwaiMode::Normal` (esp-hal also applies the ESP32/S3/C3 errata workaround that forces the controller error-passive in listen-only mode). The rebuild resets the controller, so frames arriving during the switch are lost.
     *   MCP2515: `init_mcp2515` leaves the chip in `OpMode::ListenOnly`, and `run_mcp2515_loop` calls `set_mode(ListenOnly | Normal)` on each change.
     *   Neither controller is ever in normal mode before its loop has checked the flag.
-2.  **Software TX drop (all boards):** the board TX drain loops discard every frame addressed to their `bus_id` while the flag is set, and also while the hardware mode has not yet caught up with a flip of the flag. Vehicle code is free to push frames to the TX channels at any time. Sites:
+2.  **Software TX drop (all boards):** the board TX drain loops ask `allow_can_tx(bus_id, &frame)` for every frame and discard it unless the bus is read-write or the frame is one an open probe window allows, and also while the hardware mode has not yet caught up. Vehicle code is free to push frames to the TX channels at any time. Sites:
     *   `board-pc` — `socket_can_task` TX arm (before `socket.write_frame()`)
     *   `board-esp` — `run_twai_session` TX arm (before `twai.transmit_async()`)
     *   `board-esp` — `run_mcp2515_loop` TX arm (before `driver.send_message()`)
@@ -107,10 +107,20 @@ E-GMP doesn't identify the exact car yet, so it never unlocks the bus. North Ame
 
 virtual-car has no real car to recognise: it identifies a simulated car with a fixed fingerprint at boot (`identify_simulated_car()`) and asks to unlock, so its commands work once the owner has approved it (and, in a development build, unlocked the dev lock). Every virtual-car device is the same car to the policy. It is for development only; don't run it on a device plugged into a real car.
 
+### Identity probe
+Some cars only give away what identifies the exact car when asked with a diagnostic request (E-GMP: the head unit's serial number, `22 F18C` on 0x780). The identity probe is the only way to transmit before the car is identified, and it is kept as narrow as possible:
+
+*   **Declared at build time.** The vehicle declares an `IdentityProbe`: one classic-CAN bus and the exact frames it may send, each with its ID, 11-bit (`standard_id`) or 29-bit (`extended_id`), at most `MAX_PROBE_FRAMES`. E-GMP's is `uds_single_frame(&[0x22, 0xF1, 0x8C], 0x00)` and `iso_tp_flow_control(0x00)`, both on 0x780. A request broadcast to every ECU (OBD's 0x7DF) declares its flow control on the answering ECU's own ID instead.
+*   **A window per attempt.** `open_identity_probe(&PROBE)` returns a `ProbeWindow` and is refused unless the platform is confirmed and the exact car isn't, no logging session runs, the bus received a frame in the last `BUS_AWAKE_MS` (a frame sent on a sleeping E-GMP bus woke the car), no other window is open, and fewer than `MAX_PROBE_ATTEMPTS` windows were opened since boot. CAN-FD buses are refused.
+*   **Exact frames, once each.** While the window is open, the bus's controller leaves listen-only mode (it then also acknowledges the car's frames, as any node does), and `allow_can_tx` lets each declared frame through at most once, on its own ID, byte for byte, with 8 data bytes. Everything else is still dropped, and `is_can_read_only()` stays `true`.
+*   **Short.** The window closes when it is dropped, after `PROBE_WINDOW_MS`, when the exact car is confirmed, when a logging session starts, or on any relock (`set_can_read_only(true)`, a bus-off). The controller then returns to listen-only mode.
+
+The vehicle waits `PROBE_SETTLE_MS` after opening the window, for the controller to leave listen-only, then sends the request. `UdsRequest` (`isotp.rs`) is the matching ISO-TP client, for one single-frame request (UDS `22`, OBD `09`, any service whose positive answer is the service byte plus 0x40 followed by the request's parameters) with normal addressing on classic CAN. It does no I/O: the vehicle feeds it the frames from the response ID, sends its flow control when it returns `SendFlowControl`, and gives up after `timeout_ms()` without a frame. It handles single and multi-frame answers, consecutive-frame order, negative responses and "response pending" (`7F xx 78`), and pads the frames it builds with the byte the vehicle chooses (some ECUs expect `AA` or `55` instead of `00`). Extended addressing, ISO-TP over CAN-FD and multi-frame requests aren't supported.
+
 ### Intended vehicle workflow
 1.  Boot: `CAN_READ_ONLY = true`, identity unconfirmed, dev lock locked; the board restores the owner's approval from storage. Vehicle receives CAN frames via `can_rx_task`.
 2.  Vehicle fingerprints the bus (frame IDs, data ranges, handshake frames against its expected car profile) and calls `confirm_car_identity()`.
-3.  Vehicle identifies the exact car (the VIN, checked with `vin_matches`, or other unique identifiers) and calls `confirm_car_fingerprint(..)`, then `set_can_read_only(false)`. CAN TX is live once the owner has approved this car and, in a development build, the dev lock is unlocked; the vehicle doesn't need to ask again when that happens.
+3.  Vehicle identifies the exact car (the VIN, checked with `vin_matches`, or other unique identifiers, read passively or through the [identity probe](#identity-probe)) and calls `confirm_car_fingerprint(..)`, then `set_can_read_only(false)`. CAN TX is live once the owner has approved this car and, in a development build, the dev lock is unlocked; the vehicle doesn't need to ask again when that happens.
 4.  On any subsequent error or unexpected data: `revoke_car_identity()` re-engages the lock.
 
 ## Read-write policy

@@ -61,7 +61,9 @@ pub fn can_log_dropped_count() -> u32 {
 /// Taps a received frame into the logging session. Board drivers call this for every
 /// frame they receive, before any vehicle filtering. It never blocks: a full channel
 /// drops the frame and counts it. Frames for a bus that doesn't exist are ignored.
+/// It also records that the bus is awake, for the identity probe.
 pub fn log_can_frame(frame: &CanFrame) {
+    crate::can_probe::note_can_rx(frame.bus_id);
     if !is_can_logging() || frame.bus_id as usize >= MAX_CAN_BUSES {
         return;
     }

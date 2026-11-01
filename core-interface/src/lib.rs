@@ -9,8 +9,10 @@ mod availability;
 mod can;
 mod can_access;
 mod can_log;
+mod can_probe;
 mod channels;
 mod dispatch;
+mod isotp;
 mod lifecycle;
 mod pairing;
 mod requirements;
@@ -57,6 +59,17 @@ pub use can::{
     CanReadOnlyReceiver, can_read_only_receiver, confirm_car_identity, declare_can_fd_bus,
     is_can_bus_read_only, is_can_fd_bus, is_can_read_only, is_car_identity_confirmed,
     passes_filter, revoke_car_identity, set_can_read_only, vin_matches,
+};
+
+// Identity probe (the one transmit before the car is identified) and its UDS client
+pub use can_probe::{
+    BUS_AWAKE_MS, IdentityProbe, MAX_PROBE_ATTEMPTS, MAX_PROBE_FRAMES, PROBE_SETTLE_MS,
+    PROBE_WINDOW_MS, ProbeRefused, ProbeWindow, allow_can_tx, extended_id, is_can_bus_listen_only,
+    open_identity_probe, reset_identity_probe_for_tests, standard_id,
+};
+pub use isotp::{
+    UDS_MAX_REQUEST, UDS_MAX_RESPONSE, UdsError, UdsRequest, UdsStep, iso_tp_flow_control,
+    uds_single_frame,
 };
 
 // CAN read-write policy (car fingerprint, owner approval, dev lock)
