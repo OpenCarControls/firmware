@@ -73,6 +73,10 @@ pub fn is_can_read_only() -> bool {
 /// soon as either is withdrawn, without the vehicle asking again.
 /// Returns the resulting read-only state ([`is_can_read_only`]).
 pub fn set_can_read_only(enabled: bool) -> bool {
+    if enabled {
+        // Also closes an open identity probe window.
+        crate::can_probe::note_relock();
+    }
     let enabled = enabled
         || crate::can_log::is_can_logging()
         || !crate::can_access::is_car_fingerprint_confirmed();
@@ -156,8 +160,9 @@ pub fn is_can_fd_bus(bus_id: u8) -> bool {
 }
 
 /// Returns `true` if `bus_id` must stay read-only: either the global read-only flag
-/// is set, or the bus is declared CAN-FD. Board drivers use this (not
-/// `is_can_read_only()` alone) for both the controller mode and the TX drop.
+/// is set, or the bus is declared CAN-FD. Board drivers don't use it directly: the
+/// controller mode comes from [`crate::is_can_bus_listen_only`] and the TX drop from
+/// [`crate::allow_can_tx`], which add the identity probe's exception to it.
 pub fn is_can_bus_read_only(bus_id: u8) -> bool {
     is_can_read_only() || is_can_fd_bus(bus_id)
 }

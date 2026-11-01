@@ -19,7 +19,7 @@ Rules for AI agents working in this repo. Project knowledge (architecture, BLE, 
 *   Keep `no_std` crates host-testable: HAL code stays behind the `hardware` feature.
 
 ### Safety
-*   CAN TX must stay gated by `is_can_read_only()`; never add a path that writes to a bus without going through the read-only check. Don't call `set_can_read_only(false)` before the vehicle has validated the car.
+*   CAN TX must stay gated by `is_can_read_only()` (board TX loops: `allow_can_tx()`); never add a path that writes to a bus without going through that check. The only exception is the identity probe (`can_probe.rs`, see `docs/can.md`): don't widen it beyond its declared exact frames, or relax its conditions, without the maintainer's agreement. Don't call `set_can_read_only(false)` before the vehicle has validated the car.
 *   BLE: never trust `source_device_id` from the app; keep characteristics `encrypted` and the pairing-window checks intact.
 
 ### Git & files

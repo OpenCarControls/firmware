@@ -146,8 +146,9 @@ mod hardware {
     /// Bidirectional TWAI loop - runs forever (core 1 on dual-core chips, core 0 otherwise).
     ///
     /// While CAN read-only mode is on, the controller runs in hardware **listen-only**
-    /// mode: it never drives the bus (no ACKs, no error frames, no TX). When the flag
-    /// changes, the controller is reset and restarted in the matching mode.
+    /// mode: it never drives the bus (no ACKs, no error frames, no TX), except while an
+    /// identity probe window is open on this bus. When that changes, the controller is
+    /// reset and restarted in the matching mode.
     ///
     /// Also restarts the controller after a bus-off (with a 1 s back-off).
     pub async fn run_twai_loop(mut driver: TwaiDriver, bus_id: u8, filters: &'static [CanFilter]) {
@@ -156,7 +157,7 @@ mod hardware {
         let mut stats = TwaiRxStats::new();
         let mut next_report = embassy_time::Instant::now() + RX_STATS_INTERVAL;
         loop {
-            let listen_only = core_interface::is_can_bus_read_only(bus_id);
+            let listen_only = core_interface::is_can_bus_listen_only(bus_id);
             let mode = if listen_only {
                 TwaiMode::ListenOnly
             } else {
@@ -207,7 +208,7 @@ mod hardware {
             core_interface::can_tx_channel(bus_id).expect("CAN bus id exceeds MAX_CAN_BUSES");
 
         loop {
-            if core_interface::is_can_bus_read_only(bus_id) != listen_only {
+            if core_interface::is_can_bus_listen_only(bus_id) != listen_only {
                 return;
             }
 
@@ -269,7 +270,8 @@ mod hardware {
                 // Drop silently when in read-only mode; do not transmit on the bus.
                 // Both checks matter: the flag may have flipped since this session
                 // started, and the controller is only rebuilt at the top of the loop.
-                if !listen_only && !core_interface::is_can_bus_read_only(bus_id) {
+                // `allow_can_tx` also lets an identity probe's own frames through.
+                if !listen_only && core_interface::allow_can_tx(bus_id, &outbound) {
                     transmit_twai(twai, bus_id, &outbound).await;
                 }
             }
@@ -417,10 +419,10 @@ mod hardware {
             .expect("more CAN bus drivers than MAX_CAN_BUSES");
 
         let mut was_logging = false;
-        let mut listen_only = core_interface::is_can_bus_read_only(bus_id);
+        let mut listen_only = core_interface::is_can_bus_listen_only(bus_id);
         set_mcp_operating_mode(&mut driver, bus_id, listen_only);
         loop {
-            if core_interface::is_can_bus_read_only(bus_id) != listen_only {
+            if core_interface::is_can_bus_listen_only(bus_id) != listen_only {
                 listen_only = !listen_only;
                 set_mcp_operating_mode(&mut driver, bus_id, listen_only);
             }
@@ -472,8 +474,9 @@ mod hardware {
             while let Some(outbound) = pending_tx.take().or_else(|| tx_channel.try_receive().ok()) {
                 // Drop silently when in read-only mode; do not transmit on the bus.
                 // Both checks matter: the flag may have flipped since the mode was
-                // last applied at the top of the loop.
-                if !listen_only && !core_interface::is_can_bus_read_only(bus_id) {
+                // last applied at the top of the loop. `allow_can_tx` also lets an
+                // identity probe's own frames through.
+                if !listen_only && core_interface::allow_can_tx(bus_id, &outbound) {
                     if let Some(f) = core_to_mcp_frame(&outbound) {
                         if driver.send_message(f).is_ok() {
                             crate::status_leds::pulse_can();
