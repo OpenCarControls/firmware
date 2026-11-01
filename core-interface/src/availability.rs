@@ -29,7 +29,6 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 
-use crate::channels::{BLE_TX_CHANNEL, MQTT_TX_CHANNEL};
 use crate::proto;
 use crate::proto::CommandAvailabilityState as State;
 
@@ -151,7 +150,7 @@ pub fn command_availability_state_update(
 
 /// Queues the availability on BLE if it changed since the last one queued, or if that was
 /// [`COMMAND_AVAILABILITY_REPEAT_MS`] or more ago. `try_send`: never blocks; a full queue
-/// leaves it unsent, to retry on the next call. Returns whether a message was queued.
+/// or a BLE link that is down leaves it unsent, to retry on the next call. Returns whether a message was queued.
 pub fn publish_command_availability(timestamp_ms: u64) -> bool {
     let Some(availability) = command_availability_at(timestamp_ms) else {
         return false;
@@ -167,7 +166,7 @@ pub fn publish_command_availability(timestamp_ms: u64) -> bool {
         return false;
     }
     let msg = command_availability_state_update(timestamp_ms, availability.clone());
-    if BLE_TX_CHANNEL.try_send(msg).is_err() {
+    if !crate::routing::try_send_to(crate::types::Transport::Ble, msg) {
         return false;
     }
     LAST_PUBLISHED.lock(|last| *last.borrow_mut() = Some((availability, timestamp_ms)));
@@ -199,7 +198,8 @@ pub fn mqtt_command_availability_at(now_ms: u64) -> Option<proto::CommandAvailab
 /// Queues the availability on MQTT like [`publish_command_availability`] does on BLE, at the
 /// MQTT state's rate: while a client is active when it changed or [`COMMAND_AVAILABILITY_REPEAT_MS`]
 /// passed, otherwise once per MQTT idle period. `try_send`: never blocks the MQTT driver's
-/// queue; a full queue leaves it unsent, to retry on the next call.
+/// queue; a full queue or an MQTT session that is down leaves it unsent, to retry on the
+/// next call.
 pub fn publish_command_availability_mqtt(timestamp_ms: u64) -> bool {
     let Some(availability) = mqtt_command_availability_at(timestamp_ms) else {
         return false;
@@ -220,7 +220,7 @@ pub fn publish_command_availability_mqtt(timestamp_ms: u64) -> bool {
         return false;
     }
     let msg = command_availability_state_update(timestamp_ms, availability.clone());
-    if MQTT_TX_CHANNEL.try_send(msg).is_err() {
+    if !crate::routing::try_send_to(crate::types::Transport::Mqtt, msg) {
         return false;
     }
     LAST_MQTT_PUBLISHED.lock(|last| *last.borrow_mut() = Some((availability, timestamp_ms)));

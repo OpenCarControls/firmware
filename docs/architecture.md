@@ -14,12 +14,12 @@ The intermediary between transport layers (BLE/MQTT) and vehicle logic. Knows no
 *   Defines 6 pure-logic `#[embassy_executor::task]` functions: `process_ble_commands_task`, `process_mqtt_commands_task`, `route_responses_task`, `publish_state_task`, `publish_can_access_task`, `publish_command_availability_task`.
 *   Exposes `pub fn passes_filter()`, `pub fn is_can_read_only()`, `pub fn set_can_read_only(bool)`, the CAN read-write policy (car identity, owner approval, dev lock; see [CAN](can.md#read-write-policy)), and the SavvyCAN logging API (`is_can_logging`, `log_can_frame`, `run_can_log_session`).
 *   Has 4 inner async helpers (`handle_ble_message`, `handle_mqtt_message`, `route_single_response`, `publish_single_state`) extracted from the task loops so they can be unit-tested without running an executor.
-*   **`publish_single_state` is intentionally non-blocking:** it uses `try_send` on both `BLE_TX_CHANNEL` and `MQTT_TX_CHANNEL`; if either is full it evicts the oldest pending state update and enqueues the fresher one. This guarantees `publish_state_task` never stalls, keeping `VEHICLE_STATE_CHANNEL` always drainable and preventing a deadlock cascade through `state_update_task` and command-handler tasks.
+*   **`publish_single_state` is intentionally non-blocking:** state updates don't go through the TX queues. Each transport has a single-value slot (`BLE_STATE_TX`, `MQTT_STATE_TX`, embassy `Signal`s) that the newest update overwrites. This guarantees `publish_state_task` never stalls, keeping `VEHICLE_STATE_CHANNEL` always drainable and preventing a deadlock cascade through `state_update_task` and command-handler tasks, and a state update can never push a command response out of a queue.
 *   Uses `#![cfg_attr(not(test), no_std)]` so host tests compile without a `no_std` target.
 *   Internally organised into modules (`types`, `channels`, `can`, `can_log`, `dispatch`, `routing`, …); all public symbols are re-exported from `lib.rs`.
 
 ### Board crates (`board-esp`, `board-pc`)
-Compiled as `rlib`. Each exports a single `pub fn start(spawner: &Spawner)` that spawns the `core-interface` tasks. Board crates have no knowledge of vehicle logic or protos — they only drive hardware peripherals (radio, CAN, LTE) by reading/writing the edge channels (`BLE_RX_CHANNEL`, `BLE_TX_CHANNEL`, `MQTT_RX_CHANNEL`, `MQTT_TX_CHANNEL`).
+Compiled as `rlib`. Each exports a single `pub fn start(spawner: &Spawner)` that spawns the `core-interface` tasks. Board crates have no knowledge of vehicle logic or protos — they only drive hardware peripherals (radio, CAN, LTE) by reading/writing the edge channels (`BLE_RX_CHANNEL`, `BLE_TX_CHANNEL`, `MQTT_RX_CHANNEL`, `MQTT_TX_CHANNEL`, and the `BLE_STATE_TX` / `MQTT_STATE_TX` state slots), and report each transport's link with `set_link_up` (see [Transport links](#transport-links-and-responses)).
 
 ### Vehicle crates (`cars/*`)
 Compiled as `rlib`. Each exports 3 `#[embassy_executor::task]` functions: `handle_basic_commands_task`, `handle_advanced_commands_task`, and `state_update_task`. They read from `BASIC_CMD_CHANNEL` / `ADVANCED_CMD_CHANNEL`, write results to `CMD_RESP_CHANNEL`, and push state updates to `VEHICLE_STATE_CHANNEL`. They depend on `core-interface` for the channel statics and shared types, but never touch board code.
@@ -59,9 +59,11 @@ The actual binary entry point. Generated fresh by `xtask` before every build fro
 | Channel | Direction | Type | Notes |
 |---|---|---|---|
 | `BLE_RX_CHANNEL` | board → core | `AppToDevice` | Raw inbound proto from BLE driver |
-| `BLE_TX_CHANNEL` | core → board | `DeviceToApp` | Outbound proto to BLE driver |
+| `BLE_TX_CHANNEL` | core → board | `DeviceToApp` | Responses and system state to the BLE driver; only filled while the link is up |
+| `BLE_STATE_TX` | core → board | `DeviceToApp` | Newest vehicle state for BLE (a `Signal`: one value, overwritten); sent after `BLE_TX_CHANNEL` |
 | `MQTT_RX_CHANNEL` | board → core | `AppToDevice` | Raw inbound proto from MQTT driver |
-| `MQTT_TX_CHANNEL` | core → board | `DeviceToApp` | Outbound proto to MQTT driver |
+| `MQTT_TX_CHANNEL` | core → board | `DeviceToApp` | Responses and system state to the MQTT driver; only filled while the session is up |
+| `MQTT_STATE_TX` | core → board | `DeviceToApp` | Newest vehicle state for MQTT, basic only and throttled (a `Signal`); sent after `MQTT_TX_CHANNEL` |
 | `SYSTEM_COMMAND_CHANNEL` | core → board | `SystemCommand` | BLE only; board handles restart etc. (the CAN read-write commands are handled in core) |
 | `BASIC_CMD_CHANNEL` | core → vehicle | `InboundCommand` | From BLE (MQTT is rejected until authenticated) |
 | `ADVANCED_CMD_CHANNEL` | core → vehicle | `InboundCommand` | BLE only |
@@ -72,6 +74,18 @@ The actual binary entry point. Generated fresh by `xtask` before every build fro
 | `CAN_LOG_CHANNEL` | board → logger session | `CanLogFrame` | Raw (pre-filter) frames for the SavvyCAN logger, only filled while a client is connected; see [CAN bus](can.md#savvycan-logging) |
 
 **`InboundCommand`** carries `{ message_id: u64, transport: Transport, bytes: Vec<u8> }`. The vehicle echoes the `Transport` tag back in `CMD_RESP_CHANNEL` so `route_responses_task` can route the response to the correct radio without the vehicle knowing anything about transports.
+
+### Transport links and responses
+A response goes back on the transport its command came in on. If that transport is gone, the response is dropped: the app re-reads the state, which stays the source of truth (contracts#7).
+
+*   Each board driver calls `set_link_up(Transport, bool)`: the ESP BLE transport when a phone connects and when the connection closes, both MQTT drivers when the session is ready and when it ends. The PC BLE mock (HTTP, no connections) reports BLE up once at start. Links are down at boot.
+*   Everything core queues on `BLE_TX_CHANNEL` / `MQTT_TX_CHANNEL` (responses, CAN access state, command availability) goes through `routing::send_to` / `try_send_to`, which drop the message while the link is down. Going down clears that transport's queue, so a message queued for one phone is never delivered to the next.
+*   `send_to` (responses) waits for room while the link stays up, but gives up once the link goes down, even if another peer connected since (a per-link generation counter). Clearing the queue wakes it. So with no phone connected, `route_responses_task` never waits on BLE, and MQTT responses never queue up behind it.
+*   While a phone is connected but not reading, a BLE response still waits for room, which holds MQTT responses behind it until the link drops.
+*   A response the vehicle is still working on when its phone leaves isn't tied to that connection: if another phone connects before it is sent, that phone gets it. `CMD_RESP_CHANNEL` only carries the `Transport`.
+
+### Duplicate commands
+The app may resend a command with the same `message_id` after switching transport or reconnecting, and the broker redelivers an MQTT QoS 1 message it didn't see acknowledged. Both dispatchers drop a command whose (source, `message_id`) pair they saw in the last `DEDUPE_WINDOW_MS` (5 min, at most `DEDUPE_CAPACITY` = 16 entries, oldest forgotten first), without answering it (`dedupe.rs`). Heartbeats aren't commands and aren't remembered; `message_id` 0 (the proto default) never counts as a duplicate. The source is the transport-verified one (the BLE address). MQTT has none until its commands are authenticated (contracts#8, firmware#16), so MQTT commands are keyed by `message_id` alone and only match each other: a resend from BLE to MQTT isn't caught yet.
 
 **`platform_id`** is a CRC32 of the proto package name (e.g. `0xF7544D7E` for `opencar.cars.virtual_car.v1`), pre-computed and stored in `contracts/.../meta.toml`. xtask injects it as a compile-time constant into `.app_build/src/main.rs`. `core_interface::init(platform_id)` stores it in an `AtomicU32`; the dispatcher tasks validate every inbound message against it and silently drop mismatches.
 
@@ -84,11 +98,13 @@ The actual binary entry point. Generated fresh by `xtask` before every build fro
 ```
 BLE driver  ──BLE_RX──▶  core-interface  ──BASIC_CMD────▶  vehicle
             ◀─BLE_TX──                  ◀─CMD_RESP─────
+            ◀─BLE_STATE_TX─             ◀─VEHICLE_STATE─
                          ──ADVANCED_CMD──▶
                          ──SYSTEM_CMD───▶  board
 
 MQTT driver ──MQTT_RX─▶  core-interface  ──BASIC_CMD────▶  vehicle
             ◀─MQTT_TX─                  ◀─CMD_RESP─────
+            ◀─MQTT_STATE_TX─
 
 CAN driver  ──CAN_RX──▶  vehicle
             ◀─CAN_TX──

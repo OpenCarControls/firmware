@@ -35,6 +35,9 @@ fn boot() {
     reset_can_access_for_tests();
     embassy_futures::block_on(clear_paired_phones());
     set_can_read_only(true);
+    core_interface::set_link_up(core_interface::Transport::Ble, true);
+    core_interface::set_link_up(core_interface::Transport::Mqtt, true);
+    core_interface::reset_recent_commands_for_tests();
     drain_tx();
 }
 
@@ -53,9 +56,15 @@ fn read_write_for(car: &[u8]) {
     assert!(!is_can_read_only());
 }
 
+/// A new ID for each command, as the app does: the dispatcher drops a repeated one.
+fn next_message_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 fn system_command(source: &[u8], action: Action) -> proto::AppToDevice {
     proto::AppToDevice {
-        message_id: 7,
+        message_id: next_message_id(),
         platform_id: PLATFORM_ID,
         source_device_id: source.to_vec(),
         payload: Some(Payload::SystemCommand(proto::SystemCommand {
@@ -313,10 +322,12 @@ fn a_bonded_phone_approves_and_unlocks_over_ble() {
     identify(CAR_A);
     assert!(set_can_read_only(false));
 
-    embassy_futures::block_on(handle_ble_message(approve_cmd(PHONE, true)));
+    let approve = approve_cmd(PHONE, true);
+    let approve_id = approve.message_id;
+    embassy_futures::block_on(handle_ble_message(approve));
     let resp = ble_response();
     assert!(resp.success, "{}", resp.error_message);
-    assert_eq!(resp.message_id, 7);
+    assert_eq!(resp.message_id, approve_id);
     assert_eq!(can_read_write_approval(), Approval::Approved);
 
     embassy_futures::block_on(handle_ble_message(unlock_cmd(PHONE, true)));
@@ -458,7 +469,7 @@ fn an_unchanged_access_state_is_sent_again_periodically() {
 
 fn vehicle_cmd(advanced: bool) -> proto::AppToDevice {
     proto::AppToDevice {
-        message_id: 11,
+        message_id: next_message_id(),
         platform_id: PLATFORM_ID,
         source_device_id: PHONE.to_vec(),
         payload: Some(if advanced {
@@ -482,10 +493,12 @@ fn vehicle_commands_are_refused_with_the_reason_while_read_only() {
     let mut refused = |expected: &str| {
         assert_eq!(can_read_only_reason(), Some(expected));
         for advanced in [false, true] {
-            embassy_futures::block_on(handle_ble_message(vehicle_cmd(advanced)));
+            let cmd = vehicle_cmd(advanced);
+            let id = cmd.message_id;
+            embassy_futures::block_on(handle_ble_message(cmd));
             let resp = ble_response();
             assert!(!resp.success);
-            assert_eq!(resp.message_id, 11);
+            assert_eq!(resp.message_id, id);
             assert_eq!(
                 resp.status_code,
                 proto::CommandStatusCode::RejectedUnavailable as i32
@@ -519,10 +532,17 @@ fn vehicle_commands_are_refused_with_the_reason_while_read_only() {
     assert_eq!(can_read_only_reason(), None);
 
     // Read-write: commands reach the vehicle again.
-    embassy_futures::block_on(handle_ble_message(vehicle_cmd(false)));
-    assert_eq!(BASIC_CMD_CHANNEL.try_receive().unwrap().message_id, 11);
-    embassy_futures::block_on(handle_ble_message(vehicle_cmd(true)));
-    assert_eq!(ADVANCED_CMD_CHANNEL.try_receive().unwrap().message_id, 11);
+    for advanced in [false, true] {
+        let cmd = vehicle_cmd(advanced);
+        let id = cmd.message_id;
+        embassy_futures::block_on(handle_ble_message(cmd));
+        let channel = if advanced {
+            &ADVANCED_CMD_CHANNEL
+        } else {
+            &BASIC_CMD_CHANNEL
+        };
+        assert_eq!(channel.try_receive().unwrap().message_id, id);
+    }
 
     let session = CanLogSession::start().unwrap();
     refused("CAN logging is active");

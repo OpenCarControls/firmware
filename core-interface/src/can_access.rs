@@ -23,7 +23,6 @@ use embassy_time::{Duration, Instant, Timer};
 use portable_atomic::{AtomicBool, Ordering};
 use sha2::{Digest, Sha256};
 
-use crate::channels::BLE_TX_CHANNEL;
 use crate::proto;
 
 /// Identifies one car to the policy: SHA-256 of the platform ID and the vehicle's car
@@ -312,8 +311,8 @@ static LAST_PUBLISHED: Mutex<
 
 /// Queues [`can_access_state_update`] on BLE if the state changed since the last one
 /// queued, or if that was [`CAN_ACCESS_REPEAT_MS`] or more ago. `try_send`: never blocks;
-/// a full queue leaves it unsent, to retry on the next call. Returns whether a message
-/// was queued.
+/// a full queue or a BLE link that is down leaves it unsent, to retry on the next call.
+/// Returns whether a message was queued.
 pub fn publish_can_access_state(timestamp_ms: u64) -> bool {
     let state = can_access_state();
     let due = LAST_PUBLISHED.lock(|last| match last.borrow().as_ref() {
@@ -326,7 +325,7 @@ pub fn publish_can_access_state(timestamp_ms: u64) -> bool {
         return false;
     }
     let msg = can_access_state_update(timestamp_ms);
-    if BLE_TX_CHANNEL.try_send(msg).is_err() {
+    if !crate::routing::try_send_to(crate::types::Transport::Ble, msg) {
         return false;
     }
     LAST_PUBLISHED.lock(|last| *last.borrow_mut() = Some((state, timestamp_ms)));

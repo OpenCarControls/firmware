@@ -3,10 +3,12 @@ use alloc::vec::Vec;
 use portable_atomic::Ordering;
 
 use crate::channels::{
-    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, BLE_RX_CHANNEL, BLE_TX_CHANNEL, MQTT_RX_CHANNEL,
-    MQTT_TX_CHANNEL, SYSTEM_COMMAND_CHANNEL,
+    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, BLE_RX_CHANNEL, MQTT_RX_CHANNEL,
+    SYSTEM_COMMAND_CHANNEL,
 };
+use crate::dedupe::is_duplicate_command;
 use crate::proto;
+use crate::routing::{send_to, try_send_to};
 use crate::types::{InboundCommand, Transport};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
@@ -50,9 +52,9 @@ async fn ble_controller_allows(source_device_id: &[u8], now_ms: u64) -> bool {
 }
 
 async fn send_not_controller_response(message_id: u64) {
-    BLE_TX_CHANNEL
-        .sender()
-        .send(proto::DeviceToApp {
+    send_to(
+        Transport::Ble,
+        proto::DeviceToApp {
             timestamp_ms: embassy_time::Instant::now().as_millis(),
             platform_id: crate::PLATFORM_ID.load(Ordering::Relaxed),
             payload: Some(proto::device_to_app::Payload::CommandResponse(
@@ -66,8 +68,9 @@ async fn send_not_controller_response(message_id: u64) {
                     status_code: proto::CommandStatusCode::RejectedNotController as i32,
                 },
             )),
-        })
-        .await;
+        },
+    )
+    .await;
 }
 
 /// Answers a CAN read-write policy command. `Err` carries the reason shown to the user.
@@ -80,9 +83,9 @@ async fn send_system_command_response(message_id: u64, result: Result<(), &'stat
             proto::CommandStatusCode::Failed,
         ),
     };
-    BLE_TX_CHANNEL
-        .sender()
-        .send(proto::DeviceToApp {
+    send_to(
+        Transport::Ble,
+        proto::DeviceToApp {
             timestamp_ms: embassy_time::Instant::now().as_millis(),
             platform_id: crate::PLATFORM_ID.load(Ordering::Relaxed),
             payload: Some(proto::device_to_app::Payload::CommandResponse(
@@ -94,8 +97,9 @@ async fn send_system_command_response(message_id: u64, result: Result<(), &'stat
                     status_code: status_code as i32,
                 },
             )),
-        })
-        .await;
+        },
+    )
+    .await;
 }
 
 /// The CAN read-write policy commands change whether the device may transmit on the
@@ -175,12 +179,23 @@ pub async fn reset_ble_controller_lease_for_tests() {
 /// Basic and advanced commands are answered with a failed `CommandResponse` instead,
 /// giving the reason, while the device is CAN read-only.
 ///
-/// Messages with a mismatched `platform_id` are silently dropped.
+/// Messages with a mismatched `platform_id` are silently dropped, and so are commands
+/// whose (source, `message_id`) pair was seen recently on either transport (see
+/// `dedupe.rs`).
+///
+/// Responses are only queued while the BLE link is up (see `set_link_up`).
 pub async fn handle_ble_message(msg: proto::AppToDevice) {
     if msg.platform_id != crate::PLATFORM_ID.load(Ordering::Relaxed) {
         return;
     }
     let source_device_id = msg.source_device_id.clone();
+    let is_command = !matches!(
+        msg.payload,
+        None | Some(proto::app_to_device::Payload::Heartbeat(_))
+    );
+    if is_command && is_duplicate_command(&source_device_id, msg.message_id) {
+        return;
+    }
     match msg.payload {
         Some(proto::app_to_device::Payload::SystemCommand(cmd)) => match cmd.action {
             Some(proto::system_command::Action::RestartCommand(restart)) => {
@@ -238,7 +253,7 @@ pub async fn handle_ble_message(msg: proto::AppToDevice) {
         },
         Some(proto::app_to_device::Payload::BasicCommandBytes(bytes)) => {
             if let Some(rejection) = read_only_rejection(msg.message_id) {
-                BLE_TX_CHANNEL.sender().send(rejection).await;
+                send_to(Transport::Ble, rejection).await;
                 return;
             }
             if !ble_controller_allows(&source_device_id, embassy_time::Instant::now().as_millis())
@@ -259,7 +274,7 @@ pub async fn handle_ble_message(msg: proto::AppToDevice) {
         }
         Some(proto::app_to_device::Payload::AdvancedCommandBytes(bytes)) => {
             if let Some(rejection) = read_only_rejection(msg.message_id) {
-                BLE_TX_CHANNEL.sender().send(rejection).await;
+                send_to(Transport::Ble, rejection).await;
                 return;
             }
             if !ble_controller_allows(&source_device_id, embassy_time::Instant::now().as_millis())
@@ -303,21 +318,24 @@ pub(crate) const MQTT_COMMANDS_AUTHENTICATED: bool = false;
 /// Answers a rejected MQTT command. `try_send`: the MQTT driver must never be
 /// stalled by a full queue, and the app can retry or notice the missing reply.
 fn send_mqtt_unauthenticated_response(message_id: u64) {
-    let _ = MQTT_TX_CHANNEL.try_send(proto::DeviceToApp {
-        timestamp_ms: embassy_time::Instant::now().as_millis(),
-        platform_id: crate::PLATFORM_ID.load(Ordering::Relaxed),
-        payload: Some(proto::device_to_app::Payload::CommandResponse(
-            proto::CommandResponse {
-                message_id,
-                success: false,
-                error_message: String::from(
-                    "command rejected: commands over MQTT are not authenticated yet, use BLE",
-                ),
-                response_data: None,
-                status_code: proto::CommandStatusCode::Failed as i32,
-            },
-        )),
-    });
+    try_send_to(
+        Transport::Mqtt,
+        proto::DeviceToApp {
+            timestamp_ms: embassy_time::Instant::now().as_millis(),
+            platform_id: crate::PLATFORM_ID.load(Ordering::Relaxed),
+            payload: Some(proto::device_to_app::Payload::CommandResponse(
+                proto::CommandResponse {
+                    message_id,
+                    success: false,
+                    error_message: String::from(
+                        "command rejected: commands over MQTT are not authenticated yet, use BLE",
+                    ),
+                    response_data: None,
+                    status_code: proto::CommandStatusCode::Failed as i32,
+                },
+            )),
+        },
+    );
 }
 
 /// Processes a single `AppToDevice` message arriving from the MQTT driver.
@@ -329,6 +347,8 @@ fn send_mqtt_unauthenticated_response(message_id: u64) {
 /// lock: MQTT can never approve or unlock read-write mode.
 /// `heartbeat` carries no payload and is not routed; its presence alone resets
 /// the MQTT activity window so state updates continue at full rate.
+/// A basic command whose `message_id` was seen recently from MQTT (a QoS 1
+/// redelivery) is dropped without an answer; see `dedupe.rs`.
 pub async fn handle_mqtt_message(msg: proto::AppToDevice) {
     if msg.platform_id != crate::PLATFORM_ID.load(Ordering::Relaxed) {
         return;
@@ -337,12 +357,16 @@ pub async fn handle_mqtt_message(msg: proto::AppToDevice) {
     // activity window alive so state updates flow at full rate.
     crate::routing::record_mqtt_activity((embassy_time::Instant::now().as_millis() / 1000) as u32);
     if let Some(proto::app_to_device::Payload::BasicCommandBytes(bytes)) = msg.payload {
+        // No verified source over MQTT yet, so the key is the message ID alone.
+        if is_duplicate_command(&[], msg.message_id) {
+            return;
+        }
         if !MQTT_COMMANDS_AUTHENTICATED {
             send_mqtt_unauthenticated_response(msg.message_id);
             return;
         }
         if let Some(rejection) = read_only_rejection(msg.message_id) {
-            let _ = MQTT_TX_CHANNEL.try_send(rejection);
+            try_send_to(Transport::Mqtt, rejection);
             return;
         }
         BASIC_CMD_CHANNEL

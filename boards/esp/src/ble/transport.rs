@@ -48,11 +48,11 @@ mod hardware {
     use alloc::vec::Vec;
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    use core_interface::{BLE_RX_CHANNEL, BLE_TX_CHANNEL, proto};
+    use core_interface::{BLE_RX_CHANNEL, BLE_STATE_TX, BLE_TX_CHANNEL, Transport, proto};
     use embassy_embedded_hal::adapter::BlockingAsync;
     use embassy_futures::{
         join::join,
-        select::{Either, Either4, select, select4},
+        select::{Either, Either3, Either4, select, select3, select4},
     };
     use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
     use embassy_sync::signal::Signal;
@@ -269,6 +269,7 @@ mod hardware {
                             let tx_auth = AtomicBool::new(false);
                             let tx_subscribed = Signal::new();
                             crate::status_leds::set_flag(crate::status_leds::FLAG_BLE, true);
+                            core_interface::set_link_up(Transport::Ble, true);
                             let _ = select(
                                 gatt_event_task(
                                     &server,
@@ -281,6 +282,9 @@ mod hardware {
                                 ble_tx_notify_task(&server, &conn, &tx_auth, &tx_subscribed),
                             )
                             .await;
+                            // Drops what was queued for this phone, so the next one
+                            // never gets it.
+                            core_interface::set_link_up(Transport::Ble, false);
                             crate::status_leds::set_flag(crate::status_leds::FLAG_BLE, false);
                             log::info!("BLE transport: connection closed, returning to advertise");
                         }
@@ -826,15 +830,22 @@ mod hardware {
             let msg = if let Some(msg) = pending_msg.take() {
                 msg
             } else {
-                match select(BLE_TX_CHANNEL.receive(), tx_subscribed.wait()).await {
-                    Either::First(msg) => msg,
+                // Biased to the first: responses go out before a waiting state update.
+                match select3(
+                    BLE_TX_CHANNEL.receive(),
+                    BLE_STATE_TX.wait(),
+                    tx_subscribed.wait(),
+                )
+                .await
+                {
+                    Either3::First(msg) | Either3::Second(msg) => msg,
                     // The app just subscribed: whatever was sent before went nowhere,
                     // so give it the current state now instead of at the next update.
                     // Not at once: a notification sent right as the CCCD write is
                     // accepted is lost before the app's notification stream is
                     // listening (seen on Android). The CAN access state follows through
                     // BLE_TX_CHANNEL, and is repeated every few seconds anyway.
-                    Either::Second(()) => {
+                    Either3::Third(()) => {
                         embassy_time::Timer::after(embassy_time::Duration::from_millis(
                             SUBSCRIBE_RESEND_DELAY_MS,
                         ))

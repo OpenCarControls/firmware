@@ -11,6 +11,7 @@ mod can_access;
 mod can_log;
 mod can_probe;
 mod channels;
+mod dedupe;
 mod dispatch;
 mod isotp;
 mod lifecycle;
@@ -49,9 +50,10 @@ pub use types::{CanFilter, CanFrame, InboundCommand, Transport, VehicleStatePayl
 
 // Channels
 pub use channels::{
-    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, BLE_RX_CHANNEL, BLE_TX_CHANNEL, CAN_RX_CHANNEL,
-    CAN_TX_CHANNELS, CMD_RESP_CHANNEL, MAX_CAN_BUSES, MQTT_RX_CHANNEL, MQTT_TX_CHANNEL,
-    SYSTEM_COMMAND_CHANNEL, VEHICLE_STATE_CHANNEL, can_tx_channel, send_can_frame,
+    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, BLE_RX_CHANNEL, BLE_STATE_TX, BLE_TX_CHANNEL,
+    CAN_RX_CHANNEL, CAN_TX_CHANNELS, CMD_RESP_CHANNEL, MAX_CAN_BUSES, MQTT_RX_CHANNEL,
+    MQTT_STATE_TX, MQTT_TX_CHANNEL, SYSTEM_COMMAND_CHANNEL, VEHICLE_STATE_CHANNEL, can_tx_channel,
+    send_can_frame,
 };
 
 // CAN filter & read-only
@@ -113,6 +115,11 @@ pub use pairing::{
 // Pairing lifecycle state
 pub use lifecycle::{close_pairing_window, is_pairing_window_open, open_pairing_window_for};
 
+// Duplicate commands
+pub use dedupe::{
+    DEDUPE_CAPACITY, DEDUPE_WINDOW_MS, RecentCommands, reset_recent_commands_for_tests,
+};
+
 // Dispatch tasks
 pub use dispatch::{
     handle_ble_message, handle_mqtt_message, process_ble_commands_task, process_mqtt_commands_task,
@@ -121,9 +128,9 @@ pub use dispatch::{
 
 // Routing tasks
 pub use routing::{
-    ble_state_update, latest_ble_state, publish_single_state, publish_state_task,
-    record_mqtt_activity, reset_latest_ble_state_for_tests, reset_mqtt_throttle_for_tests,
-    route_responses_task, route_single_response,
+    ble_state_update, is_link_up, latest_ble_state, publish_single_state, publish_state_task,
+    record_mqtt_activity, reset_latest_ble_state_for_tests, reset_links_for_tests,
+    reset_mqtt_throttle_for_tests, route_responses_task, route_single_response, set_link_up,
 };
 
 // Simulation

@@ -2,19 +2,31 @@ use crate::proto;
 use crate::types::{CanFrame, InboundCommand, Transport, VehicleStatePayload};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+use embassy_sync::signal::Signal;
 
 // ── Static Channels ───────────────────────────────────────────────────────────
 
-/// Outbound state/response messages toward the BLE driver task.
+/// Outbound command responses and system-state messages toward the BLE driver task.
+/// Only filled while the BLE link is up, and cleared when it goes down (see
+/// `set_link_up`). Vehicle state goes through [`BLE_STATE_TX`] instead.
 pub static BLE_TX_CHANNEL: Channel<CriticalSectionRawMutex, proto::DeviceToApp, 4> = Channel::new();
 /// Inbound commands arriving from the BLE driver task.
 pub static BLE_RX_CHANNEL: Channel<CriticalSectionRawMutex, proto::AppToDevice, 4> = Channel::new();
-/// Outbound state/response messages toward the MQTT driver task.
+/// Outbound command responses and system-state messages toward the MQTT driver task.
+/// Only filled while the MQTT session is up, and cleared when it ends (see
+/// `set_link_up`). Vehicle state goes through [`MQTT_STATE_TX`] instead.
 pub static MQTT_TX_CHANNEL: Channel<CriticalSectionRawMutex, proto::DeviceToApp, 4> =
     Channel::new();
 /// Inbound commands arriving from the MQTT driver task.
 pub static MQTT_RX_CHANNEL: Channel<CriticalSectionRawMutex, proto::AppToDevice, 4> =
     Channel::new();
+/// The newest vehicle state update for the BLE driver task, not yet sent. Each update
+/// overwrites the previous one, so state never queues up behind (or pushes out) a
+/// response. Drivers send `BLE_TX_CHANNEL` first.
+pub static BLE_STATE_TX: Signal<CriticalSectionRawMutex, proto::DeviceToApp> = Signal::new();
+/// The newest vehicle state update for the MQTT driver task, not yet sent (basic state
+/// only, already throttled). Like [`BLE_STATE_TX`].
+pub static MQTT_STATE_TX: Signal<CriticalSectionRawMutex, proto::DeviceToApp> = Signal::new();
 /// Decoded system commands (restart, etc.) for the board to act on.
 pub static SYSTEM_COMMAND_CHANNEL: Channel<CriticalSectionRawMutex, proto::SystemCommand, 1> =
     Channel::new();

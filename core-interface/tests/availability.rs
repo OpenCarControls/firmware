@@ -24,6 +24,8 @@ fn boot() {
     reset_command_availability_for_tests();
     set_can_read_only(true);
     reset_mqtt_throttle_for_tests();
+    core_interface::set_link_up(core_interface::Transport::Ble, true);
+    core_interface::set_link_up(core_interface::Transport::Mqtt, true);
     drain_tx();
 }
 

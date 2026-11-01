@@ -262,8 +262,13 @@ async fn handle_request(
             core_interface::BLE_RX_CHANNEL.send(msg).await;
             write_http_response(stream, "204 No Content", "", &[]).await
         }
-        ("GET", "/state") => match core_interface::BLE_TX_CHANNEL.try_receive() {
-            Ok(msg) => {
+        // Responses and system state first, then the newest vehicle state.
+        ("GET", "/state") => match core_interface::BLE_TX_CHANNEL
+            .try_receive()
+            .ok()
+            .or_else(|| core_interface::BLE_STATE_TX.try_take())
+        {
+            Some(msg) => {
                 let mut encoded = Vec::new();
                 if msg.encode(&mut encoded).is_err() {
                     return write_http_response(
@@ -276,7 +281,7 @@ async fn handle_request(
                 }
                 write_http_response(stream, "200 OK", "application/octet-stream", &encoded).await
             }
-            Err(_) => write_http_response(stream, "204 No Content", "", &[]).await,
+            None => write_http_response(stream, "204 No Content", "", &[]).await,
         },
         ("POST", "/pairing") => {
             core_interface::open_pairing_window_for(pairing_window_s);
@@ -352,6 +357,8 @@ pub async fn ble_http_task(
         port,
         device_name
     );
+    // The HTTP mock has no connections: whoever polls /state gets the queued messages.
+    core_interface::set_link_up(core_interface::Transport::Ble, true);
 
     loop {
         match listener.accept() {
