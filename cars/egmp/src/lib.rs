@@ -5,6 +5,7 @@ extern crate alloc;
 
 pub mod can;
 pub mod commands;
+mod platform;
 use alloc::string::String;
 pub use can::{CAN_FILTERS, can_rx_task};
 use core_interface::{

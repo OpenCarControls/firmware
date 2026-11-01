@@ -186,6 +186,57 @@ pub const CAN_FILTERS: &[CanFilter] = &[
         id: Id::Standard(StandardId::new(930).unwrap()),
         mask: 0x7FF,
     }, // TIRE_PRESSURE_UNIT
+    // Only checked by `platform.rs` (with 896, 898 and 899 above), not decoded.
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(767).unwrap()),
+        mask: 0x7FF,
+    }, // unmapped
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(900).unwrap()),
+        mask: 0x7FF,
+    }, // DATC_07_200ms
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(944).unwrap()),
+        mask: 0x7FF,
+    }, // unmapped
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(945).unwrap()),
+        mask: 0x7FF,
+    }, // DATC_09_200ms
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(946).unwrap()),
+        mask: 0x7FF,
+    }, // DATC_10_200ms
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(1063).unwrap()),
+        mask: 0x7FF,
+    }, // DATC_11_200ms
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(1066).unwrap()),
+        mask: 0x7FF,
+    }, // DATC_13_200ms
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(1138).unwrap()),
+        mask: 0x7FF,
+    }, // DISPLAY_SETTINGS_472
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(1139).unwrap()),
+        mask: 0x7FF,
+    }, // unmapped
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(1140).unwrap()),
+        mask: 0x7FF,
+    }, // unmapped
 ];
 
 // ── Vehicle Tasks ─────────────────────────────────────────────────────────────
@@ -506,6 +557,7 @@ pub async fn handle_can_frame(frame: CanFrame) {
         Id::Standard(id) => id.as_raw() as u32,
         Id::Extended(id) => id.as_raw(),
     };
+    crate::platform::track_platform(id, &frame.data[..frame.dlc as usize]);
 
     if let Ok(message) = m_can::Messages::from_can_message(id, &frame.data[..frame.dlc as usize]) {
         let mut state = CAR_STATE.lock().await;
