@@ -1,7 +1,7 @@
 use core_interface::{CommandError, Rejection, VEHICLE_STATE_CHANNEL};
 use prost::Message;
 use virtual_car_controller::{
-    CAR_STATE, process_basic_command,
+    CAR_STATE, COMMAND_REPEATS, process_basic_command,
     proto::{BasicCommand, DoorLockCommand, basic_command::Action},
 };
 
@@ -13,6 +13,7 @@ fn encode_basic_cmd(action: Option<Action>) -> Vec<u8> {
 
 #[test]
 fn door_lock_true_succeeds_and_updates_channel() {
+    COMMAND_REPEATS.reset();
     let bytes = encode_basic_cmd(Some(Action::DoorLock(DoorLockCommand { lock: true })));
     let result = embassy_futures::block_on(process_basic_command(&bytes));
     assert!(result.is_ok());
@@ -28,6 +29,7 @@ fn door_lock_true_succeeds_and_updates_channel() {
 
 #[test]
 fn door_lock_false_succeeds_and_updates_channel() {
+    COMMAND_REPEATS.reset();
     let bytes = encode_basic_cmd(Some(Action::DoorLock(DoorLockCommand { lock: false })));
     let result = embassy_futures::block_on(process_basic_command(&bytes));
     assert!(result.is_ok());
@@ -103,4 +105,26 @@ fn door_lock_with_an_unknown_driving_state_is_refused() {
         Err(CommandError::Rejected(Rejection::Unknown(_)))
     ));
     set_driving(Some(false));
+}
+
+// ── Repeat limit ──────────────────────────────────────────────────────────────
+
+#[test]
+fn a_second_door_lock_inside_the_interval_is_refused() {
+    COMMAND_REPEATS.reset();
+    let bytes = encode_basic_cmd(Some(Action::DoorLock(DoorLockCommand { lock: true })));
+    assert!(embassy_futures::block_on(process_basic_command(&bytes)).is_ok());
+    VEHICLE_STATE_CHANNEL.try_receive().expect("a state update");
+
+    let unlock = encode_basic_cmd(Some(Action::DoorLock(DoorLockCommand { lock: false })));
+    let result = embassy_futures::block_on(process_basic_command(&unlock));
+    assert!(matches!(
+        result,
+        Err(CommandError::Rejected(Rejection::TooSoon(_)))
+    ));
+    assert!(
+        VEHICLE_STATE_CHANNEL.try_receive().is_err(),
+        "a refused command must not change the state"
+    );
+    COMMAND_REPEATS.reset();
 }

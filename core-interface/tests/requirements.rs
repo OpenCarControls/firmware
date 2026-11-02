@@ -1,6 +1,7 @@
 use core_interface::{
-    ActivityClock, CMD_RESP_CHANNEL, CommandError, CommandRequirements, Rejection, Requirement,
-    Snapshot, Transport, proto, rejection_response, respond_to_command, try_send_response,
+    ActivityClock, CMD_RESP_CHANNEL, CommandError, CommandKind, CommandRequirements, Rejection,
+    RepeatGuard, Requirement, Snapshot, Transport, proto, rejection_response, respond_to_command,
+    try_send_response,
 };
 use embassy_time::{Duration, Instant};
 
@@ -240,4 +241,136 @@ fn a_rejection_does_not_wait_for_a_full_response_channel() {
         ids.push(response.message_id);
     }
     assert_eq!(ids, [0, 1, 2, 3], "the rejection was dropped, not queued");
+}
+
+// ── Repeat limit ──────────────────────────────────────────────────────────────
+
+const DOOR_LOCK: (CommandKind, u32) = (CommandKind::Basic, 1);
+const INTERVAL: Duration = Duration::from_secs(2);
+
+fn limited() -> CommandRequirements {
+    needs_parked(Some(true)).min_interval(INTERVAL)
+}
+
+fn at(ms: u64) -> Instant {
+    Instant::from_millis(1_000_000 + ms)
+}
+
+#[test]
+fn the_same_command_inside_its_interval_is_rejected_with_the_time_left() {
+    let repeats = RepeatGuard::new();
+    let p = limited();
+    assert_eq!(p.admit_at(&open_gate(), &repeats, DOOR_LOCK, at(0)), Ok(()));
+    let rejection = p
+        .admit_at(&open_gate(), &repeats, DOOR_LOCK, at(500))
+        .unwrap_err();
+    assert_eq!(rejection, Rejection::TooSoon(Duration::from_millis(1500)));
+    assert_eq!(
+        rejection.message(),
+        "command rejected: the same command was sent too recently, try again in 2 s"
+    );
+    assert_eq!(
+        rejection_response(1, &rejection).status_code,
+        proto::CommandStatusCode::RejectedUnavailable as i32
+    );
+}
+
+#[test]
+fn the_interval_runs_from_the_last_admitted_run() {
+    let repeats = RepeatGuard::new();
+    let p = limited();
+    assert_eq!(p.admit_at(&open_gate(), &repeats, DOOR_LOCK, at(0)), Ok(()));
+    // A refused repeat doesn't restart the interval.
+    assert!(
+        p.admit_at(&open_gate(), &repeats, DOOR_LOCK, at(1999))
+            .is_err()
+    );
+    assert_eq!(
+        p.admit_at(&open_gate(), &repeats, DOOR_LOCK, at(2000)),
+        Ok(())
+    );
+    assert!(
+        p.admit_at(&open_gate(), &repeats, DOOR_LOCK, at(3000))
+            .is_err()
+    );
+}
+
+#[test]
+fn other_commands_have_their_own_interval() {
+    let repeats = RepeatGuard::new();
+    let p = limited();
+    assert_eq!(p.admit_at(&open_gate(), &repeats, DOOR_LOCK, at(0)), Ok(()));
+    assert_eq!(
+        p.admit_at(&open_gate(), &repeats, (CommandKind::Basic, 2), at(1)),
+        Ok(())
+    );
+    // Advanced commands number their ids separately.
+    assert_eq!(
+        p.admit_at(&open_gate(), &repeats, (CommandKind::Advanced, 1), at(2)),
+        Ok(())
+    );
+}
+
+#[test]
+fn a_command_rejected_by_its_requirements_does_not_start_the_interval() {
+    let repeats = RepeatGuard::new();
+    let driving = needs_parked(Some(false)).min_interval(INTERVAL);
+    assert_eq!(
+        driving.admit_at(&open_gate(), &repeats, DOOR_LOCK, at(0)),
+        Err(Rejection::Unmet("car is driving"))
+    );
+    assert_eq!(
+        limited().admit_at(&open_gate(), &repeats, DOOR_LOCK, at(1)),
+        Ok(())
+    );
+}
+
+#[test]
+fn the_requirements_are_reported_before_the_repeat_limit() {
+    let repeats = RepeatGuard::new();
+    let p = limited();
+    assert_eq!(p.admit_at(&open_gate(), &repeats, DOOR_LOCK, at(0)), Ok(()));
+    let stale = Snapshot {
+        state_age: Some(MAX_AGE + Duration::from_secs(1)),
+        ..open_gate()
+    };
+    assert_eq!(
+        p.admit_at(&stale, &repeats, DOOR_LOCK, at(1)),
+        Err(Rejection::StaleState)
+    );
+}
+
+#[test]
+fn no_interval_never_limits() {
+    let repeats = RepeatGuard::new();
+    let p = needs_parked(Some(true));
+    for _ in 0..3 {
+        assert_eq!(p.admit_at(&open_gate(), &repeats, DOOR_LOCK, at(0)), Ok(()));
+    }
+}
+
+#[test]
+fn check_ignores_the_repeat_limit() {
+    // Availability is `check`: a command stays available inside its interval.
+    let repeats = RepeatGuard::new();
+    let p = limited();
+    assert_eq!(p.admit_at(&open_gate(), &repeats, DOOR_LOCK, at(0)), Ok(()));
+    assert_eq!(p.check(&open_gate()), Ok(()));
+}
+
+#[test]
+fn the_time_left_is_rounded_up_to_whole_seconds() {
+    let message = |ms| Rejection::TooSoon(Duration::from_millis(ms)).message();
+    assert!(message(1).ends_with("try again in 1 s"));
+    assert!(message(1000).ends_with("try again in 1 s"));
+    assert!(message(1001).ends_with("try again in 2 s"));
+}
+
+#[test]
+fn reset_forgets_every_run() {
+    let repeats = RepeatGuard::new();
+    let p = limited();
+    assert_eq!(p.admit_at(&open_gate(), &repeats, DOOR_LOCK, at(0)), Ok(()));
+    repeats.reset();
+    assert_eq!(p.admit_at(&open_gate(), &repeats, DOOR_LOCK, at(1)), Ok(()));
 }

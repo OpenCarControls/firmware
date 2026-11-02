@@ -9,8 +9,8 @@ use prost::Message;
 
 use core_interface::{
     ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, CAN_RX_CHANNEL, CanFilter, CanFrame, CommandError,
-    CommandRequirements, Requirement, Snapshot, VEHICLE_STATE_CHANNEL, VehicleStatePayload,
-    respond_to_command,
+    CommandKind, CommandRequirements, RepeatGuard, Requirement, Snapshot, VEHICLE_STATE_CHANNEL,
+    VehicleStatePayload, respond_to_command,
 };
 
 pub mod proto {
@@ -235,7 +235,11 @@ pub async fn process_basic_command(bytes: &[u8]) -> Result<(), CommandError> {
             let payload = {
                 let mut state = CAR_STATE.lock().await;
                 door_lock_requirements(&state)
-                    .check(&SIMULATED_SNAPSHOT)
+                    .admit(
+                        &SIMULATED_SNAPSHOT,
+                        &COMMAND_REPEATS,
+                        (CommandKind::Basic, DOOR_LOCK_COMMAND_ID),
+                    )
                     .map_err(CommandError::Rejected)?;
                 state.are_doors_locked = Some(door_lock.lock);
                 encode_state(&state)
@@ -290,15 +294,24 @@ const SIMULATED_SNAPSHOT: Snapshot = Snapshot {
     state_age: Some(Duration::from_ticks(0)),
 };
 
+/// When each command was last admitted, for the minimum interval between two runs.
+pub static COMMAND_REPEATS: RepeatGuard = RepeatGuard::new();
+
+/// The door lock is refused again until this long after it was last admitted, so the app's
+/// "sent too recently" rejection can be tried by pressing it twice.
+pub const DOOR_LOCK_MIN_INTERVAL: Duration = Duration::from_secs(2);
+
 /// What the door lock command needs. Locking while the simulated car drives is refused so
 /// that the app's greyed-out buttons and rejection messages can be tried without a car: start
 /// the simulation (it drives for ≈75 s of every ≈100 s cycle).
 fn door_lock_requirements(state: &VirtualCarState) -> CommandRequirements {
-    CommandRequirements::new(Duration::from_secs(1)).require(Requirement::new(
-        state.is_driving.map(|driving| !driving),
-        "command rejected: the car is driving",
-        "command rejected: the car's driving state is not known yet",
-    ))
+    CommandRequirements::new(Duration::from_secs(1))
+        .require(Requirement::new(
+            state.is_driving.map(|driving| !driving),
+            "command rejected: the car is driving",
+            "command rejected: the car's driving state is not known yet",
+        ))
+        .min_interval(DOOR_LOCK_MIN_INTERVAL)
 }
 
 /// Tells `core-interface` which commands are available, from the same requirements the
