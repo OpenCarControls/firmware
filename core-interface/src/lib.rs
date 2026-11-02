@@ -102,8 +102,8 @@ pub use availability::{
 
 // Command requirements
 pub use requirements::{
-    ActivityClock, CommandError, CommandRequirements, Rejection, Requirement, Snapshot,
-    rejection_response, respond_to_command, try_send_response,
+    ActivityClock, CommandError, CommandRequirements, Rejection, RepeatGuard, Requirement,
+    Snapshot, rejection_response, respond_to_command, try_send_response,
 };
 
 // Pairing registry

@@ -5,12 +5,13 @@
 //!
 //! No command is implemented yet (firmware#37 to #42), so for now every command needs only
 //! what all of them need: the device is not read-only and the car was heard from recently.
-//! Each command's PR adds the requirements that command has, here.
+//! Each command's PR adds the requirements that command has, here, and its minimum interval
+//! between two runs (`CommandRequirements::min_interval`, none yet).
 
 use alloc::vec::Vec;
 use core_interface::proto::CommandAvailabilityState as Availability;
 use core_interface::{
-    ActivityClock, CommandKind, CommandRequirements, Rejection, Snapshot,
+    ActivityClock, CommandKind, CommandRequirements, Rejection, RepeatGuard, Snapshot,
     report_command_availability,
 };
 use embassy_time::Duration;
@@ -23,6 +24,9 @@ use crate::proto::{self, basic_command::Action};
 /// Any matching frame counts, not only the ones that feed the fact a command needs; this is
 /// the "is the bus alive" input, not a per-signal age (see firmware#11).
 pub(crate) static CAR_ACTIVITY: ActivityClock = ActivityClock::new();
+
+/// When each command was last admitted, for the minimum interval between two runs.
+pub(crate) static COMMAND_REPEATS: RepeatGuard = RepeatGuard::new();
 
 /// A command is refused when the car has been silent for longer than this. The car sends
 /// several of the filtered messages every second while awake, so a gap this long means it is
@@ -65,6 +69,27 @@ pub mod command_id {
     pub const CLIMATE_CONTROL: u32 = 4;
     pub const WINDOW: u32 = 5;
     pub const BATTERY_PRECONDITIONING: u32 = 1;
+}
+
+/// The id of a basic command, see [`command_id`].
+pub fn basic_command_id(action: &Action) -> u32 {
+    use command_id::*;
+    match action {
+        Action::DoorLockCommand(_) => DOOR_LOCK,
+        Action::ChargePortCommand(_) => CHARGE_PORT,
+        Action::FlashLightsCommand(_) => FLASH_LIGHTS,
+        Action::ClimateControlCommand(_) => CLIMATE_CONTROL,
+        Action::WindowCommand(_) => WINDOW,
+    }
+}
+
+/// The id of an advanced command, see [`command_id`].
+pub fn advanced_command_id(action: &proto::advanced_command::Action) -> u32 {
+    match action {
+        proto::advanced_command::Action::BatteryPreconditioningCommand(_) => {
+            command_id::BATTERY_PRECONDITIONING
+        }
+    }
 }
 
 /// Each basic command with the requests the app can make of it. A command is available when
@@ -142,16 +167,25 @@ pub async fn report_availability() {
 
 // ── Admission ─────────────────────────────────────────────────────────────────
 
-/// Runs the check for a basic command against the live car state and gate.
+/// Runs the check for a basic command against the live car state and gate, then its repeat
+/// limit. An admitted command starts its interval.
 pub async fn admit_basic(action: &Action) -> Result<(), Rejection> {
     // Build the requirements under the lock, but check after releasing it.
     let requirements = basic_requirements(action, &*CAR_STATE.lock().await);
-    requirements.check(&Snapshot::capture(&CAR_ACTIVITY))
+    requirements.admit(
+        &Snapshot::capture(&CAR_ACTIVITY),
+        &COMMAND_REPEATS,
+        (CommandKind::Basic, basic_command_id(action)),
+    )
 }
 
-/// Runs the check for an advanced command against the live gate.
+/// Runs the check for an advanced command against the live gate, then its repeat limit.
 pub fn admit_advanced(action: &proto::advanced_command::Action) -> Result<(), Rejection> {
-    advanced_requirements(action).check(&Snapshot::capture(&CAR_ACTIVITY))
+    advanced_requirements(action).admit(
+        &Snapshot::capture(&CAR_ACTIVITY),
+        &COMMAND_REPEATS,
+        (CommandKind::Advanced, advanced_command_id(action)),
+    )
 }
 
 #[cfg(test)]
@@ -208,6 +242,34 @@ mod tests {
             proto::BatteryPreconditioningCommand { enable: true },
         );
         assert_eq!(advanced_requirements(&advanced).check(&open_gate()), Ok(()));
+    }
+
+    #[test]
+    fn no_command_limits_its_repeats_yet() {
+        // Each command sets its interval in its own PR, from how the car behaves.
+        let state = EgmpCarState::new();
+        for action in every_basic_action() {
+            assert_eq!(
+                basic_requirements(&action, &state).min_interval,
+                Duration::from_ticks(0)
+            );
+        }
+        let advanced = proto::advanced_command::Action::BatteryPreconditioningCommand(
+            proto::BatteryPreconditioningCommand { enable: true },
+        );
+        assert_eq!(
+            advanced_requirements(&advanced).min_interval,
+            Duration::from_ticks(0)
+        );
+    }
+
+    #[test]
+    fn command_ids_match_the_availability_list() {
+        for (id, actions) in basic_variants() {
+            for action in actions {
+                assert_eq!(basic_command_id(&action), id);
+            }
+        }
     }
 
     #[test]

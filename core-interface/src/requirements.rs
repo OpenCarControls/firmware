@@ -11,15 +11,19 @@
 //! read-write policy, `can_access.rs`). The check here repeats that against the live flag,
 //! because a command can wait in the queue while the policy changes, and adds what only the
 //! vehicle knows: how fresh its state is and what the car must be doing.
+//!
+//! On top of that, [`CommandRequirements::admit`] limits how often the same command may run
+//! ([`RepeatGuard`]), so a stuck button or an app bug can't send it to the car again and again.
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Instant};
 
+use crate::availability::CommandKind;
 use crate::channels::CMD_RESP_CHANNEL;
 use crate::proto;
 use crate::types::Transport;
@@ -127,6 +131,9 @@ pub struct CommandRequirements {
     /// The state must have been refreshed at most this long ago.
     pub max_state_age: Duration,
     pub required: Vec<Requirement>,
+    /// The same command is refused until this long after it was last admitted. Zero means no
+    /// limit.
+    pub min_interval: Duration,
 }
 
 impl CommandRequirements {
@@ -134,7 +141,13 @@ impl CommandRequirements {
         Self {
             max_state_age,
             required: Vec::new(),
+            min_interval: Duration::from_ticks(0),
         }
+    }
+
+    pub fn min_interval(mut self, min_interval: Duration) -> Self {
+        self.min_interval = min_interval;
+        self
     }
 
     pub fn require(mut self, requirement: Requirement) -> Self {
@@ -162,6 +175,94 @@ impl CommandRequirements {
         }
         Ok(())
     }
+
+    /// Admits `command` now: [`check`](Self::check), then the repeat limit in `repeats`. An
+    /// admitted command starts its interval, whether or not it then reaches the car.
+    pub fn admit(
+        &self,
+        snapshot: &Snapshot,
+        repeats: &RepeatGuard,
+        command: (CommandKind, u32),
+    ) -> Result<(), Rejection> {
+        self.admit_at(snapshot, repeats, command, Instant::now())
+    }
+
+    /// Like [`admit`](Self::admit) at a given `now`.
+    ///
+    /// The repeat limit is not part of [`check`](Self::check) on purpose: availability is
+    /// `check` alone, so a command stays available inside its interval instead of flickering
+    /// after every press.
+    pub fn admit_at(
+        &self,
+        snapshot: &Snapshot,
+        repeats: &RepeatGuard,
+        command: (CommandKind, u32),
+        now: Instant,
+    ) -> Result<(), Rejection> {
+        self.check(snapshot)?;
+        repeats
+            .run_at(command, self.min_interval, now)
+            .map_err(Rejection::TooSoon)
+    }
+}
+
+// ── Repeat limit ──────────────────────────────────────────────────────────────
+
+/// When each command of a vehicle was last admitted, to refuse the same command again within
+/// its minimum interval. A stuck button sends a new `message_id` each time, so the dedupe in
+/// the dispatcher doesn't catch it.
+///
+/// The limit is per command, whoever sent it and over whichever transport: it protects the
+/// car. A command is identified by its kind and its id (`command_id` in the vehicle).
+pub struct RepeatGuard {
+    last: Mutex<CriticalSectionRawMutex, RefCell<Vec<LastRun>>>,
+}
+
+/// A command (kind and id) and when it was last admitted.
+type LastRun = (CommandKind, u32, Instant);
+
+impl RepeatGuard {
+    pub const fn new() -> Self {
+        Self {
+            last: Mutex::new(RefCell::new(Vec::new())),
+        }
+    }
+
+    /// Records a run of `command` at `now`, unless its last run is less than `min_interval`
+    /// ago; then returns how long is left and records nothing.
+    pub fn run_at(
+        &self,
+        command: (CommandKind, u32),
+        min_interval: Duration,
+        now: Instant,
+    ) -> Result<(), Duration> {
+        let (kind, id) = command;
+        self.last.lock(|last| {
+            let mut last = last.borrow_mut();
+            match last.iter_mut().find(|(k, i, _)| *k == kind && *i == id) {
+                Some((_, _, at)) => {
+                    let elapsed = now.checked_duration_since(*at).unwrap_or(Duration::MIN);
+                    if elapsed < min_interval {
+                        return Err(min_interval - elapsed);
+                    }
+                    *at = now;
+                }
+                None => last.push((kind, id, now)),
+            }
+            Ok(())
+        })
+    }
+
+    /// Forgets every run.
+    pub fn reset(&self) {
+        self.last.lock(|last| last.borrow_mut().clear());
+    }
+}
+
+impl Default for RepeatGuard {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ── Rejection ─────────────────────────────────────────────────────────────────
@@ -180,6 +281,9 @@ pub enum Rejection {
     Unmet(&'static str),
     /// A requirement can't be evaluated yet; the message comes from the vehicle.
     Unknown(&'static str),
+    /// The same command was admitted less than its minimum interval ago; carries the time
+    /// left.
+    TooSoon(Duration),
 }
 
 impl Rejection {
@@ -194,6 +298,10 @@ impl Rejection {
                 "command rejected: car state is out of date (car asleep or CAN bus silent)",
             ),
             Rejection::Unmet(message) | Rejection::Unknown(message) => String::from(*message),
+            Rejection::TooSoon(left) => format!(
+                "command rejected: the same command was sent too recently, try again in {} s",
+                left.as_millis().div_ceil(1000).max(1)
+            ),
         }
     }
 }
