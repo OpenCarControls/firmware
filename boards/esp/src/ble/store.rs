@@ -9,9 +9,12 @@
 //! in a separate range, since the BLE task owns the flash and the approval arrives
 //! over BLE.
 //!
-//! Storage layout: the bonds occupy the last two NOR flash sectors and the approval the
-//! two before them (fixed end-of-flash regions — see docs/ble.md for the planned
-//! migration to named partitions).
+//! It also holds the count of short boots for the bond reset by power-cycling
+//! (`power_cycle.rs`), which has to be written before the bonds are loaded.
+//!
+//! Storage layout: the bonds occupy the last two NOR flash sectors, the approval the
+//! two before them and the short-boot count the two before those (fixed end-of-flash
+//! regions — see docs/ble.md for the planned migration to named partitions).
 
 use sequential_storage::map::{SerializationError, Value};
 use trouble_host::connection::SecurityLevel;
@@ -130,15 +133,19 @@ mod hardware {
 
     /// The approval is the only item in its range.
     const APPROVAL_KEY: u8 = 0;
+    /// So is the short-boot count in its own.
+    const SHORT_BOOTS_KEY: u8 = 0;
 
     /// Wraps a flash NorFlash storage backend and a flash range, and provides
     /// async load / store / remove operations for `BondInformation` records.
     /// Each bond is keyed by the peer's 6-byte Bluetooth device address.
-    /// Also holds the CAN read-write approval, in `approval_range`.
+    /// Also holds the CAN read-write approval, in `approval_range`, and the
+    /// short-boot count, in `short_boots_range`.
     pub(in crate::ble) struct BondStore<'a, S: NorFlash + MultiwriteNorFlash> {
         storage: &'a mut S,
         range: Range<u32>,
         approval_range: Range<u32>,
+        short_boots_range: Range<u32>,
     }
 
     impl<'a, S: NorFlash + MultiwriteNorFlash> BondStore<'a, S> {
@@ -146,12 +153,78 @@ mod hardware {
             storage: &'a mut S,
             range: Range<u32>,
             approval_range: Range<u32>,
+            short_boots_range: Range<u32>,
         ) -> Self {
             Self {
                 storage,
                 range,
                 approval_range,
+                short_boots_range,
             }
+        }
+
+        /// Load the count of short boots in a row. 0 if there is none, or on any
+        /// flash error: a lost count only makes the owner power-cycle again.
+        pub(in crate::ble) async fn load_short_boots(&mut self) -> u8 {
+            let mut data_buffer = [0u8; 32];
+            match fetch_item::<u8, u8, _>(
+                self.storage,
+                self.short_boots_range.clone(),
+                &mut NoCache::new(),
+                &mut data_buffer,
+                &SHORT_BOOTS_KEY,
+            )
+            .await
+            {
+                Ok(count) => count.unwrap_or(0),
+                Err(e) => {
+                    log::warn!("Short-boot count: load failed ({:?}), counting from 0", e);
+                    0
+                }
+            }
+        }
+
+        /// Persist the count of short boots in a row. If the range can't be written,
+        /// it is erased (which reads as 0) and the write tried once more.
+        pub(in crate::ble) async fn store_short_boots(&mut self, count: u8) {
+            if self.write_short_boots(count).await.is_ok() {
+                return;
+            }
+            log::warn!("Short-boot count: write failed, erasing its range and retrying");
+            if let Err(e) =
+                sequential_storage::erase_all(self.storage, self.short_boots_range.clone()).await
+            {
+                log::error!("Short-boot count: erase failed: {:?}", e);
+                return;
+            }
+            if count != 0 {
+                let _ = self.write_short_boots(count).await;
+            }
+        }
+
+        async fn write_short_boots(&mut self, count: u8) -> Result<(), ()> {
+            let mut data_buffer = [0u8; 32];
+            store_item(
+                self.storage,
+                self.short_boots_range.clone(),
+                &mut NoCache::new(),
+                &mut data_buffer,
+                &SHORT_BOOTS_KEY,
+                &count,
+            )
+            .await
+            .map_err(|e| {
+                log::error!("Short-boot count: write failed: {:?}", e);
+            })
+        }
+
+        /// Erase every stored bond. The approval and the short-boot count are kept.
+        pub(in crate::ble) async fn clear_bonds(&mut self) -> Result<(), ()> {
+            sequential_storage::erase_all(self.storage, self.range.clone())
+                .await
+                .map_err(|e| {
+                    log::error!("BLE store: clear_bonds failed: {:?}", e);
+                })
         }
 
         /// Load the CAN read-write approval. `None` if there is none, or on any flash

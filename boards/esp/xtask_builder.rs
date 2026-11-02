@@ -468,7 +468,8 @@ impl TargetBuilder for Builder {
              const BLE_PAIRING_WINDOW_S: u32 = {pair_window};\n\
              const BLE_FIRST_SETUP_PAIRING_WINDOW_S: u32 = {first_setup_window};\n\
              const BLE_MAX_BONDED_PHONES: u8 = {max_bonds};\n\
-             const BLE_CONTROLLER_LEASE_TTL_S: u32 = {lease_ttl};",
+             const BLE_CONTROLLER_LEASE_TTL_S: u32 = {lease_ttl};\n\
+             const BLE_POWER_CYCLE_RESET: Option<board_esp::PowerCycleReset> = {power_cycle_reset};",
             ble_name = ble_device_name,
             pair_btn = match esp_hw.ble.pairing_button_pin {
                 Some(p) if p >= 0 => format!("Some({})", p),
@@ -479,6 +480,15 @@ impl TargetBuilder for Builder {
             first_setup_window = transport.ble.pairing.first_setup_pairing_window_seconds,
             max_bonds = esp_hw.ble.max_bonded_phones,
             lease_ttl = esp_hw.ble.controller_lease_ttl_s,
+            // Boards with a pairing button open the window with it instead.
+            power_cycle_reset = match esp_hw.ble.pairing_button_pin {
+                Some(p) if p >= 0 => "None".to_string(),
+                _ => format!(
+                    "Some(board_esp::PowerCycleReset {{ short_boots: {}, uptime_s: {} }})",
+                    transport.ble.pairing.power_cycle_reset_short_boots,
+                    transport.ble.pairing.power_cycle_reset_uptime_seconds,
+                ),
+            },
         );
 
         let network_constants = if wifi_enabled {
@@ -527,6 +537,7 @@ impl TargetBuilder for Builder {
             "            peripherals.BT,\n",
             "            peripherals.FLASH,\n",
             "            BLE_DEVICE_NAME_BASE,\n",
+            "            BLE_POWER_CYCLE_RESET,\n",
             "        ).unwrap());\n",
         ).to_string();
 

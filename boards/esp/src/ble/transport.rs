@@ -75,6 +75,7 @@ mod hardware {
     use crate::ble::bond_ops::{
         BOND_OPS, BondOp, has_room_for_bond, is_broken_bond_disconnect, phone_device_id,
     };
+    use crate::ble::power_cycle::{PowerCycleReset, count_boot};
     use crate::ble::store::BondStore;
     use core_interface::ble::{
         BLE_ATT_MTU, BLE_MAX_CHUNK_BYTES, BLE_MAX_MESSAGE_BYTES, BLE_MIN_ATT_MTU, GATT_RX_UUID,
@@ -134,6 +135,80 @@ mod hardware {
 
     impl rand_core::CryptoRng for MyRng {}
 
+    // ─── Bond reset by power-cycling ─────────────────────────────────────────────
+
+    /// This boot's part in the bond reset by power-cycling (see `power_cycle.rs`).
+    /// While `clear_at` is set, this boot still counts as short in flash.
+    struct ShortBoot {
+        clear_at: Option<embassy_time::Instant>,
+    }
+
+    impl ShortBoot {
+        /// Counts this boot in flash and, after enough short boots in a row, clears
+        /// every bond. Runs before the bonds are loaded, and as early as possible so
+        /// that a boot cut short right away still counts.
+        async fn count<S: NorFlash + MultiwriteNorFlash>(
+            bond_store: &mut BondStore<'_, S>,
+            config: Option<PowerCycleReset>,
+        ) -> Self {
+            let Some(config) = config else {
+                return Self { clear_at: None };
+            };
+            // 0x01 is also a chip brown-out (a real loss of power) or a super watchdog
+            // reset, which esp-hal disables at init. The brown-out detector's resets
+            // and every watchdog and panic reset have their own reasons.
+            let reason = esp_hal::system::reset_reason();
+            let power_on = reason == Some(esp_hal::rtc_cntl::SocResetReason::ChipPowerOn);
+            let stored = bond_store.load_short_boots().await;
+            let boot = count_boot(stored, power_on, config);
+            if boot.store != stored {
+                bond_store.store_short_boots(boot.store).await;
+            }
+            log::info!(
+                "Short-boot count: {} -> {} (reset reason {:?})",
+                stored,
+                boot.store,
+                reason
+            );
+            if boot.reset_bonds {
+                log::warn!(
+                    "BLE: power-on after {} short boots in a row, clearing every bond",
+                    stored
+                );
+                let _ = bond_store.clear_bonds().await;
+            }
+            Self {
+                clear_at: (boot.store != 0)
+                    .then(|| embassy_time::Instant::from_secs(config.uptime_s as u64)),
+            }
+        }
+
+        fn is_due(&self) -> bool {
+            self.clear_at
+                .is_some_and(|t| embassy_time::Instant::now() >= t)
+        }
+
+        /// Records that this boot passed the uptime threshold: the run of short boots
+        /// is over.
+        async fn clear<S: NorFlash + MultiwriteNorFlash>(
+            &mut self,
+            bond_store: &mut BondStore<'_, S>,
+        ) {
+            if self.clear_at.take().is_some() {
+                bond_store.store_short_boots(0).await;
+                log::info!("Short-boot count: cleared after the uptime threshold");
+            }
+        }
+    }
+
+    /// Resolves at `at`, or never.
+    async fn wait_until(at: Option<embassy_time::Instant>) {
+        match at {
+            Some(at) => embassy_time::Timer::at(at).await,
+            None => core::future::pending().await,
+        }
+    }
+
     // ─── Main BLE task ────────────────────────────────────────────────────────────
 
     #[embassy_executor::task]
@@ -141,6 +216,7 @@ mod hardware {
         bt_peri: peripherals::BT<'static>,
         flash_peri: peripherals::FLASH<'static>,
         name_base: &'static str,
+        power_cycle_reset: Option<PowerCycleReset>,
     ) {
         use static_cell::StaticCell;
 
@@ -155,7 +231,15 @@ mod hardware {
         let sector = FlashStorage::SECTOR_SIZE as usize;
         let bond_store_range = (capacity - 2 * sector) as u32..capacity as u32;
         let approval_range = (capacity - 4 * sector) as u32..(capacity - 2 * sector) as u32;
-        let mut bond_store = BondStore::new(&mut flash_async, bond_store_range, approval_range);
+        let short_boots_range = (capacity - 6 * sector) as u32..(capacity - 4 * sector) as u32;
+        let mut bond_store = BondStore::new(
+            &mut flash_async,
+            bond_store_range,
+            approval_range,
+            short_boots_range,
+        );
+
+        let mut short_boot = ShortBoot::count(&mut bond_store, power_cycle_reset).await;
 
         // Before the BLE stack starts, so no command can race the restore.
         let approval = bond_store.load_can_rw_approval().await;
@@ -235,6 +319,9 @@ mod hardware {
                     while let Ok(op) = BOND_OPS.try_receive() {
                         apply_bond_op(op, &stack, &mut bond_store).await;
                     }
+                    if short_boot.is_due() {
+                        short_boot.clear(&mut bond_store).await;
+                    }
                     if let Some(approval) =
                         core_interface::try_take_can_read_write_approval_to_store()
                     {
@@ -276,6 +363,7 @@ mod hardware {
                                     &conn,
                                     &stack,
                                     &mut bond_store,
+                                    &mut short_boot,
                                     pairing_open_at_connect,
                                     &tx_subscribed,
                                 ),
@@ -564,6 +652,7 @@ mod hardware {
         conn: &GattConnection<'_, '_, P>,
         stack: &Stack<'_, C, P>,
         bond_store: &mut BondStore<'_, S>,
+        short_boot: &mut ShortBoot,
         pairing_open_at_connect: bool,
         tx_subscribed: &Signal<CriticalSectionRawMutex, ()>,
     ) where
@@ -657,13 +746,18 @@ mod hardware {
             let event = match select4(
                 conn.next(),
                 BOND_OPS.receive(),
-                encryption_poll,
+                select(encryption_poll, wait_until(short_boot.clear_at)),
                 core_interface::can_read_write_approval_to_store(),
             )
             .await
             {
                 Either4::First(event) => event,
-                Either4::Third(()) => continue,
+                Either4::Third(Either::First(())) => continue,
+                // A phone often connects before the boot passes the threshold.
+                Either4::Third(Either::Second(())) => {
+                    short_boot.clear(bond_store).await;
+                    continue;
+                }
                 // Approvals arrive over this connection, so persist them while it lasts.
                 Either4::Fourth(approval) => {
                     let _ = bond_store.store_can_rw_approval(approval).await;
