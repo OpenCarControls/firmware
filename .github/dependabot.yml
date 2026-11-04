@@ -15,15 +15,24 @@ updates:
       prefix: chore
       include: scope
     groups:
-      # esp-hal, esp-radio, esp-rtos, ... are released together and must move together.
+      # esp-hal, esp-radio, esp-rtos, ... are released together and must move
+      # together. The BLE host (trouble-host, bt-hci) is tied to esp-radio.
       esp:
-        patterns: ["esp-*"]
+        patterns: ["esp-*", "trouble-*", "bt-hci"]
       embassy:
         patterns: ["embassy-*"]
       prost:
         patterns: ["prost", "prost-*"]
       minor-and-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      # esp-radio 0.18's BLE controller implements bt-hci 0.8, and trouble-host
+      # 0.7+ needs bt-hci 0.9+. Remove this once an esp-radio release moves to a
+      # newer bt-hci (the reminder comment on its PR says so).
+      - dependency-name: "trouble-host"
+        versions: [">= 0.7"]
+      - dependency-name: "bt-hci"
+        versions: [">= 0.9"]
 
   - package-ecosystem: github-actions
     directory: /
