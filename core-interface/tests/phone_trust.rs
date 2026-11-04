@@ -40,7 +40,7 @@ static METHODS: [ValidationMethod; 2] = [
     },
 ];
 
-/// Every code is 123456.
+/// Every code is 123456, cut to `CODE_LENGTH` digits.
 fn fixed_random(buf: &mut [u8]) {
     let bytes = 123_456u32.to_le_bytes();
     for (i, b) in buf.iter_mut().enumerate() {
@@ -141,6 +141,25 @@ fn submit(source: &[u8], code: &str) -> proto::CommandResponse {
             code: code.into(),
         }),
     )
+}
+
+/// The running session's code, as the car shows it.
+fn the_code() -> String {
+    let code = current_validation_challenge()
+        .and_then(|c| c.code)
+        .expect("a code entry session");
+    String::from_utf8(code.to_vec()).unwrap()
+}
+
+/// The code `fixed_random` draws.
+fn expected_code() -> String {
+    let space = 10u32.pow(CODE_LENGTH as u32);
+    format!("{:0width$}", 123_456 % space, width = CODE_LENGTH)
+}
+
+/// A code `fixed_random` never draws.
+fn wrong_code() -> String {
+    "0".repeat(CODE_LENGTH)
 }
 
 fn approve(source: &[u8], approved: bool) -> proto::CommandResponse {
@@ -290,9 +309,9 @@ fn the_right_code_validates_the_phone() {
     assert!(session.expires_in_s > 0);
     let challenge = current_validation_challenge().unwrap();
     assert_eq!(challenge.method_id, "test.code");
-    assert_eq!(challenge.code, Some(*b"123456"));
+    assert_eq!(the_code(), expected_code());
 
-    let resp = submit(OWNER, "123456");
+    let resp = submit(OWNER, &expected_code());
     assert!(resp.success, "{}", resp.error_message);
     assert_eq!(session_of(&resp).status, Status::Succeeded as i32);
     assert!(is_phone_validated(OWNER));
@@ -307,7 +326,7 @@ fn wrong_codes_use_the_attempts_then_the_cooldown_refuses_new_sessions() {
     read_write();
     assert!(start(OWNER, "test.code").success);
     for left in (0..MAX_CODE_ATTEMPTS).rev() {
-        let resp = submit(OWNER, "000000");
+        let resp = submit(OWNER, &wrong_code());
         assert!(!resp.success);
         let session = session_of(&resp);
         assert_eq!(session.attempts_left, left);
@@ -319,7 +338,7 @@ fn wrong_codes_use_the_attempts_then_the_cooldown_refuses_new_sessions() {
     assert!(!is_phone_validated(OWNER));
     assert!(current_validation_challenge().is_none());
     // The right code no longer works, and no session starts during the cooldown.
-    assert!(!submit(OWNER, "123456").success);
+    assert!(!submit(OWNER, &expected_code()).success);
     let resp = start(OWNER, "test.button");
     assert!(!resp.success);
     assert!(
@@ -341,7 +360,7 @@ fn one_session_at_a_time_and_it_belongs_to_its_phone() {
     assert!(!resp.success);
     assert!(resp.error_message.contains("another phone"));
     // The stranger can't answer the owner's code, or complete it.
-    assert!(!submit(STRANGER, "123456").success);
+    assert!(!submit(STRANGER, &the_code()).success);
     assert!(!is_phone_validated(STRANGER));
     // The code session can't be completed as an in-car action.
     let challenge = current_validation_challenge().unwrap();

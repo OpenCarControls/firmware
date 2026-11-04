@@ -11,7 +11,8 @@
 //! times out ([`VALIDATION_SESSION_MS`]). A code entry session uses a fresh
 //! [`CODE_LENGTH`]-digit code from the board's random source, accepts [`MAX_CODE_ATTEMPTS`]
 //! wrong codes, and then starts a cooldown ([`VALIDATION_COOLDOWN_MS`]) during which no
-//! session can start.
+//! session can start. The limits come from the contract (`[ble.phone_validation]` in
+//! `transport.toml`), which the app reads too.
 
 use alloc::vec::Vec;
 use core::cell::RefCell;
@@ -25,16 +26,10 @@ use crate::can_access::CarDigest;
 use crate::proto;
 use crate::proto::PhoneValidationStatus as Status;
 
-/// Digits in a validation code.
-pub const CODE_LENGTH: usize = 6;
-/// Wrong codes a session accepts before it fails.
-pub const MAX_CODE_ATTEMPTS: u32 = 3;
-/// How long a session runs before it times out.
-pub const VALIDATION_SESSION_MS: u64 = 120_000;
-/// How long no session can start after one used all its attempts.
-pub const VALIDATION_COOLDOWN_MS: u64 = 300_000;
-/// How long an ended session is still reported to its phone, so the app sees how it ended.
-pub const VALIDATION_RESULT_KEEP_MS: u64 = 60_000;
+include!(concat!(env!("OUT_DIR"), "/phone_validation.rs"));
+
+/// The number of distinct codes, 10^[`CODE_LENGTH`].
+const CODE_SPACE: u32 = 10u32.pow(CODE_LENGTH as u32);
 
 /// How the owner validates a phone with a method.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,13 +157,13 @@ pub fn current_validation_challenge() -> Option<ValidationChallenge> {
 
 fn uniform_code(fill: fn(&mut [u8])) -> [u8; CODE_LENGTH] {
     // Rejection sampling, so every code is equally likely.
-    const LIMIT: u32 = u32::MAX - (u32::MAX % 1_000_000);
+    const LIMIT: u32 = u32::MAX - (u32::MAX % CODE_SPACE);
     let value = loop {
         let mut buf = [0u8; 4];
         fill(&mut buf);
         let value = u32::from_le_bytes(buf);
         if value < LIMIT {
-            break value % 1_000_000;
+            break value % CODE_SPACE;
         }
     };
     let mut code = [b'0'; CODE_LENGTH];
