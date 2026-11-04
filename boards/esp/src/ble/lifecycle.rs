@@ -34,6 +34,8 @@ mod hardware {
         let window_s = pairing_window_s.max(1);
 
         if let Some(pin) = pairing_button_pin {
+            // Button boards never open the window at boot.
+            crate::ble::boot_pairing::BOOT_WINDOW_SETTLED.signal(());
             let button = Input::new(
                 unsafe { AnyPin::steal(pin) },
                 InputConfig::default().with_pull(Pull::Up),
@@ -106,6 +108,7 @@ mod hardware {
                     bond_count
                 );
             }
+            crate::ble::boot_pairing::BOOT_WINDOW_SETTLED.signal(());
 
             let mut pairing_was_open = core_interface::is_pairing_window_open();
             loop {

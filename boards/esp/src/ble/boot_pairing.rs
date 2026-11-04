@@ -10,6 +10,12 @@ use embassy_sync::signal::Signal;
 #[cfg_attr(not(feature = "hardware"), allow(dead_code))]
 pub(crate) static BONDS_LOADED: Signal<CriticalSectionRawMutex, usize> = Signal::new();
 
+/// Raised by the lifecycle task once the boot-time window is open, or known to
+/// stay closed. The transport waits for it before advertising, so a phone that
+/// connects right after boot sees the window as it really is.
+#[cfg_attr(not(feature = "hardware"), allow(dead_code))]
+pub(crate) static BOOT_WINDOW_SETTLED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
 /// Boards without a pairing button open the window at boot only for first setup:
 /// once a phone is bonded, a stranger in range of a rebooted device (watchdog
 /// reset, brownout) must not be able to bond, because pairing is Just Works.
