@@ -145,6 +145,8 @@ pub struct TransportBle {
 pub struct TransportBlePairing {
     pub pairing_window_seconds: u32,
     pub first_setup_pairing_window_seconds: u32,
+    pub power_cycle_reset_short_boots: u8,
+    pub power_cycle_reset_uptime_seconds: u32,
 }
 
 #[derive(Deserialize)]
@@ -479,6 +481,14 @@ pub fn validate_ble_transport_contract(transport: &TransportConfig) {
     }
     if transport.ble.pairing.first_setup_pairing_window_seconds == 0 {
         eprintln!("transport.toml ble.pairing.first_setup_pairing_window_seconds must be > 0");
+        exit(1);
+    }
+    if transport.ble.pairing.power_cycle_reset_short_boots == 0 {
+        eprintln!("transport.toml ble.pairing.power_cycle_reset_short_boots must be > 0");
+        exit(1);
+    }
+    if transport.ble.pairing.power_cycle_reset_uptime_seconds == 0 {
+        eprintln!("transport.toml ble.pairing.power_cycle_reset_uptime_seconds must be > 0");
         exit(1);
     }
 }

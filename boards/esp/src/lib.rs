@@ -22,7 +22,7 @@ pub use can::{MCP2515_HW_FILTERS, bus_filter_count};
 mod hardware {
     use super::{ble, can, network, status_leds};
 
-    pub use ble::{ble_lifecycle_task, ble_transport_task};
+    pub use ble::{PowerCycleReset, ble_lifecycle_task, ble_transport_task};
 
     pub use status_leds::*;
 
