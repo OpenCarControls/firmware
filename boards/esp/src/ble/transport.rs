@@ -304,6 +304,9 @@ mod hardware {
         }))
         .unwrap();
 
+        // The first advertise cycle reads the window state, so the boot-time
+        // window must be decided first.
+        crate::ble::boot_pairing::BOOT_WINDOW_SETTLED.wait().await;
         log::info!("BLE transport: GATT host initialised, starting advertise loop");
 
         let _ = join(
