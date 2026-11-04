@@ -3,6 +3,7 @@ mod can;
 mod can_approval;
 mod can_logger;
 mod network;
+mod phone_validations;
 
 use core_interface::SYSTEM_COMMAND_CHANNEL;
 
@@ -11,6 +12,7 @@ pub use can::socket_can_task;
 pub use can_approval::{can_rw_approval_store_task, restore_can_rw_approval};
 pub use can_logger::can_logger_task;
 pub use network::mqtt_driver_task;
+pub use phone_validations::{phone_validations_store_task, restore_phone_validations};
 
 pub fn start(spawner: &embassy_executor::Spawner) {
     spawner.spawn(core_interface::process_ble_commands_task().unwrap());
@@ -20,7 +22,18 @@ pub fn start(spawner: &embassy_executor::Spawner) {
     spawner.spawn(core_interface::publish_can_access_task().unwrap());
     spawner.spawn(core_interface::publish_command_availability_task().unwrap());
     spawner.spawn(can_rw_approval_store_task().unwrap());
+    spawner.spawn(phone_validations_store_task().unwrap());
+    core_interface::set_random_source(fill_random);
     spawner.spawn(system_command_task().unwrap());
+}
+
+/// The validation codes' random source: the kernel's CSPRNG.
+fn fill_random(buf: &mut [u8]) {
+    use std::io::Read as _;
+    if let Err(e) = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(buf)) {
+        // Never fall back to a guessable code.
+        panic!("no random source for the validation code: {e}");
+    }
 }
 
 #[embassy_executor::task]
@@ -38,19 +51,14 @@ pub async fn system_command_task() {
             path
         );
     }
+    // A validation never outlives its phone's bond.
+    core_interface::prune_phone_validations().await;
 
     loop {
         let cmd = SYSTEM_COMMAND_CHANNEL.receiver().receive().await;
         match cmd.action {
             Some(core_interface::proto::system_command::Action::RestartCommand(_)) => {
                 log::warn!("SYSTEM: restart requested (PC board stub)");
-            }
-            Some(core_interface::proto::system_command::Action::ListPairedPhones(_)) => {
-                let phones = core_interface::list_paired_phones().await;
-                log::debug!(
-                    "SYSTEM: list paired phones requested, count={} (PC runtime)",
-                    phones.len()
-                );
             }
             Some(core_interface::proto::system_command::Action::RemovePairedPhone(req)) => {
                 if !core_interface::is_pairing_window_open() {
@@ -105,8 +113,13 @@ pub async fn system_command_task() {
                 // Deprecated: dropped by core-interface, never forwarded here.
             }
             // Handled by core-interface's BLE dispatcher, never forwarded here.
-            Some(core_interface::proto::system_command::Action::SetCanReadWriteApproval(_))
+            Some(core_interface::proto::system_command::Action::ListPairedPhones(_))
+            | Some(core_interface::proto::system_command::Action::SetCanReadWriteApproval(_))
             | Some(core_interface::proto::system_command::Action::SetCanDevWriteUnlock(_))
+            | Some(core_interface::proto::system_command::Action::ListPhoneValidationMethods(_))
+            | Some(core_interface::proto::system_command::Action::StartPhoneValidation(_))
+            | Some(core_interface::proto::system_command::Action::SubmitPhoneValidationCode(_))
+            | Some(core_interface::proto::system_command::Action::CancelPhoneValidation(_))
             | None => {}
         }
     }

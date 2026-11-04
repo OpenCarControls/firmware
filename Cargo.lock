@@ -309,6 +309,7 @@ name = "core-interface"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "core-interface",
  "critical-section",
  "embassy-executor",
  "embassy-futures",
@@ -2827,6 +2828,8 @@ dependencies = [
  "embassy-sync 0.7.2",
  "embassy-time",
  "embedded-can",
+ "log",
+ "portable-atomic",
  "prost",
  "prost-build",
 ]

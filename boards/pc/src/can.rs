@@ -110,11 +110,12 @@ mod linux_can {
             // TX: drain this bus's own outbound channel
             while let Ok(outbound) = tx_channel.try_receive() {
                 // Drop silently when in read-only mode; do not transmit on the bus.
-                // `allow_can_tx` also lets an identity probe's own frames through.
+                // `allow_can_tx` also lets an identity probe's own frames through, and
+                // checks a command frame's phone is still validated.
                 if !core_interface::allow_can_tx(bus_id, &outbound) {
                     continue;
                 }
-                let sc_frame = core_to_socketcan_frame(&outbound);
+                let sc_frame = core_to_socketcan_frame(outbound.frame());
                 if let Some(frame) = sc_frame {
                     let _ = socket.write_frame(&frame);
                 }

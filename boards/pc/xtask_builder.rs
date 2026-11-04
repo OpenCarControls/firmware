@@ -63,10 +63,17 @@ struct PcHardwareConfig {
     /// Where the owner's CAN read-write approval is kept (the ESP keeps it in flash).
     #[serde(default = "default_can_rw_approval_file")]
     can_rw_approval_file: String,
+    /// Where the phones validated in the car are kept (the ESP keeps them in flash).
+    #[serde(default = "default_phone_validations_file")]
+    phone_validations_file: String,
 }
 
 fn default_can_rw_approval_file() -> String {
     "/tmp/opencar-can-rw-approval.txt".to_string()
+}
+
+fn default_phone_validations_file() -> String {
+    "/tmp/opencar-phone-validations.txt".to_string()
 }
 
 pub struct Builder;
@@ -226,6 +233,7 @@ impl TargetBuilder for Builder {
              const BLE_MAX_BONDED_PHONES: u8 = {max_bonds};\n\
              const BLE_PAIRED_PHONES_FILE: &str = \"{store_path}\";\n\
              const CAN_RW_APPROVAL_FILE: &str = \"{approval_path}\";\n\
+             const PHONE_VALIDATIONS_FILE: &str = \"{validations_path}\";\n\
              const MQTT_CLIENT_ID: &str = \"{cid}\";\n\
              const MQTT_CMD_TOPIC: &str = \"{cmd_topic}\";\n\
              const MQTT_DATA_TOPIC: &str = \"{data_topic}\";\n\
@@ -240,6 +248,7 @@ impl TargetBuilder for Builder {
             max_bonds = pc_hw.ble.max_bonded_phones,
             store_path = paired_phones_file,
             approval_path = escape_rust_string(&pc_hw.can_rw_approval_file),
+            validations_path = escape_rust_string(&pc_hw.phone_validations_file),
             cid = client_id,
             cmd_topic = mqtt_cmd_topic,
             data_topic = mqtt_data_topic,

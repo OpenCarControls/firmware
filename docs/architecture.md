@@ -12,7 +12,7 @@ The intermediary between transport layers (BLE/MQTT) and vehicle logic. Knows no
 *   Defines 12 static `Channel`s as the inter-crate contract (see [Channels](#channels)).
 *   Defines shared types: `Transport`, `InboundCommand`, `VehicleStatePayload`, `CanLogFrame`.
 *   Defines 6 pure-logic `#[embassy_executor::task]` functions: `process_ble_commands_task`, `process_mqtt_commands_task`, `route_responses_task`, `publish_state_task`, `publish_can_access_task`, `publish_command_availability_task`.
-*   Exposes `pub fn passes_filter()`, `pub fn is_can_read_only()`, `pub fn set_can_read_only(bool)`, the CAN read-write policy (car identity, owner approval, dev lock; see [CAN](can.md#read-write-policy)), and the SavvyCAN logging API (`is_can_logging`, `log_can_frame`, `run_can_log_session`).
+*   Exposes `pub fn passes_filter()`, `pub fn is_can_read_only()`, `pub fn set_can_read_only(bool)`, the CAN read-write policy (car identity, owner approval, dev lock; see [CAN](can.md#read-write-policy)), the CAN TX classes (`CanTxFrame`, `CommandAuthorization`; see [CAN](can.md#tx-classes)), phone trust and validation sessions (see [BLE](ble.md#phone-trust)), and the SavvyCAN logging API (`is_can_logging`, `log_can_frame`, `run_can_log_session`).
 *   Has 4 inner async helpers (`handle_ble_message`, `handle_mqtt_message`, `route_single_response`, `publish_single_state`) extracted from the task loops so they can be unit-tested without running an executor.
 *   **`publish_single_state` is intentionally non-blocking:** state updates don't go through the TX queues. Each transport has a single-value slot (`BLE_STATE_TX`, `MQTT_STATE_TX`, embassy `Signal`s) that the newest update overwrites. This guarantees `publish_state_task` never stalls, keeping `VEHICLE_STATE_CHANNEL` always drainable and preventing a deadlock cascade through `state_update_task` and command-handler tasks, and a state update can never push a command response out of a queue.
 *   Uses `#![cfg_attr(not(test), no_std)]` so host tests compile without a `no_std` target.
@@ -64,16 +64,16 @@ The actual binary entry point. Generated fresh by `xtask` before every build fro
 | `MQTT_RX_CHANNEL` | board → core | `AppToDevice` | Raw inbound proto from MQTT driver |
 | `MQTT_TX_CHANNEL` | core → board | `DeviceToApp` | Responses and system state to the MQTT driver; only filled while the session is up |
 | `MQTT_STATE_TX` | core → board | `DeviceToApp` | Newest vehicle state for MQTT, basic only and throttled (a `Signal`); sent after `MQTT_TX_CHANNEL` |
-| `SYSTEM_COMMAND_CHANNEL` | core → board | `SystemCommand` | BLE only; board handles restart etc. (the CAN read-write commands are handled in core) |
+| `SYSTEM_COMMAND_CHANNEL` | core → board | `SystemCommand` | BLE only; board handles restart and phone removal (the CAN read-write commands, `ListPairedPhones` and phone validation are handled in core) |
 | `BASIC_CMD_CHANNEL` | core → vehicle | `InboundCommand` | From BLE (MQTT is rejected until authenticated) |
 | `ADVANCED_CMD_CHANNEL` | core → vehicle | `InboundCommand` | BLE only |
 | `CMD_RESP_CHANNEL` | vehicle → core | `(Transport, CommandResponse)` | Transport tag routes response back |
 | `VEHICLE_STATE_CHANNEL` | vehicle → core | `VehicleStatePayload` | BLE gets full; MQTT gets basic only |
 | `CAN_RX_CHANNEL` | board → vehicle | `CanFrame` | Hardware-received CAN frame |
-| `CAN_TX_CHANNELS[bus_id]` | vehicle → board | `CanFrame` | Frame to transmit on that CAN bus (one queue per bus) |
+| `CAN_TX_CHANNELS[bus_id]` | vehicle → board | `CanTxFrame` | Frame to transmit on that CAN bus, with its TX class (one queue per bus; see [CAN bus](can.md#tx-classes)) |
 | `CAN_LOG_CHANNEL` | board → logger session | `CanLogFrame` | Raw (pre-filter) frames for the SavvyCAN logger, only filled while a client is connected; see [CAN bus](can.md#savvycan-logging) |
 
-**`InboundCommand`** carries `{ message_id: u64, transport: Transport, bytes: Vec<u8> }`. The vehicle echoes the `Transport` tag back in `CMD_RESP_CHANNEL` so `route_responses_task` can route the response to the correct radio without the vehicle knowing anything about transports.
+**`InboundCommand`** carries `{ message_id: u64, transport: Transport, source_device_id: Vec<u8>, bytes: Vec<u8>, authorization: Option<CommandAuthorization> }`; the authorization is set for a command from a phone validated in the car, and is what the vehicle needs to send the command's frames (see [BLE](ble.md#phone-trust)). The vehicle echoes the `Transport` tag back in `CMD_RESP_CHANNEL` so `route_responses_task` can route the response to the correct radio without the vehicle knowing anything about transports.
 
 ### Transport links and responses
 A response goes back on the transport its command came in on. If that transport is gone, the response is dropped: the app re-reads the state, which stays the source of truth (contracts#7).
@@ -89,7 +89,7 @@ The app may resend a command with the same `message_id` after switching transpor
 
 **`platform_id`** is a CRC32 of the proto package name (e.g. `0xF7544D7E` for `opencar.cars.virtual_car.v1`), pre-computed and stored in `contracts/.../meta.toml`. xtask injects it as a compile-time constant into `.app_build/src/main.rs`. `core_interface::init(platform_id)` stores it in an `AtomicU32`; the dispatcher tasks validate every inbound message against it and silently drop mismatches.
 
-**Read-only devices:** while the device is CAN read-only, both dispatchers answer `BasicCommandBytes` and `AdvancedCommandBytes` with a failed `CommandResponse` giving the reason instead of routing them (see [CAN](can.md#read-write-policy)).
+**Read-only devices:** while the device is CAN read-only, both dispatchers answer `BasicCommandBytes` and `AdvancedCommandBytes` with a failed `CommandResponse` giving the reason instead of routing them (see [CAN](can.md#read-write-policy)). Over BLE they are then refused from a phone that isn't validated in the car (`REJECTED_NOT_VALIDATED`, see [BLE](ble.md#phone-trust)).
 
 **MQTT restrictions:** `SystemCommand` and `AdvancedCommandBytes` are restricted to BLE and silently dropped from MQTT. `BasicCommandBytes` are **rejected for now** as well: MQTT commands aren't authenticated (anyone with the broker credentials, which ship in the app, could send or replay one), so `handle_mqtt_message` answers them with a failed `CommandResponse` saying so and never queues them to `BASIC_CMD_CHANNEL`. The gate is the `MQTT_COMMANDS_AUTHENTICATED` constant in `dispatch.rs`; remove it once MQTT commands are authenticated (contracts#8, firmware#16). State updates and heartbeats over MQTT are unaffected.
 

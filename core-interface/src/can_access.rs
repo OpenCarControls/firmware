@@ -117,6 +117,12 @@ pub fn is_car_fingerprint_confirmed() -> bool {
     crate::can::is_car_identity_confirmed() && POLICY.lock(|p| p.borrow().car.is_some())
 }
 
+/// The car identified now (both stages), `None` until then.
+pub(crate) fn identified_car() -> Option<CarDigest> {
+    let platform_confirmed = crate::can::is_car_identity_confirmed();
+    POLICY.lock(|p| p.borrow().car.filter(|_| platform_confirmed))
+}
+
 /// Forgets the identified car. Called by `revoke_car_identity`.
 pub(crate) fn forget_car() {
     POLICY.lock(|p| p.borrow_mut().car = None);
@@ -126,7 +132,8 @@ pub(crate) fn forget_car() {
 
 /// Approves read-write mode for the car identified now, replacing any earlier approval
 /// (for this car or another one). Refused while the car isn't identified. The board
-/// persists it ([`can_read_write_approval_to_store`]).
+/// persists it ([`can_read_write_approval_to_store`]). Validations made in another car
+/// end (see `phone_trust.rs`). Who may approve is checked by the dispatcher.
 pub fn approve_can_read_write() -> Result<(), CanAccessError> {
     let platform_confirmed = crate::can::is_car_identity_confirmed();
     let digest = POLICY.lock(|p| {
@@ -136,6 +143,7 @@ pub fn approve_can_read_write() -> Result<(), CanAccessError> {
         Some(car)
     });
     let digest = digest.ok_or(CanAccessError::CarNotIdentified)?;
+    crate::phone_trust::on_car_approved(digest);
     APPROVAL_TO_STORE.signal(Some(digest));
     crate::can::notify_can_read_only_changed();
     Ok(())
@@ -280,7 +288,8 @@ pub fn can_access_state() -> proto::CanAccessState {
     }
 }
 
-/// A BLE state update carrying only the system state with [`can_access_state`].
+/// A BLE state update carrying only the system state with [`can_access_state`] and the
+/// connected phone's [`crate::phone_access_state`].
 pub fn can_access_state_update(timestamp_ms: u64) -> proto::DeviceToApp {
     proto::DeviceToApp {
         timestamp_ms,
@@ -289,6 +298,7 @@ pub fn can_access_state_update(timestamp_ms: u64) -> proto::DeviceToApp {
             proto::StateUpdate {
                 system_state: Some(proto::SystemState {
                     can_access: Some(can_access_state()),
+                    phone_access: crate::phone_trust::phone_access_state(timestamp_ms),
                     ..Default::default()
                 }),
                 vehicle_state: None,
@@ -304,17 +314,21 @@ pub const CAN_ACCESS_REPEAT_MS: u64 = 5_000;
 
 /// The last state queued for the app and when, so unchanged states aren't sent more often
 /// than every [`CAN_ACCESS_REPEAT_MS`].
-static LAST_PUBLISHED: Mutex<
-    CriticalSectionRawMutex,
-    RefCell<Option<(proto::CanAccessState, u64)>>,
-> = Mutex::new(RefCell::new(None));
+static LAST_PUBLISHED: Mutex<CriticalSectionRawMutex, RefCell<Option<(AccessStates, u64)>>> =
+    Mutex::new(RefCell::new(None));
+
+/// What [`can_access_state_update`] carries, to tell whether it changed.
+type AccessStates = (proto::CanAccessState, Option<proto::PhoneAccessState>);
 
 /// Queues [`can_access_state_update`] on BLE if the state changed since the last one
 /// queued, or if that was [`CAN_ACCESS_REPEAT_MS`] or more ago. `try_send`: never blocks;
 /// a full queue or a BLE link that is down leaves it unsent, to retry on the next call.
 /// Returns whether a message was queued.
 pub fn publish_can_access_state(timestamp_ms: u64) -> bool {
-    let state = can_access_state();
+    let state = (
+        can_access_state(),
+        crate::phone_trust::phone_access_state(timestamp_ms),
+    );
     let due = LAST_PUBLISHED.lock(|last| match last.borrow().as_ref() {
         Some((sent, sent_at)) => {
             *sent != state || timestamp_ms.saturating_sub(*sent_at) >= CAN_ACCESS_REPEAT_MS
@@ -340,11 +354,13 @@ pub fn resend_can_access_state() {
 
 /// Publishes the access state over BLE whenever it changes, and every
 /// [`CAN_ACCESS_REPEAT_MS`] while it doesn't. Also checks once a second, which retries a
-/// send that found the queue full.
+/// send that found the queue full and times out a phone validation session.
 #[embassy_executor::task]
 pub async fn publish_can_access_task() {
     loop {
-        publish_can_access_state(Instant::now().as_millis());
+        let now_ms = Instant::now().as_millis();
+        crate::validation::tick_validation(now_ms);
+        publish_can_access_state(now_ms);
         let _ = embassy_futures::select::select(
             CAN_ACCESS_CHANGED.wait(),
             Timer::after(Duration::from_secs(1)),

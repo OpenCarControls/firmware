@@ -270,9 +270,10 @@ mod hardware {
                 // Drop silently when in read-only mode; do not transmit on the bus.
                 // Both checks matter: the flag may have flipped since this session
                 // started, and the controller is only rebuilt at the top of the loop.
-                // `allow_can_tx` also lets an identity probe's own frames through.
+                // `allow_can_tx` also lets an identity probe's own frames through, and
+                // checks a command frame's phone is still validated.
                 if !listen_only && core_interface::allow_can_tx(bus_id, &outbound) {
-                    transmit_twai(twai, bus_id, &outbound).await;
+                    transmit_twai(twai, bus_id, outbound.frame()).await;
                 }
             }
         }
@@ -475,9 +476,10 @@ mod hardware {
                 // Drop silently when in read-only mode; do not transmit on the bus.
                 // Both checks matter: the flag may have flipped since the mode was
                 // last applied at the top of the loop. `allow_can_tx` also lets an
-                // identity probe's own frames through.
+                // identity probe's own frames through, and checks a command frame's
+                // phone is still validated.
                 if !listen_only && core_interface::allow_can_tx(bus_id, &outbound) {
-                    if let Some(f) = core_to_mcp_frame(&outbound) {
+                    if let Some(f) = core_to_mcp_frame(outbound.frame()) {
                         if driver.send_message(f).is_ok() {
                             crate::status_leds::pulse_can();
                         }

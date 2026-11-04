@@ -18,9 +18,15 @@ const MSG_ID: u64 = 42;
 fn setup() {
     init(PLATFORM_ID);
     reset_recent_commands_for_tests();
+    embassy_futures::block_on(core_interface::clear_paired_phones());
+    core_interface::reset_phone_trust_for_tests();
     set_link_up(Transport::Ble, true);
     set_link_up(Transport::Mqtt, true);
+    while BLE_TX_CHANNEL.try_receive().is_ok() {}
 }
+
+/// The phones the tests send vehicle commands from.
+const VALIDATED_PHONES: [&[u8]; 3] = [&[1, 2, 3, 4], &[0xAA], &[0xBB]];
 
 fn ble_msg(platform_id: u32, payload: Option<Payload>) -> proto::AppToDevice {
     proto::AppToDevice {
@@ -53,6 +59,10 @@ fn allow_read_write() {
     core_interface::set_can_dev_write_unlocked(true).unwrap();
     core_interface::set_can_read_only(false);
     assert!(!core_interface::is_can_read_only());
+    for phone in VALIDATED_PHONES {
+        embassy_futures::block_on(core_interface::add_paired_phone(phone));
+        assert!(core_interface::validate_phone_for_tests(phone));
+    }
 }
 
 fn make_system_cmd() -> SystemCommand {
@@ -122,6 +132,11 @@ fn ble_basic_command_bytes_goes_to_basic_channel_with_ble_transport() {
     assert_eq!(cmd.bytes, bytes);
     assert_eq!(cmd.source_device_id, source);
     assert!(matches!(cmd.transport, Transport::Ble));
+    assert_eq!(
+        cmd.authorization.as_ref().map(|a| a.device_id()),
+        Some(source.as_slice()),
+        "a validated phone's command carries its authorization"
+    );
     assert!(ADVANCED_CMD_CHANNEL.try_receive().is_err());
 }
 
@@ -211,15 +226,16 @@ fn ble_basic_command_with_empty_source_device_id_is_rejected() {
     assert!(BASIC_CMD_CHANNEL.try_receive().is_err());
     let outbound = BLE_TX_CHANNEL
         .try_receive()
-        .expect("expected non-controller rejection response on BLE_TX");
+        .expect("expected a rejection response on BLE_TX");
     let resp = match outbound.payload {
         Some(proto::device_to_app::Payload::CommandResponse(r)) => r,
         other => panic!("unexpected payload: {:?}", other),
     };
     assert!(!resp.success);
+    // No phone identity, so never a validated phone.
     assert_eq!(
         resp.status_code,
-        proto::CommandStatusCode::RejectedNotController as i32
+        proto::CommandStatusCode::RejectedNotValidated as i32
     );
 }
 
@@ -329,19 +345,44 @@ fn ble_restart_command_still_forwarded_to_system_channel_when_debug_available() 
 }
 
 #[test]
-fn ble_list_paired_phones_forwarded_to_system_channel() {
+fn ble_list_paired_phones_is_answered_with_the_trust_of_each_phone() {
     setup();
-    let msg = ble_msg(
+    allow_read_write();
+    let bonded_only = vec![0xCC];
+    embassy_futures::block_on(core_interface::add_paired_phone(&bonded_only));
+    let msg = ble_msg_with_source(
         PLATFORM_ID,
+        bonded_only.clone(),
         Some(Payload::SystemCommand(SystemCommand {
             action: Some(Action::ListPairedPhones(ListPairedPhonesCommand {})),
         })),
     );
     embassy_futures::block_on(handle_ble_message(msg));
-    let received = SYSTEM_COMMAND_CHANNEL
-        .try_receive()
-        .expect("ListPairedPhones not in SYSTEM_COMMAND_CHANNEL");
-    assert!(matches!(received.action, Some(Action::ListPairedPhones(_))));
+    assert!(
+        SYSTEM_COMMAND_CHANNEL.try_receive().is_err(),
+        "answered by core-interface, not forwarded"
+    );
+    let resp = match BLE_TX_CHANNEL.try_receive().unwrap().payload {
+        Some(proto::device_to_app::Payload::CommandResponse(r)) => r,
+        other => panic!("unexpected payload: {:?}", other),
+    };
+    assert!(resp.success);
+    let phones = match resp.response_data {
+        Some(proto::command_response::ResponseData::SystemResult(proto::SystemCommandResult {
+            result: Some(proto::system_command_result::Result::PairedPhones(phones)),
+        })) => phones.phones,
+        other => panic!("unexpected response data: {:?}", other),
+    };
+    assert_eq!(phones.len(), 4);
+    for phone in &phones {
+        let expected = if phone.device_id == bonded_only {
+            proto::PhoneTrustLevel::Bonded
+        } else {
+            proto::PhoneTrustLevel::Validated
+        };
+        assert_eq!(phone.trust, expected as i32);
+        assert_eq!(phone.is_requester, phone.device_id == bonded_only);
+    }
 }
 
 #[test]

@@ -1,3 +1,4 @@
+use crate::can_tx::CanTxFrame;
 use crate::proto;
 use crate::types::{CanFrame, InboundCommand, Transport, VehicleStatePayload};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -51,22 +52,23 @@ pub static CAN_RX_CHANNEL: Channel<CriticalSectionRawMutex, CanFrame, 16> = Chan
 pub const MAX_CAN_BUSES: usize = 4;
 /// Per-bus CAN transmit queues, indexed by `CanFrame::bus_id`. Vehicle tasks enqueue with
 /// [`send_can_frame`]; each board CAN driver drains only its own bus's channel, so no
-/// driver ever has to look at (or re-queue) another bus's frames.
-pub static CAN_TX_CHANNELS: [Channel<CriticalSectionRawMutex, CanFrame, 16>; MAX_CAN_BUSES] =
+/// driver ever has to look at (or re-queue) another bus's frames. Frames carry their TX
+/// class (see `can_tx.rs`).
+pub static CAN_TX_CHANNELS: [Channel<CriticalSectionRawMutex, CanTxFrame, 16>; MAX_CAN_BUSES] =
     [const { Channel::new() }; MAX_CAN_BUSES];
 
 /// Returns the transmit channel for `bus_id`, or `None` if the bus does not exist.
 pub fn can_tx_channel(
     bus_id: u8,
-) -> Option<&'static Channel<CriticalSectionRawMutex, CanFrame, 16>> {
+) -> Option<&'static Channel<CriticalSectionRawMutex, CanTxFrame, 16>> {
     CAN_TX_CHANNELS.get(bus_id as usize)
 }
 
 /// Queues `frame` for transmission on its `bus_id`. Returns `false` (and drops the frame)
 /// if that bus does not exist. Whether the frame reaches the wire is still decided by the
-/// board driver's CAN read-only check.
-pub async fn send_can_frame(frame: CanFrame) -> bool {
-    match can_tx_channel(frame.bus_id) {
+/// board driver's TX check ([`crate::allow_can_tx`]), from its class.
+pub async fn send_can_frame(frame: CanTxFrame) -> bool {
+    match can_tx_channel(frame.bus_id()) {
         Some(channel) => {
             channel.send(frame).await;
             true

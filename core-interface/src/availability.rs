@@ -11,7 +11,9 @@
 //! - nothing is published until the vehicle has reported;
 //! - while the device is read-only, every command is unavailable, whatever was reported;
 //! - a report older than [`REPORT_MAX_AGE_MS`] (the vehicle stopped reporting) counts as
-//!   unavailable too.
+//!   unavailable too;
+//! - over BLE, every command is unavailable while the connected phone isn't validated for
+//!   this car (`phone_trust.rs`), since the device rejects its vehicle commands.
 //!
 //! MQTT apps are told too, for the basic commands only (advanced commands are BLE only), at
 //! the same rate as the MQTT state: every [`COMMAND_AVAILABILITY_REPEAT_MS`] while a client is
@@ -62,6 +64,35 @@ static REPORT: Mutex<CriticalSectionRawMutex, RefCell<Report>> = Mutex::new(RefC
 }));
 
 static CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
+/// Publishes the availability again soon, e.g. when the connected phone's trust changed.
+pub(crate) fn notify_availability_changed() {
+    CHANGED.signal(());
+}
+
+/// Every command held back as unavailable, except those a car doesn't have.
+fn hold_back(availability: &mut proto::CommandAvailability) {
+    for state in availability
+        .basic
+        .values_mut()
+        .chain(availability.advanced.values_mut())
+    {
+        if *state != State::Unsupported as i32 {
+            *state = State::Unavailable as i32;
+        }
+    }
+}
+
+/// What the connected BLE phone is told at `now_ms`: [`command_availability_at`], with
+/// every command unavailable while that phone isn't validated for this car (or no phone
+/// is connected).
+pub fn ble_command_availability_at(now_ms: u64) -> Option<proto::CommandAvailability> {
+    let mut availability = command_availability_at(now_ms)?;
+    if !crate::phone_trust::is_ble_peer_validated() {
+        hold_back(&mut availability);
+    }
+    Some(availability)
+}
 
 /// The last state queued for the app and when, so unchanged states aren't sent more often
 /// than every [`COMMAND_AVAILABILITY_REPEAT_MS`].
@@ -152,7 +183,7 @@ pub fn command_availability_state_update(
 /// [`COMMAND_AVAILABILITY_REPEAT_MS`] or more ago. `try_send`: never blocks; a full queue
 /// or a BLE link that is down leaves it unsent, to retry on the next call. Returns whether a message was queued.
 pub fn publish_command_availability(timestamp_ms: u64) -> bool {
-    let Some(availability) = command_availability_at(timestamp_ms) else {
+    let Some(availability) = ble_command_availability_at(timestamp_ms) else {
         return false;
     };
     let due = LAST_PUBLISHED.lock(|last| match last.borrow().as_ref() {

@@ -44,6 +44,7 @@ mod tests {
             transport: Transport::Ble,
             source_device_id: alloc::vec![],
             bytes: alloc::vec![0xDE, 0xAD],
+            authorization: None,
         };
         BASIC_CMD_CHANNEL.sender().send(cmd).await;
         let received = BASIC_CMD_CHANNEL.receiver().receive().await;

@@ -21,6 +21,7 @@ Rules for AI agents working in this repo. Project knowledge (architecture, BLE, 
 ### Safety
 *   CAN TX must stay gated by `is_can_read_only()` (board TX loops: `allow_can_tx()`); never add a path that writes to a bus without going through that check. The only exception is the identity probe (`can_probe.rs`, see `docs/can.md`): don't widen it beyond its declared exact frames, or relax its conditions, without the maintainer's agreement. Don't call `set_can_read_only(false)` before the vehicle has validated the car.
 *   BLE: never trust `source_device_id` from the app; keep characteristics `encrypted` and the pairing-window checks intact.
+*   A frame that acts on the car (part of a vehicle command) is built with `CanTxFrame::command` and the command's `authorization`, never `CanTxFrame::platform`. Don't add another way to create a `CommandAuthorization`, or relax the validated-phone check in the dispatcher or `allow_can_tx`, without the maintainer's agreement (see `docs/can.md`, "TX classes").
 
 ### Git & files
 *   `config.toml` is gitignored and holds per-developer secrets (WiFi credentials, pins). Never commit it or print its contents; edit `config.toml.example` for defaults.

@@ -8,11 +8,11 @@ Defined in `core-interface`:
 | Channel | Direction | Type |
 |---|---|---|
 | `CAN_RX_CHANNEL` | board → vehicle | `CanFrame` |
-| `CAN_TX_CHANNELS[bus_id]` | vehicle → board | `CanFrame` (one queue per bus, `MAX_CAN_BUSES` = 4) |
+| `CAN_TX_CHANNELS[bus_id]` | vehicle → board | `CanTxFrame` (a `CanFrame` with its [TX class](#tx-classes); one queue per bus, `MAX_CAN_BUSES` = 4) |
 
 **`CanFrame`** carries `{ bus_id: u8, id: embedded_can::Id, data: [u8; 8], dlc: u8 }`. `bus_id` is a 0-based index matching the order of `[[hardware.esp.can_buses]]` / `[[hardware.pc.can_buses]]` entries in `config.toml`.
 
-Vehicles queue frames with `core_interface::send_can_frame(frame).await`, which picks the channel from `frame.bus_id` (and drops the frame if the bus does not exist). Each board driver drains only its own bus's channel, so drivers never inspect or re-queue each other's frames.
+Vehicles queue frames with `core_interface::send_can_frame(CanTxFrame::platform(frame)).await` (or `CanTxFrame::command(..)`, see [TX classes](#tx-classes)), which picks the channel from the frame's `bus_id` (and drops the frame if the bus does not exist). Each board driver drains only its own bus's channel, so drivers never inspect or re-queue each other's frames.
 
 **`CanFilter`** carries `{ bus_id: u8, id: embedded_can::Id, mask: u32 }`. Vehicle crates export a `pub static CAN_FILTERS: &[CanFilter]` that xtask passes to the board's init functions. A frame passes if `(frame_id_raw & mask) == (filter_id_raw & mask)`.
 
@@ -86,7 +86,7 @@ Two layers:
     *   TWAI: `run_twai_loop` rebuilds the driver in `TwaiMode::ListenOnly` / `TwaiMode::Normal` (esp-hal also applies the ESP32/S3/C3 errata workaround that forces the controller error-passive in listen-only mode). The rebuild resets the controller, so frames arriving during the switch are lost.
     *   MCP2515: `init_mcp2515` leaves the chip in `OpMode::ListenOnly`, and `run_mcp2515_loop` calls `set_mode(ListenOnly | Normal)` on each change.
     *   Neither controller is ever in normal mode before its loop has checked the flag.
-2.  **Software TX drop (all boards):** the board TX drain loops ask `allow_can_tx(bus_id, &frame)` for every frame and discard it unless the bus is read-write or the frame is one an open probe window allows, and also while the hardware mode has not yet caught up. Vehicle code is free to push frames to the TX channels at any time. Sites:
+2.  **Software TX drop (all boards):** the board TX drain loops ask `allow_can_tx(bus_id, &frame)` for every frame and discard it unless the bus is read-write or the frame is one an open probe window allows (and, for a command frame, its phone is still validated, see [TX classes](#tx-classes)), and also while the hardware mode has not yet caught up. Vehicle code is free to push frames to the TX channels at any time. Sites:
     *   `board-pc` — `socket_can_task` TX arm (before `socket.write_frame()`)
     *   `board-esp` — `run_twai_session` TX arm (before `twai.transmit_async()`)
     *   `board-esp` — `run_mcp2515_loop` TX arm (before `driver.send_message()`)
@@ -105,7 +105,14 @@ The vehicle decides how to confirm both, from what the car itself reports; `core
 
 E-GMP then identifies the exact car with the head unit's serial number (`cars/egmp/src/identity.rs`), on every car: North American cars don't broadcast the VIN on M-CAN. It reads it through the [identity probe](#identity-probe), UDS `22 F18C` on 0x780 with the answer on 0x788. The head unit of an EV6 answers in the default session whenever the bus is awake (Ready, ACC, or off with the bus still awake). The two frames sent are the request and the flow control, `03 22 F1 8C 00 00 00 00` and `30 00 00 00 00 00 00 00`. The identification is driven by received frames, so it only moves on while the bus is busy: a request sent on a sleeping EV6 bus woke the car. An attempt that gets no answer or a refusal closes its window and is retried after 2, 5, 15, then 30 s, until `core-interface` refuses more attempts (`MAX_PROBE_ATTEMPTS` per boot); the bus then stays read-only until a reboot. The fingerprint is `hu-serial:` followed by the serial without its trailing padding (`00`, spaces or `FF`), so it can never match a VIN-based one. E-GMP then calls `set_can_read_only(false)`; the bus leaves read-only mode once the owner has approved this car (and, in a development build, the dev lock is unlocked). If the identity is revoked later, the serial is read again once the platform matches again. A replaced head unit makes it a different car, which the owner approves again.
 
-virtual-car has no real car to recognise: it identifies a simulated car with a fixed fingerprint at boot (`identify_simulated_car()`) and asks to unlock, so its commands work once the owner has approved it (and, in a development build, unlocked the dev lock). Every virtual-car device is the same car to the policy. It is for development only; don't run it on a device plugged into a real car.
+virtual-car has no real car to recognise: it identifies a simulated car with a fixed fingerprint at boot (`identify_simulated_car()`) and asks to unlock, so its commands work once the owner has approved it (and, in a development build, unlocked the dev lock) and the phone is validated. Every virtual-car device is the same car to the policy. It is for development only; don't run it on a device plugged into a real car.
+
+virtual-car's simulated [phone validation](ble.md#phone-trust) methods, on bus 0 (`vcan0` on PC):
+
+*   `virtual_car.cluster_code` (code entry, needs the approval): while the session runs, the code is sent every second on 0x500 as a platform frame (6 ASCII digits, then two zeros), as a car shows it on the cluster, and logged once (`the cluster shows the validation code ...`) for a PC without `vcan0`.
+*   `virtual_car.button` (in-car action): a 0x400 frame with byte 0 = `01` (`cansend vcan0 400#01`) presses the button.
+
+Its door lock sends a command frame on 0x310 (byte 0 = `01` to lock), so `candump vcan0` shows that command frames only go out for a validated phone.
 
 ### Identity probe
 Some cars only give away what identifies the exact car when asked with a diagnostic request (E-GMP: the head unit's serial number, `22 F18C` on 0x780). The identity probe is the only way to transmit before the car is identified, and it is kept as narrow as possible:
@@ -123,19 +130,29 @@ The vehicle waits `PROBE_SETTLE_MS` after opening the window, for the controller
 3.  Vehicle identifies the exact car (the VIN, checked with `vin_matches`, or other unique identifiers, read passively or through the [identity probe](#identity-probe)) and calls `confirm_car_fingerprint(..)`, then `set_can_read_only(false)`. CAN TX is live once the owner has approved this car and, in a development build, the dev lock is unlocked; the vehicle doesn't need to ask again when that happens.
 4.  On any subsequent error or unexpected data: `revoke_car_identity()` re-engages the lock.
 
+## TX classes
+Every frame a vehicle sends has a class, and the TX channels only carry `CanTxFrame`s, which can only be built with one of two constructors (`can_tx.rs`), so the class of every frame is visible where it is built:
+
+*   **Platform frames** (`CanTxFrame::platform(frame)`): the platform's own traffic that doesn't act on the car, such as the identity request or text on the cluster. They need read-write mode (the [read-write policy](#read-write-policy)), or an open [identity probe](#identity-probe) window for the probe's exact frames. Review every `CanTxFrame::platform` call to check the frame really doesn't act on the car.
+*   **Command frames** (`CanTxFrame::command(&authorization, frame)`): part of a vehicle command (lock the doors, open the trunk). They need read-write mode and the phone that sent the command to be [validated](ble.md#phone-trust) for this car. The `CommandAuthorization` comes with the command's `InboundCommand`, and only the dispatcher creates one, for a command from a validated phone. `allow_can_tx` checks the phone's validation again when the frame is sent, so a frame queued before the validation ended is dropped. Command frames never go through a probe window.
+
+`CommandAuthorization::for_tests` lets vehicle crate tests build one; it only exists with the `test-utils` feature, which only dev-dependencies enable.
+
 ## Read-write policy
 
 The device may transmit on the car's buses (read-write mode) only while **all** of these hold. `is_can_read_only()` derives the answer from them every time it is read (`can_access.rs`), so an unmet condition always reads as read-only:
 
 1.  **The car is identified**: both stages of [Car identity](#car-identity), platform and exact car.
-2.  **The owner approved read-write mode for this car.** Given once, after setup, from a bonded phone over BLE (`SetCanReadWriteApprovalCommand`), after the app has shown the risk. Refused while the car isn't identified, since it binds to the identified car.
+2.  **The owner approved read-write mode for this car.** Given once, after setup, from a bonded phone over BLE (`SetCanReadWriteApprovalCommand`), after the app has shown the risk; once a phone is validated for this car, only a validated phone can change it (see [Phone trust](ble.md#phone-trust)). Refused while the car isn't identified, since it binds to the identified car.
 3.  **Development builds only: the dev lock is unlocked** (`SetCanDevWriteUnlockCommand`, from a bonded phone over BLE). It is locked at every boot and never stored, so a developer unlocks it deliberately each time. Release builds (`cargo xtask build --production`, which only the release workflow passes) have no dev lock and refuse the command; every other build is a development build, so a missing flag only adds a condition.
 
 On top of that, the vehicle must have asked to unlock (`set_can_read_only(false)`), and no SavvyCAN logging session may be active.
 
+Read-write mode only lets the platform's own frames out. A vehicle command's frames also need the sending phone to be validated in the car ([TX classes](#tx-classes)), so the approval alone never lets anything act on the car.
+
 **The approval** is stored as `SHA-256(domain ‖ platform_id ‖ fingerprint)` (`CarDigest`), so no VIN is stored, and it only applies while the identified car has the same digest. It survives reboots and pairing, removing or clearing phones; phones connecting or disconnecting change nothing. It stops applying when the device is moved to another car (the app shows "approved for another car" and the owner can approve this one, which replaces it), and it is cleared by revoking it from the app or by erasing the flash. Firmware for another platform hashes a different `platform_id`, so it never inherits an approval either. The ESP keeps it in flash next to the BLE bonds (see [BLE](ble.md#persistence-power-cycle)); the PC board in the file `[hardware.pc] can_rw_approval_file`. Until the board has restored it at boot, the device counts as not approved. `core-interface` hands every change to the board with `can_read_write_approval_to_store()`.
 
-**Who can change it:** only a bonded phone, over BLE. The dispatcher checks the transport-stamped `source_device_id` against the paired-phone registry (a phone that isn't bonded can still write while the pairing window is open) and answers with a `CommandResponse` (failed with the reason when refused). MQTT drops every `SystemCommand`, so it can never approve, revoke or unlock.
+**Who can change it:** only a bonded phone, over BLE, and once a phone is validated for the identified car only a validated one (`REJECTED_NOT_VALIDATED` otherwise). The dispatcher checks the transport-stamped `source_device_id` against the paired-phone registry (a phone that isn't bonded can still write while the pairing window is open) and answers with a `CommandResponse` (failed with the reason when refused). MQTT drops every `SystemCommand`, so it can never approve, revoke or unlock. Approving a car other than the one the validations were made in erases every validation.
 
 **What relocks the bus:**
 
@@ -150,9 +167,9 @@ On top of that, the vehicle must have asked to unlock (`set_can_read_only(false)
 
 The approval and the dev lock are read-time conditions rather than a relock of the latch: the owner can lock and unlock without the vehicle having to validate the car again, and withdrawing either still closes the bus immediately.
 
-**What the app sees:** `SystemState.can_access` (`CanAccessState`): platform confirmed, car identified, the approval compared with this car (`NotApproved`, `Approved`, `OtherCar`, `AwaitingCar`), whether this build has the dev lock and whether it is unlocked, logging, and the effective `read_only`. It is BLE only, sent in a `StateUpdate` of its own (no vehicle state, so the vehicle's message size is unaffected) by `publish_can_access_task` whenever it changes (checked at least once a second), every `CAN_ACCESS_REPEAT_MS` (5 s) while it doesn't, and again when the app subscribes. The repeat covers a message lost as the app subscribes and a missed change notification, so the app never relies on one delivery. The fingerprint and the VIN are never sent.
+**What the app sees:** `SystemState.can_access` (`CanAccessState`): platform confirmed, car identified, the approval compared with this car (`NotApproved`, `Approved`, `OtherCar`, `AwaitingCar`), whether this build has the dev lock and whether it is unlocked, logging, and the effective `read_only`. It is BLE only, sent in a `StateUpdate` of its own (no vehicle state, so the vehicle's message size is unaffected) by `publish_can_access_task` whenever it changes (checked at least once a second), every `CAN_ACCESS_REPEAT_MS` (5 s) while it doesn't, and again when the app subscribes. The repeat covers a message lost as the app subscribes and a missed change notification, so the app never relies on one delivery. The same update carries the connected phone's `SystemState.phone_access` (its trust level and validation session, see [Phone trust](ble.md#phone-trust)), which also triggers it when it changes. The fingerprint and the VIN are never sent.
 
-**Vehicle commands while read-only:** `basic_command_bytes` and `advanced_command_bytes` are refused by `core-interface`'s dispatcher (BLE, and MQTT once it accepts commands) with a failed `CommandResponse` while `is_can_read_only()` holds, before they reach the vehicle. The message gives the first unmet condition in words (`can_read_only_reason()`: logging, platform not recognised, car not identified, not approved or approved for another car, dev lock locked, or the vehicle not having enabled control). So every vehicle, the simulator included, reports a read-only device truthfully instead of claiming a command it never sent worked. System commands (the approval, the dev lock, phone management) are not gated. The vehicle's own traffic, such as an identification request, doesn't go through app commands and isn't affected.
+**Vehicle commands while read-only:** `basic_command_bytes` and `advanced_command_bytes` are refused by `core-interface`'s dispatcher (BLE, and MQTT once it accepts commands) with a failed `CommandResponse` while `is_can_read_only()` holds, before they reach the vehicle. The message gives the first unmet condition in words (`can_read_only_reason()`: logging, platform not recognised, car not identified, not approved or approved for another car, dev lock locked, or the vehicle not having enabled control). So every vehicle, the simulator included, reports a read-only device truthfully instead of claiming a command it never sent worked. A read-write device then refuses them from a phone that isn't validated for this car (`REJECTED_NOT_VALIDATED`, see [Phone trust](ble.md#phone-trust)). System commands (the approval, the dev lock, phone management) are not gated. The vehicle's own traffic, such as an identification request, doesn't go through app commands and isn't affected.
 
 ## SavvyCAN logging
 

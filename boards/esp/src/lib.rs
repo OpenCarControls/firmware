@@ -56,6 +56,13 @@ mod hardware {
         spawner.spawn(core_interface::publish_can_access_task().unwrap());
         spawner.spawn(core_interface::publish_command_availability_task().unwrap());
         spawner.spawn(system_command_task().unwrap());
+        core_interface::set_random_source(fill_random);
+    }
+
+    /// The validation codes' random source: the hardware RNG, a true random source while
+    /// the radio runs (BLE always does).
+    fn fill_random(buf: &mut [u8]) {
+        esp_hal::rng::Rng::new().read(buf);
     }
 
     #[embassy_executor::task]
@@ -66,13 +73,6 @@ mod hardware {
             match cmd.action {
                 Some(core_interface::proto::system_command::Action::RestartCommand(_)) => {
                     log::warn!("SYSTEM: restart requested (ESP handler not wired yet)");
-                }
-                Some(core_interface::proto::system_command::Action::ListPairedPhones(_)) => {
-                    let phones = core_interface::list_paired_phones().await;
-                    log::debug!(
-                        "SYSTEM: list paired phones requested, count={} (ESP runtime)",
-                        phones.len()
-                    );
                 }
                 Some(core_interface::proto::system_command::Action::RemovePairedPhone(req)) => {
                     if !pairing_window_open_or_warn("remove paired phone") {
@@ -109,8 +109,13 @@ mod hardware {
                 Some(core_interface::proto::system_command::Action::SetCanDebugEnabled(_))
                 | Some(core_interface::proto::system_command::Action::UpdateCanDebugFilters(_))
                 // Handled by core-interface's BLE dispatcher, never forwarded here.
+                | Some(core_interface::proto::system_command::Action::ListPairedPhones(_))
                 | Some(core_interface::proto::system_command::Action::SetCanReadWriteApproval(_))
                 | Some(core_interface::proto::system_command::Action::SetCanDevWriteUnlock(_))
+                | Some(core_interface::proto::system_command::Action::ListPhoneValidationMethods(_))
+                | Some(core_interface::proto::system_command::Action::StartPhoneValidation(_))
+                | Some(core_interface::proto::system_command::Action::SubmitPhoneValidationCode(_))
+                | Some(core_interface::proto::system_command::Action::CancelPhoneValidation(_))
                 | None => {}
             }
         }

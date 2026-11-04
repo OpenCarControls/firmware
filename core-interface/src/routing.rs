@@ -96,6 +96,9 @@ pub fn set_link_up(transport: Transport, up: bool) {
         link.up.store(false, Ordering::Relaxed);
         link.generation.fetch_add(1, Ordering::Relaxed);
         while tx_channel(transport).try_receive().is_ok() {}
+        if matches!(transport, Transport::Ble) {
+            crate::phone_trust::set_ble_peer(None);
+        }
     }
 }
 
