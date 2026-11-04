@@ -18,6 +18,7 @@ use portable_atomic::{AtomicU8, AtomicU32, Ordering};
 
 use embedded_can::{ExtendedId, Id, StandardId};
 
+use crate::can_tx::CanTxFrame;
 use crate::channels::MAX_CAN_BUSES;
 use crate::types::CanFrame;
 
@@ -203,15 +204,24 @@ fn is_can_bus_listen_only_at(bus_id: u8, now: Instant) -> bool {
     crate::is_can_bus_read_only(bus_id) && with_open_window(bus_id, now, |_| ()).is_none()
 }
 
-/// Returns `true` if `frame` may be sent on `bus_id`: the bus is read-write, or the open
-/// probe window declared this exact frame (ID and data) and hasn't sent it yet (it then
-/// counts as sent). Board drivers call it for every outbound frame, right before sending it, and
-/// drop the frame when it returns `false`.
-pub fn allow_can_tx(bus_id: u8, frame: &CanFrame) -> bool {
-    allow_can_tx_at(bus_id, frame, Instant::now())
+/// Returns `true` if `frame` may be sent on `bus_id`, from its class (see `can_tx.rs`).
+/// A platform frame: the bus is read-write, or the open probe window declared this exact
+/// frame (ID and data) and hasn't sent it yet (it then counts as sent). A command frame:
+/// the bus is read-write and the phone whose command it is is still validated for this
+/// car; never through a probe window. Board drivers call it for every outbound frame,
+/// right before sending it, and drop the frame when it returns `false`.
+pub fn allow_can_tx(bus_id: u8, frame: &CanTxFrame) -> bool {
+    match frame.command_device_id() {
+        Some(device_id) => {
+            frame.bus_id() == bus_id
+                && !crate::is_can_bus_read_only(bus_id)
+                && crate::phone_trust::is_phone_validated(device_id)
+        }
+        None => allow_platform_tx_at(bus_id, frame.frame(), Instant::now()),
+    }
 }
 
-fn allow_can_tx_at(bus_id: u8, frame: &CanFrame, now: Instant) -> bool {
+fn allow_platform_tx_at(bus_id: u8, frame: &CanFrame, now: Instant) -> bool {
     if !crate::is_can_bus_read_only(bus_id) {
         return true;
     }
@@ -278,9 +288,9 @@ mod tests {
         };
         let late = Instant::now() + Duration::from_millis(PROBE_WINDOW_MS);
         assert!(is_can_bus_listen_only_at(0, late));
-        assert!(!allow_can_tx_at(0, &request, late));
+        assert!(!allow_platform_tx_at(0, &request, late));
         assert!(
-            allow_can_tx_at(0, &request, Instant::now()),
+            allow_platform_tx_at(0, &request, Instant::now()),
             "still open now"
         );
         drop(window);

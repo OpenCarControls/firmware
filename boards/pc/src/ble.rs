@@ -259,6 +259,9 @@ async fn handle_request(
             };
 
             msg.source_device_id = peer_device_id(stream);
+            // The mock has no connections: the last phone to send a command is the
+            // connected one, for the state published over BLE.
+            core_interface::set_ble_peer(Some(&msg.source_device_id));
             core_interface::BLE_RX_CHANNEL.send(msg).await;
             write_http_response(stream, "204 No Content", "", &[]).await
         }

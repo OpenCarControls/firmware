@@ -20,9 +20,14 @@ pub struct InboundCommand {
     pub source_device_id: Vec<u8>,
     /// Raw encoded bytes of the vehicle-specific command proto message.
     pub bytes: Vec<u8>,
+    /// Set by the dispatcher for a command from a phone validated for this car: what the
+    /// vehicle needs to send the command's frames ([`crate::CanTxFrame::command`]).
+    /// `None` over MQTT, which has no phone identity.
+    pub authorization: Option<crate::can_tx::CommandAuthorization>,
 }
 
 /// A CAN frame received from or to be sent on a CAN bus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CanFrame {
     /// Index into the `[[can_buses]]` config array (0-based). Identifies which
     /// physical bus this frame belongs to.

@@ -11,11 +11,15 @@ bytes = { workspace = true }
 embassy-executor = { workspace = true }
 embassy-sync = { workspace = true }
 embassy-time = { workspace = true }
+log = { workspace = true }
+portable-atomic = { workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true }
 
 [dev-dependencies]
+# `CommandAuthorization::for_tests`.
+core-interface = { workspace = true, features = ["test-utils"] }
 critical-section = { workspace = true }
 embassy-futures = { workspace = true }
 # The host time driver, for tests that read the clock.

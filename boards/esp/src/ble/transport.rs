@@ -252,6 +252,10 @@ mod hardware {
             }
         );
         core_interface::restore_can_read_write_approval(approval);
+        let validations = bond_store.load_phone_validations().await;
+        if core_interface::restore_phone_validations(&validations) {
+            log::info!("Phone validations: restored from flash");
+        }
 
         let loaded_bonds = bond_store.load_bonds().await;
         crate::ble::boot_pairing::BONDS_LOADED.signal(loaded_bonds.len());
@@ -291,6 +295,8 @@ mod hardware {
                 core_interface::add_paired_phone(&phone_device_id(&bond.identity.bd_addr.0)).await;
             }
         }
+        // A validation never outlives its phone's bond (a bond reset cleared them all).
+        core_interface::prune_phone_validations().await;
 
         let Host {
             mut peripheral,
@@ -329,6 +335,10 @@ mod hardware {
                         core_interface::try_take_can_read_write_approval_to_store()
                     {
                         let _ = bond_store.store_can_rw_approval(approval).await;
+                    }
+                    if let Some(validations) = core_interface::try_take_phone_validations_to_store()
+                    {
+                        let _ = bond_store.store_phone_validations(&validations).await;
                     }
 
                     let pairing_open = core_interface::is_pairing_window_open();
@@ -685,6 +695,9 @@ mod hardware {
         // the phone connected with. Updated once a new bond is stored on this connection,
         // so a phone that has just paired is recognised as bonded straight away.
         let mut source_addr = known_identity.unwrap_or(peer_bd_addr);
+        // What the device publishes over BLE is for this phone (one connection at a
+        // time); `set_link_up(.., false)` clears it.
+        core_interface::set_ble_peer(Some(&phone_device_id(&source_addr.0)));
 
         log::info!(
             "BLE gatt: peer {:02X?} connected — is_known={} pairing_open={}",
@@ -750,7 +763,10 @@ mod hardware {
                 conn.next(),
                 BOND_OPS.receive(),
                 select(encryption_poll, wait_until(short_boot.clear_at)),
-                core_interface::can_read_write_approval_to_store(),
+                select(
+                    core_interface::can_read_write_approval_to_store(),
+                    core_interface::phone_validations_to_store(),
+                ),
             )
             .await
             {
@@ -761,9 +777,14 @@ mod hardware {
                     short_boot.clear(bond_store).await;
                     continue;
                 }
-                // Approvals arrive over this connection, so persist them while it lasts.
-                Either4::Fourth(approval) => {
+                // Approvals and validations arrive over this connection, so persist them
+                // while it lasts.
+                Either4::Fourth(Either::First(approval)) => {
                     let _ = bond_store.store_can_rw_approval(approval).await;
+                    continue;
+                }
+                Either4::Fourth(Either::Second(validations)) => {
+                    let _ = bond_store.store_phone_validations(&validations).await;
                     continue;
                 }
                 Either4::Second(op) => {
@@ -818,6 +839,11 @@ mod hardware {
                         ))
                         .await;
                         source_addr = bond_info.identity.bd_addr;
+                        // New keys may be another phone claiming this address (Just Works
+                        // has no MITM protection): it validates again.
+                        let device_id = phone_device_id(&source_addr.0);
+                        core_interface::forget_phone_validation(&device_id);
+                        core_interface::set_ble_peer(Some(&device_id));
                         log::info!(
                             "BLE: new bond stored inline for {:02X?}",
                             bond_info.identity.bd_addr.raw()

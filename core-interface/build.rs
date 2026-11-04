@@ -12,6 +12,7 @@ fn main() -> Result<()> {
     )?;
 
     generate_ble_transport_constants()?;
+    generate_phone_validation_constants()?;
 
     Ok(())
 }
@@ -131,6 +132,60 @@ fn generate_ble_transport_constants() -> Result<()> {
         ),
     )?;
 
+    Ok(())
+}
+
+/// `[ble.phone_validation]`: the session limits, shared with the app.
+fn generate_phone_validation_constants() -> Result<()> {
+    let toml_str = std::fs::read_to_string("../contracts/opencar/core/v1/transport.toml")
+        .expect("Failed to read contracts/opencar/core/v1/transport.toml");
+    let transport: toml::Value = toml::from_str(&toml_str).expect("Failed to parse transport.toml");
+    let key = |key: &str| {
+        transport["ble"]
+            .get("phone_validation")
+            .and_then(|p| p.get(key))
+            .and_then(|v| v.as_integer())
+            .unwrap_or_else(|| {
+                panic!("transport.toml is missing integer ble.phone_validation.{key}; update the contracts submodule")
+            })
+    };
+    let session_seconds = key("session_seconds");
+    let code_length = key("code_length");
+    let max_code_attempts = key("max_code_attempts");
+    let cooldown_seconds = key("cooldown_seconds");
+    let result_keep_seconds = key("result_keep_seconds");
+    assert!(
+        session_seconds > 0 && cooldown_seconds >= 0 && result_keep_seconds >= 0,
+        "transport.toml ble.phone_validation durations must not be negative, and session_seconds > 0"
+    );
+    // The code is drawn from a u32, so at most 9 digits.
+    assert!(
+        (4..=9).contains(&code_length),
+        "transport.toml ble.phone_validation.code_length must be 4 to 9 digits"
+    );
+    assert!(
+        max_code_attempts > 0,
+        "transport.toml ble.phone_validation.max_code_attempts must be > 0"
+    );
+
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+    std::fs::write(
+        std::path::Path::new(&out_dir).join("phone_validation.rs"),
+        format!(
+            "// @generated — do not edit. Source: contracts/opencar/core/v1/transport.toml\n\
+             /// Digits in a validation code.\n\
+             pub const CODE_LENGTH: usize = {code_length};\n\
+             /// Wrong codes a session accepts before it fails.\n\
+             pub const MAX_CODE_ATTEMPTS: u32 = {max_code_attempts};\n\
+             /// How long a session runs before it times out.\n\
+             pub const VALIDATION_SESSION_MS: u64 = {session_seconds} * 1_000;\n\
+             /// How long no session can start after one used all its attempts.\n\
+             pub const VALIDATION_COOLDOWN_MS: u64 = {cooldown_seconds} * 1_000;\n\
+             /// How long an ended session is still reported to its phone, so the app sees how\n\
+             /// it ended.\n\
+             pub const VALIDATION_RESULT_KEEP_MS: u64 = {result_keep_seconds} * 1_000;\n"
+        ),
+    )?;
     Ok(())
 }
 

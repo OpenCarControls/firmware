@@ -5,9 +5,9 @@
 //! back to the `trouble-host` stack so paired phones can re-encrypt without
 //! triggering a full re-pairing procedure.
 //!
-//! The same flash also holds the owner's CAN read-write approval (see docs/can.md),
-//! in a separate range, since the BLE task owns the flash and the approval arrives
-//! over BLE.
+//! The same flash also holds the owner's CAN read-write approval (see docs/can.md)
+//! and the phones validated in the car (see docs/ble.md, "Phone trust"), in a separate
+//! range, since the BLE task owns the flash and both arrive over BLE.
 //!
 //! It also holds the count of short boots for the bond reset by power-cycling
 //! (`power_cycle.rs`), which has to be written before the bonds are loaded.
@@ -131,8 +131,11 @@ mod hardware {
 
     use super::{StoredApproval, StoredBond};
 
-    /// The approval is the only item in its range.
+    /// The approval and the validations are the only items in their range.
     const APPROVAL_KEY: u8 = 0;
+    const VALIDATIONS_KEY: u8 = 1;
+    /// Large enough for the validations of 8 phones (`encode_phone_validations`).
+    const ACCESS_BUFFER_BYTES: usize = 256;
     /// So is the short-boot count in its own.
     const SHORT_BOOTS_KEY: u8 = 0;
 
@@ -230,7 +233,7 @@ mod hardware {
         /// Load the CAN read-write approval. `None` if there is none, or on any flash
         /// error (erased, corrupt or an unknown format), which leaves the bus read-only.
         pub(in crate::ble) async fn load_can_rw_approval(&mut self) -> Option<[u8; 32]> {
-            let mut data_buffer = [0u8; 64];
+            let mut data_buffer = [0u8; ACCESS_BUFFER_BYTES];
             match fetch_item::<u8, StoredApproval, _>(
                 self.storage,
                 self.approval_range.clone(),
@@ -250,7 +253,7 @@ mod hardware {
 
         /// Persist the CAN read-write approval (`Some`) or erase it (`None`). If the range
         /// can't be written (corrupt, or left over from something else), it is erased
-        /// and the write tried once more: the range holds nothing but the approval.
+        /// and written again (see [`Self::rewrite_access_range`]).
         pub(in crate::ble) async fn store_can_rw_approval(
             &mut self,
             approval: Option<[u8; 32]>,
@@ -259,21 +262,102 @@ mod hardware {
                 return Ok(());
             }
             log::warn!("CAN approval store: write failed, erasing its range and retrying");
+            self.rewrite_access_range(approval, &core_interface::encode_phone_validations())
+                .await
+        }
+
+        /// Persist the validated phones (`core_interface::encode_phone_validations`, empty
+        /// to erase them). Like the approval, a failed write erases the range and writes
+        /// both again.
+        pub(in crate::ble) async fn store_phone_validations(
+            &mut self,
+            validations: &[u8],
+        ) -> Result<(), ()> {
+            if self.write_phone_validations(validations).await.is_ok() {
+                return Ok(());
+            }
+            log::warn!("Phone validations store: write failed, erasing its range and retrying");
+            let approval = self.load_can_rw_approval().await;
+            self.rewrite_access_range(approval, validations).await
+        }
+
+        /// Erases the range of the approval and the validations, then writes both: the
+        /// range holds nothing else.
+        async fn rewrite_access_range(
+            &mut self,
+            approval: Option<[u8; 32]>,
+            validations: &[u8],
+        ) -> Result<(), ()> {
             if let Err(e) =
                 sequential_storage::erase_all(self.storage, self.approval_range.clone()).await
             {
                 log::error!("CAN approval store: erase failed: {:?}", e);
                 return Err(());
             }
-            match approval {
-                Some(_) => self.write_can_rw_approval(approval).await,
-                // Erasing the range already removed it.
-                None => Ok(()),
+            // Erasing the range already removed what is `None` or empty.
+            if approval.is_some() {
+                self.write_can_rw_approval(approval).await?;
+            }
+            if !validations.is_empty() {
+                self.write_phone_validations(validations).await?;
+            }
+            Ok(())
+        }
+
+        /// Load the validated phones, as `core_interface::restore_phone_validations`
+        /// takes them. Empty if there are none, or on any flash error: the phones then
+        /// validate again.
+        pub(in crate::ble) async fn load_phone_validations(
+            &mut self,
+        ) -> heapless::Vec<u8, ACCESS_BUFFER_BYTES> {
+            let mut data_buffer = [0u8; ACCESS_BUFFER_BYTES];
+            match fetch_item::<u8, &[u8], _>(
+                self.storage,
+                self.approval_range.clone(),
+                &mut NoCache::new(),
+                &mut data_buffer,
+                &VALIDATIONS_KEY,
+            )
+            .await
+            {
+                Ok(Some(bytes)) => heapless::Vec::from_slice(bytes).unwrap_or_default(),
+                Ok(None) => heapless::Vec::new(),
+                Err(e) => {
+                    log::warn!("Phone validations store: load failed ({:?}), none", e);
+                    heapless::Vec::new()
+                }
             }
         }
 
+        async fn write_phone_validations(&mut self, validations: &[u8]) -> Result<(), ()> {
+            let mut data_buffer = [0u8; ACCESS_BUFFER_BYTES];
+            let result = if validations.is_empty() {
+                remove_item::<u8, _>(
+                    self.storage,
+                    self.approval_range.clone(),
+                    &mut NoCache::new(),
+                    &mut data_buffer,
+                    &VALIDATIONS_KEY,
+                )
+                .await
+            } else {
+                store_item(
+                    self.storage,
+                    self.approval_range.clone(),
+                    &mut NoCache::new(),
+                    &mut data_buffer,
+                    &VALIDATIONS_KEY,
+                    &validations,
+                )
+                .await
+            };
+            result.map_err(|e| {
+                log::error!("Phone validations store: write failed: {:?}", e);
+            })
+        }
+
         async fn write_can_rw_approval(&mut self, approval: Option<[u8; 32]>) -> Result<(), ()> {
-            let mut data_buffer = [0u8; 64];
+            let mut data_buffer = [0u8; ACCESS_BUFFER_BYTES];
             let result = match approval {
                 Some(digest) => {
                     store_item(

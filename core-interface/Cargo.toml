@@ -18,11 +18,18 @@ portable-atomic = { workspace = true }
 # Hashes the car fingerprint for the read-write approval (no VIN stored in flash).
 sha2 = { version = "0.10", default-features = false }
 
+[features]
+# `CommandAuthorization::for_tests`, for vehicle crate tests. Only enable it in
+# dev-dependencies: it lets code build a command authorization without the dispatcher.
+test-utils = []
+
 [build-dependencies]
 prost-build = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
+# The integration tests use the `test-utils` helpers.
+core-interface = { path = ".", features = ["test-utils"] }
 critical-section = { workspace = true }
 embassy-time = { workspace = true, features = ["std"] }
 # Supplies `__pender` for host tests that exercise timeouts.

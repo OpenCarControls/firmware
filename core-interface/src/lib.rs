@@ -10,17 +10,20 @@ mod can;
 mod can_access;
 mod can_log;
 mod can_probe;
+mod can_tx;
 mod channels;
 mod dedupe;
 mod dispatch;
 mod isotp;
 mod lifecycle;
 mod pairing;
+mod phone_trust;
 mod requirements;
 mod routing;
 #[cfg(debug_assertions)]
 mod simulation;
 mod types;
+mod validation;
 
 pub mod ble;
 
@@ -55,6 +58,9 @@ pub use channels::{
     MQTT_STATE_TX, MQTT_TX_CHANNEL, SYSTEM_COMMAND_CHANNEL, VEHICLE_STATE_CHANNEL, can_tx_channel,
     send_can_frame,
 };
+
+// CAN TX classes (platform frames, command frames)
+pub use can_tx::{CanTxFrame, CommandAuthorization};
 
 // CAN filter & read-only
 pub use can::{
@@ -93,9 +99,9 @@ pub use can_log::{
 
 // Command availability
 pub use availability::{
-    COMMAND_AVAILABILITY_REPEAT_MS, CommandKind, REPORT_MAX_AGE_MS, command_availability,
-    command_availability_at, command_availability_state_update, mqtt_command_availability_at,
-    publish_command_availability, publish_command_availability_mqtt,
+    COMMAND_AVAILABILITY_REPEAT_MS, CommandKind, REPORT_MAX_AGE_MS, ble_command_availability_at,
+    command_availability, command_availability_at, command_availability_state_update,
+    mqtt_command_availability_at, publish_command_availability, publish_command_availability_mqtt,
     publish_command_availability_task, report_command_availability, report_command_availability_at,
     resend_command_availability, reset_command_availability_for_tests,
 };
@@ -110,6 +116,25 @@ pub use requirements::{
 pub use pairing::{
     add_paired_phone, ble_max_bonded_phones, clear_paired_phones, is_phone_paired,
     list_paired_phones, paired_phone_count, remove_paired_phone, set_ble_max_bonded_phones,
+};
+
+// Phone trust (validated phones, the connected BLE phone)
+#[cfg(any(test, feature = "test-utils"))]
+pub use phone_trust::validate_phone_for_tests;
+pub use phone_trust::{
+    car_has_validated_phone, encode_phone_validations, forget_phone_validation, is_phone_validated,
+    phone_access_state, phone_trust_level, phone_validations_to_store, prune_phone_validations,
+    reset_phone_trust_for_tests, restore_phone_validations, set_ble_peer,
+    try_take_phone_validations_to_store,
+};
+
+// Phone validation sessions
+pub use validation::{
+    CODE_LENGTH, MAX_CODE_ATTEMPTS, VALIDATION_COOLDOWN_MS, VALIDATION_RESULT_KEEP_MS,
+    VALIDATION_SESSION_MS, ValidationChallenge, ValidationError, ValidationKind, ValidationMethod,
+    complete_validation_action, complete_validation_action_at, current_validation_challenge,
+    declare_validation_methods, reset_phone_validation_for_tests, set_random_source,
+    tick_validation, validation_challenge_receiver,
 };
 
 // Pairing lifecycle state

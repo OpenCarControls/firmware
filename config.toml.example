@@ -40,6 +40,8 @@ controller_lease_ttl_s = 15
 # [hardware.pc]
 # Where the owner's CAN read-write approval is kept (the ESP keeps it in flash).
 # can_rw_approval_file = "/tmp/opencar-can-rw-approval.txt"
+# Where the phones validated in the car are kept (the ESP keeps them in flash).
+# phone_validations_file = "/tmp/opencar-phone-validations.txt"
 
 [hardware.pc.ble]
 device_name = "OpenCar"

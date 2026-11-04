@@ -1,5 +1,5 @@
 use core_interface::{
-    CanFrame, CanLogSession, IdentityProbe, MAX_PROBE_ATTEMPTS, ProbeRefused, allow_can_tx,
+    CanFrame, CanLogSession, CanTxFrame, IdentityProbe, MAX_PROBE_ATTEMPTS, ProbeRefused,
     confirm_car_fingerprint, confirm_car_identity, extended_id, is_can_bus_listen_only,
     is_can_bus_read_only, is_can_read_only, iso_tp_flow_control, log_can_frame,
     open_identity_probe, reset_can_access_for_tests, reset_identity_probe_for_tests,
@@ -21,6 +21,11 @@ static PROBE: IdentityProbe = IdentityProbe {
         (standard_id(0x780), iso_tp_flow_control(0x00)),
     ],
 };
+
+/// The probe's frames are platform frames.
+fn allow_can_tx(bus_id: u8, frame: &CanFrame) -> bool {
+    core_interface::allow_can_tx(bus_id, &CanTxFrame::platform(*frame))
+}
 
 fn frame(bus_id: u8, id: Id, data: [u8; 8]) -> CanFrame {
     CanFrame {

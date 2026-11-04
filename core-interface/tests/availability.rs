@@ -22,6 +22,8 @@ fn boot() {
     revoke_car_identity();
     reset_can_access_for_tests();
     reset_command_availability_for_tests();
+    embassy_futures::block_on(core_interface::clear_paired_phones());
+    core_interface::reset_phone_trust_for_tests();
     set_can_read_only(true);
     reset_mqtt_throttle_for_tests();
     core_interface::set_link_up(core_interface::Transport::Ble, true);
@@ -29,6 +31,9 @@ fn boot() {
     drain_tx();
 }
 
+const PHONE: &[u8] = b"ble:\x01\x02\x03\x04\x05\x06";
+
+/// Read-write, with a validated phone connected over BLE.
 fn read_write() {
     boot();
     confirm_car_identity();
@@ -36,6 +41,9 @@ fn read_write() {
     approve_can_read_write().unwrap();
     set_can_dev_write_unlocked(true).unwrap();
     assert!(!set_can_read_only(false));
+    embassy_futures::block_on(core_interface::add_paired_phone(PHONE));
+    assert!(core_interface::validate_phone_for_tests(PHONE));
+    core_interface::set_ble_peer(Some(PHONE));
 }
 
 fn sent_availability() -> Option<proto::CommandAvailability> {

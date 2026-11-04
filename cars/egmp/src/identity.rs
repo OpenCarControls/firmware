@@ -12,8 +12,8 @@
 use alloc::vec::Vec;
 
 use core_interface::{
-    CanFrame, IdentityProbe, PROBE_SETTLE_MS, ProbeRefused, ProbeWindow, UdsRequest, UdsStep,
-    iso_tp_flow_control, standard_id, uds_single_frame,
+    CanFrame, CanTxFrame, IdentityProbe, PROBE_SETTLE_MS, ProbeRefused, ProbeWindow, UdsRequest,
+    UdsStep, iso_tp_flow_control, standard_id, uds_single_frame,
 };
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Instant};
@@ -215,9 +215,9 @@ pub(crate) fn track_identity(id: u32, data: &[u8]) {
                 dlc: 8,
             };
             // Never block the RX path: a full channel loses the frame, and the attempt
-            // then times out and is retried.
-            let _ =
-                core_interface::can_tx_channel(frame.bus_id).map(|channel| channel.try_send(frame));
+            // then times out and is retried. A platform frame: it only reads the serial.
+            let _ = core_interface::can_tx_channel(frame.bus_id)
+                .map(|channel| channel.try_send(CanTxFrame::platform(frame)));
         }
         Action::Identified(fingerprint) => {
             if core_interface::confirm_car_fingerprint(&fingerprint) {
@@ -309,7 +309,7 @@ mod tests {
         let mut identifier = CarIdentifier::new();
         send_request(&mut identifier, t);
         assert!(
-            core_interface::allow_can_tx(0, &on_780(REQUEST)),
+            core_interface::allow_can_tx(0, &CanTxFrame::platform(on_780(REQUEST))),
             "the board sends it"
         );
 
@@ -318,7 +318,10 @@ mod tests {
             identifier.on_frame(RESPONSE_ID, &SERIAL_FRAMES[0], t),
             Action::Send(FLOW_CONTROL)
         );
-        assert!(core_interface::allow_can_tx(0, &on_780(FLOW_CONTROL)));
+        assert!(core_interface::allow_can_tx(
+            0,
+            &CanTxFrame::platform(on_780(FLOW_CONTROL))
+        ));
         for frame in &SERIAL_FRAMES[1..5] {
             assert_eq!(identifier.on_frame(RESPONSE_ID, frame, t), Action::None);
         }
@@ -327,7 +330,7 @@ mod tests {
             Action::Identified(b"hu-serial:240404A04 JXIO400023".to_vec())
         );
         assert!(
-            !core_interface::allow_can_tx(0, &on_780(REQUEST)),
+            !core_interface::allow_can_tx(0, &CanTxFrame::platform(on_780(REQUEST))),
             "the window is closed"
         );
         boot();
@@ -458,9 +461,9 @@ mod tests {
         track_identity(CAR_ID, &[0; 8]);
         while start.elapsed() < Duration::from_millis(PROBE_SETTLE_MS + 5) {}
         track_identity(CAR_ID, &[0; 8]);
-        assert_eq!(channel.try_receive().unwrap().data, REQUEST);
+        assert_eq!(channel.try_receive().unwrap().frame().data, REQUEST);
         track_identity(RESPONSE_ID, &SERIAL_FRAMES[0]);
-        assert_eq!(channel.try_receive().unwrap().data, FLOW_CONTROL);
+        assert_eq!(channel.try_receive().unwrap().frame().data, FLOW_CONTROL);
         for frame in &SERIAL_FRAMES[1..] {
             track_identity(RESPONSE_ID, frame);
         }

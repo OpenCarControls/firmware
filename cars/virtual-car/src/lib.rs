@@ -8,9 +8,10 @@ use embedded_can::{Id, StandardId};
 use prost::Message;
 
 use core_interface::{
-    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, CAN_RX_CHANNEL, CanFilter, CanFrame, CommandError,
-    CommandKind, CommandRequirements, RepeatGuard, Requirement, Snapshot, VEHICLE_STATE_CHANNEL,
-    VehicleStatePayload, respond_to_command,
+    ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, CAN_RX_CHANNEL, CanFilter, CanFrame, CanTxFrame,
+    CommandAuthorization, CommandError, CommandKind, CommandRequirements, RepeatGuard, Requirement,
+    Snapshot, VEHICLE_STATE_CHANNEL, ValidationKind, ValidationMethod, VehicleStatePayload,
+    respond_to_command,
 };
 
 pub mod proto {
@@ -123,6 +124,7 @@ pub fn encode_state(state: &VirtualCarState) -> VehicleStatePayload {
 ///   0x100  speed frame: bytes [0..1] = speed as big-endian i16 (kph)
 ///   0x200  gear  frame: byte  [0]   = gear enum value (0–4)
 ///   0x300  doors frame: byte  [0]   = 0x01 if locked, 0x00 if unlocked
+///   0x400  button frame: byte [0]   = 0x01 while the simulated validation button is pressed
 ///
 /// Mask 0x7FF = exact standard-ID match (all 11 bits must match).
 pub const CAN_FILTERS: &[CanFilter] = &[
@@ -141,7 +143,90 @@ pub const CAN_FILTERS: &[CanFilter] = &[
         id: Id::Standard(unsafe { StandardId::new_unchecked(0x300) }),
         mask: 0x7FF,
     },
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(unsafe { StandardId::new_unchecked(BUTTON_FRAME_ID) }),
+        mask: 0x7FF,
+    },
 ];
+
+// ── Phone validation ──────────────────────────────────────────────────────────
+
+/// The simulated validation button (an in-car action), pressed with a 0x400 frame on vcan.
+pub const BUTTON_FRAME_ID: u16 = 0x400;
+/// The simulated cluster: while a code entry session runs, the code is sent on 0x500 every
+/// second (6 ASCII digits, then two zeros), as a real car would show it on the cluster.
+pub const CLUSTER_CODE_FRAME_ID: u16 = 0x500;
+/// The door lock command's frame: byte [0] = 0x01 to lock, 0x00 to unlock.
+pub const DOOR_LOCK_FRAME_ID: u16 = 0x310;
+
+pub const CLUSTER_CODE_METHOD_ID: &str = "virtual_car.cluster_code";
+pub const BUTTON_METHOD_ID: &str = "virtual_car.button";
+
+/// The simulated validation methods: the code shown on the cluster needs the approval (it
+/// sends a frame to the car), pressing the button doesn't.
+pub static VALIDATION_METHODS: [ValidationMethod; 2] = [
+    ValidationMethod {
+        id: CLUSTER_CODE_METHOD_ID,
+        kind: ValidationKind::CodeEntry,
+        needs_approval: true,
+    },
+    ValidationMethod {
+        id: BUTTON_METHOD_ID,
+        kind: ValidationKind::InCarAction,
+        needs_approval: false,
+    },
+];
+
+fn std_id(raw: u16) -> Id {
+    Id::Standard(StandardId::new(raw).unwrap())
+}
+
+/// Completes a running button session when the simulated button is pressed.
+fn on_button(pressed: bool) {
+    if !pressed {
+        return;
+    }
+    if let Some(challenge) = core_interface::current_validation_challenge()
+        && challenge.method_id == BUTTON_METHOD_ID
+    {
+        core_interface::complete_validation_action(challenge.session);
+    }
+}
+
+/// The cluster frame showing the running session's code, if it is a code entry session.
+pub fn cluster_code_frame() -> Option<CanFrame> {
+    let code = core_interface::current_validation_challenge()?.code?;
+    let mut data = [0u8; 8];
+    data[..code.len()].copy_from_slice(&code);
+    Some(CanFrame {
+        bus_id: 0,
+        id: std_id(CLUSTER_CODE_FRAME_ID),
+        data,
+        dlc: 8,
+    })
+}
+
+/// Shows the running session's code on the simulated cluster. A platform frame: it doesn't
+/// act on the car. `try_send`: a full queue (no bus) loses one refresh.
+fn show_cluster_code() {
+    static LOGGED_SESSION: portable_atomic::AtomicU32 = portable_atomic::AtomicU32::new(0);
+    if let Some(challenge) = core_interface::current_validation_challenge()
+        && let Some(code) = challenge.code
+        && LOGGED_SESSION.swap(challenge.session, portable_atomic::Ordering::Relaxed)
+            != challenge.session
+    {
+        // The simulator's cluster, for a PC without vcan.
+        log::info!(
+            "virtual car: the cluster shows the validation code {}",
+            core::str::from_utf8(&code).unwrap_or("?")
+        );
+    }
+    if let Some(frame) = cluster_code_frame() {
+        let _ = core_interface::can_tx_channel(frame.bus_id)
+            .map(|channel| channel.try_send(CanTxFrame::platform(frame)));
+    }
+}
 
 // ── Vehicle Tasks ─────────────────────────────────────────────────────────────
 
@@ -173,6 +258,10 @@ pub async fn handle_can_frame(frame: CanFrame) {
             let mut state = CAR_STATE.lock().await;
             state.are_doors_locked = Some(frame.data[0] != 0);
             true
+        }
+        id if id == BUTTON_FRAME_ID as u32 && frame.dlc >= 1 => {
+            on_button(frame.data[0] != 0);
+            false
         }
         _ => false,
     };
@@ -207,12 +296,13 @@ async fn send_can_request(id: StandardId, data: &[u8]) {
     let mut buf = [0u8; 8];
     let dlc = data.len().min(8) as u8;
     buf[..dlc as usize].copy_from_slice(&data[..dlc as usize]);
-    core_interface::send_can_frame(CanFrame {
+    // A request for state, which doesn't act on the car.
+    core_interface::send_can_frame(CanTxFrame::platform(CanFrame {
         bus_id: 0,
         id: Id::Standard(id),
         data: buf,
         dlc,
-    })
+    }))
     .await;
 }
 
@@ -222,16 +312,25 @@ async fn send_can_request(id: StandardId, data: &[u8]) {
 pub async fn handle_basic_commands_task() {
     loop {
         let inbound = BASIC_CMD_CHANNEL.receiver().receive().await;
-        let result = process_basic_command(inbound.bytes.as_slice()).await;
+        let result =
+            process_basic_command(inbound.bytes.as_slice(), inbound.authorization.as_ref()).await;
         respond_to_command(inbound.transport, inbound.message_id, result).await;
     }
 }
 
-pub async fn process_basic_command(bytes: &[u8]) -> Result<(), CommandError> {
+/// `authorization` is the one the command came with: `None` (MQTT) can't send the command's
+/// frame, so the command fails.
+pub async fn process_basic_command(
+    bytes: &[u8],
+    authorization: Option<&CommandAuthorization>,
+) -> Result<(), CommandError> {
     let cmd = proto::BasicCommand::decode(bytes)
         .map_err(|_| CommandError::Failed("Failed to decode BasicCommand"))?;
     match cmd.action {
         Some(proto::basic_command::Action::DoorLock(door_lock)) => {
+            let authorization = authorization.ok_or(CommandError::Failed(
+                "command rejected: no validated phone sent it",
+            ))?;
             let payload = {
                 let mut state = CAR_STATE.lock().await;
                 door_lock_requirements(&state)
@@ -245,6 +344,16 @@ pub async fn process_basic_command(bytes: &[u8]) -> Result<(), CommandError> {
                 encode_state(&state)
                 // MutexGuard is dropped here, before the channel send below
             };
+            // The simulated door lock frame, a command frame: it acts on the car. `try_send`:
+            // with no bus attached nothing drains the queue.
+            let frame = CanFrame {
+                bus_id: 0,
+                id: std_id(DOOR_LOCK_FRAME_ID),
+                data: [door_lock.lock as u8, 0, 0, 0, 0, 0, 0, 0],
+                dlc: 8,
+            };
+            let _ = core_interface::can_tx_channel(0)
+                .map(|channel| channel.try_send(CanTxFrame::command(authorization, frame)));
             VEHICLE_STATE_CHANNEL.sender().send(payload).await;
             Ok(())
         }
@@ -344,15 +453,18 @@ const STATE_UPDATE_SECONDS: u64 = 5;
 /// state to `VEHICLE_STATE_CHANNEL`. Fires every 5 seconds (20 ticks ≈ 100 s
 /// per full drive cycle). Primary state mutations are still driven by
 /// `can_rx_task` and command handlers; this task keeps the app updated even
-/// when no CAN frames are present. Identifies the simulated car first.
+/// when no CAN frames are present. Declares the validation methods and identifies the
+/// simulated car first, and shows a running session's code every second.
 #[embassy_executor::task]
 pub async fn state_update_task() {
+    core_interface::declare_validation_methods(&VALIDATION_METHODS);
     identify_simulated_car();
     let mut tick: u64 = 0;
     let mut seconds: u64 = 0;
     loop {
         Timer::after(Duration::from_secs(1)).await;
         report_availability().await;
+        show_cluster_code();
         seconds += 1;
         if !seconds.is_multiple_of(STATE_UPDATE_SECONDS) {
             continue;

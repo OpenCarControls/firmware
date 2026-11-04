@@ -34,6 +34,7 @@ fn boot() {
     revoke_car_identity();
     reset_can_access_for_tests();
     embassy_futures::block_on(clear_paired_phones());
+    core_interface::reset_phone_trust_for_tests();
     set_can_read_only(true);
     core_interface::set_link_up(core_interface::Transport::Ble, true);
     core_interface::set_link_up(core_interface::Transport::Mqtt, true);
@@ -531,7 +532,8 @@ fn vehicle_commands_are_refused_with_the_reason_while_read_only() {
     assert!(!set_can_read_only(false));
     assert_eq!(can_read_only_reason(), None);
 
-    // Read-write: commands reach the vehicle again.
+    // Read-write, from a validated phone: commands reach the vehicle again.
+    assert!(core_interface::validate_phone_for_tests(PHONE));
     for advanced in [false, true] {
         let cmd = vehicle_cmd(advanced);
         let id = cmd.message_id;
