@@ -1,0 +1,46 @@
+# Dependabot version updates. Updates are grouped so a month's worth of bumps
+# lands as a handful of PRs instead of one per crate. Security updates are not
+# affected by the schedule; they are opened as soon as an advisory appears.
+#
+# Note: a merged bump that touches a crate manifest under boards/, cars/ or
+# core-interface/ cuts a new patch release for every platform (see
+# docs/releases.md). Lockfile-only bumps do not.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      # esp-hal, esp-radio, esp-rtos, ... are released together and must move together.
+      esp:
+        patterns: ["esp-*"]
+      embassy:
+        patterns: ["embassy-*"]
+      prost:
+        patterns: ["prost", "prost-*"]
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # The shared contracts submodule.
+  - package-ecosystem: gitsubmodule
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+      include: scope
