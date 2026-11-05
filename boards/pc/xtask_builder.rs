@@ -106,7 +106,15 @@ impl Builder {
 }
 
 impl TargetBuilder for Builder {
-    fn validate(&self, _config: &Config) {
+    fn validate(&self, config: &Config) {
+        if config.network.lte.enabled {
+            eprintln!(
+                "\u{274c} [network.lte] is for boards with a modem the firmware drives. On the PC \
+                 board the OS brings LTE up (e.g. ModemManager) and the firmware uses it like any \
+                 network: set [network.lte].enabled = false."
+            );
+            std::process::exit(1);
+        }
         if cfg!(windows) {
             println!("Warning: Running PC simulator on Windows. Native SocketCAN will not be available.");
         }

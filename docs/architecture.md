@@ -2,7 +2,7 @@
 
 Open Car Firmware is an embedded Rust monorepo for the hardware controller (ESP32 / Raspberry Pi). It handles CAN bus reading/writing, BLE/WiFi/LTE connections, and OTA updates.
 
-Related docs: [BLE](ble.md) · [CAN bus](can.md) · [Vehicle commands](commands.md) · [Testing](testing.md) · [Releases & OTA](releases.md) · [Hardware setup](hardware-setup.md)
+Related docs: [BLE](ble.md) · [CAN bus](can.md) · [LTE](lte.md) · [Vehicle commands](commands.md) · [Testing](testing.md) · [Releases & OTA](releases.md) · [Hardware setup](hardware-setup.md)
 
 ## Cargo workspace & xtask
 
@@ -128,7 +128,7 @@ Embassy is used freely inside `core-interface`. Boards adapt to it — not the o
 
 **Per-subsystem approach:**
 *   **CAN:** Vehicle crates define their filter list (`&'static [CanFilter]`). Board crates own all hardware; `CAN_RX_CHANNEL` and the per-bus `CAN_TX_CHANNELS` are the shared contract. Each board provides driver functions (`init_*` / `run_*_loop`) and async loop tasks that software-filter received frames against the vehicle's filter list. See [CAN bus](can.md).
-*   **MQTT / networking:** `core-interface` logic uses `embassy-net::TcpSocket`. Each board provides an `embassy-net::driver::Driver` implementation (`esp-radio` WiFi on ESP, tuntap shim on PC).
+*   **MQTT / networking:** `core-interface` logic uses `embassy-net::TcpSocket`. Each board provides an `embassy-net::driver::Driver` implementation (on ESP, `esp-radio` WiFi or PPP over an LTE modem with `embassy-net-ppp`, see [LTE](lte.md); tuntap shim on PC). The ESP MQTT driver takes whichever stack the build has and resolves the broker's hostname with the stack's DNS.
 *   **BLE:** No single cross-platform embassy BLE abstraction exists. `core-interface` defines its own traits (e.g. `trait BleGatt`). ESP implements them with `esp-radio` + `trouble-host`; PC implements them as mocks. See [BLE](ble.md).
 
 ## Board-specific requirements
@@ -143,7 +143,7 @@ Embassy is used freely inside `core-interface`. Boards adapt to it — not the o
 *   `board-esp` enables esp-radio's `coex` feature: every ESP has a single 2.4 GHz RF front end, and without `coex` WiFi and BLE are not time-sliced and interfere with each other.
 *   BLE: `ble::controller::BleConnector::new(peripherals.BT, ble::Config::default())` (2 args, no `init_radio()` call).
 *   WiFi: `esp_radio::wifi::new(peripherals.WIFI, WifiControllerConfig::default())` returns `(controller, interfaces)`; use `interfaces.station` (not `.sta`); configure with `WifiModeConfig::Station(StationConfig::default().with_ssid(...).with_password(...))`.
-*   **WiFi can be disabled** via `[network.wifi] enabled = false` in `config.toml`; when disabled, xtask omits the WiFi/MQTT constants and `mqtt_driver_task` spawn from the generated `main.rs`, but `ble_transport_task` is always spawned.
+*   **One uplink per build:** WiFi (`[network.wifi]`) or LTE (`[network.lte]`, needs a `[hardware.esp.modem]`; see [LTE](lte.md)). xtask generates the matching init as `net_stack` and spawns `mqtt_driver_task` on it. With both disabled, xtask omits the network constants and the `mqtt_driver_task` spawn from the generated `main.rs`; `ble_transport_task` is always spawned.
 *   With `embassy-net 0.9`, the stack handle is `Stack<'static>` and TCP sockets are created with `TcpSocket::new(*stack, ...)`.
 *   In the final binary crate, `esp-rtos` must enable `features = ["embassy", "esp-radio", "esp-alloc"]`; omitting `esp-radio` leads to unresolved `esp_rtos_*` linker errors.
 *   **Heap/stack tuning warning:** `esp_alloc::heap_allocator!(size = ...)` and the linker-defined CPU0 stack share the same SRAM budget. If heap is too small, esp-radio/RTOS task creation can panic with `Failed to allocate stack`; if heap is too large, CPU0 can hit stack-guard panics. Keep large BLE/network buffers (for example `HostResources`) in `StaticCell` instead of task locals, and for ESP32-S3 with the current task mix prefer around `160 * 1024` heap unless profiling indicates otherwise.
