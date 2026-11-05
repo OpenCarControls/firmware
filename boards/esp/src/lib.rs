@@ -1,7 +1,7 @@
 //! Board support crate for the ESP32 family.
 //!
 //! Wires the `core-interface` task set to ESP32-specific hardware drivers: BLE
-//! (trouble-host), WiFi/MQTT (esp-radio + embassy-net), and CAN buses (TWAI and/or
+//! (trouble-host), WiFi or LTE (esp-radio or a PPP modem, + embassy-net) with MQTT, and CAN buses (TWAI and/or
 //! MCP2515). The public API is kept minimal: [`start`] spawns the core protocol
 //! tasks, and hardware-init functions are re-exported for use by the generated
 //! `main.rs` entry point produced by `xtask`.
@@ -12,6 +12,9 @@ extern crate alloc;
 
 mod ble;
 mod can;
+// Only the `hardware` code drives the modem; host builds compile its pure parts for tests.
+#[cfg_attr(not(feature = "hardware"), allow(dead_code, unused_imports))]
+mod modem;
 mod network;
 pub mod status_leds;
 
@@ -20,7 +23,7 @@ pub use can::{MCP2515_HW_FILTERS, bus_filter_count};
 
 #[cfg(feature = "hardware")]
 mod hardware {
-    use super::{ble, can, network, status_leds};
+    use super::{ble, can, modem, network, status_leds};
 
     pub use ble::{PowerCycleReset, ble_lifecycle_task, ble_transport_task};
 
@@ -31,7 +34,9 @@ mod hardware {
         run_mcp2515_loop, run_twai_loop,
     };
 
-    pub use network::{WifiStack, can_logger_task, init_wifi, mqtt_driver_task};
+    pub use network::{NetStack, can_logger_task, init_wifi, mqtt_driver_task};
+
+    pub use modem::{ControlPin, LteSettings, ModemKind, ModemPins, init_lte, new_modem_uart};
 
     use core_interface::SYSTEM_COMMAND_CHANNEL;
 
