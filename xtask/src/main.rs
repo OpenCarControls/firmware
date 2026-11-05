@@ -71,6 +71,27 @@ pub struct NetworkConfig {
     pub wifi: WifiConfig,
     #[serde(default)]
     pub can_logger: CanLoggerConfig,
+    #[serde(default)]
+    pub lte: LteConfig,
+}
+
+/// LTE uplink settings: the SIM's, not the board's (the modem's wiring is in the
+/// board's `[hardware.<board>.modem]`). Off by default.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct LteConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// The carrier's access point name.
+    pub apn: Option<String>,
+    /// PAP credentials for PPP; most carriers don't need any.
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
+    /// Empty when the SIM has no PIN.
+    #[serde(default)]
+    pub sim_pin: String,
 }
 
 /// SavvyCAN network logger. Off by default: the port is open to the whole network and

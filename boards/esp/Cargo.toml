@@ -12,10 +12,10 @@ hardware = [
     "dep:embassy-executor",
     "dep:embassy-futures",
     "dep:embassy-net",
+    "dep:embassy-net-ppp",
     "dep:embassy-time",
     "dep:embedded-hal-bus",
     "dep:embedded-hal",
-    "dep:embedded-io-async",
     "dep:embedded-storage",
     "dep:esp-hal",
     "dep:esp-println",
@@ -72,13 +72,15 @@ esp32c6 = [
 core-interface = { workspace = true }
 embassy-executor = { workspace = true, optional = true }
 embassy-futures = { workspace = true, optional = true }
-embassy-net = { version = "0.9.0", features = ["tcp", "dhcpv4", "medium-ethernet"], optional = true }
+embassy-net = { version = "0.9.0", features = ["tcp", "dhcpv4", "dns", "medium-ethernet", "medium-ip"], optional = true }
+embassy-net-ppp = { version = "0.3.0", features = ["log"], optional = true }
 embassy-sync = { workspace = true }
 embassy-time = { workspace = true, optional = true }
 embedded-can = { workspace = true }
 embedded-hal = { workspace = true, optional = true }
 embedded-hal-bus = { version = "0.3.0", optional = true }
-embedded-io-async = { workspace = true, optional = true }
+embedded-io = { version = "0.7", default-features = false }
+embedded-io-async = { workspace = true }
 embedded-storage = { version = "0.3.1", optional = true }
 esp-hal = { version = "=1.1.0", default-features = false, features = ["unstable"], optional = true }
 esp-println = { version = "0.17.0", default-features = false, features = ["log-04"], optional = true }
@@ -106,3 +108,6 @@ esp-alloc = "0.10.0"
 esp-backtrace = "0.19.0"
 esp-bootloader-esp-idf = "0.5.0"
 embedded-test = "0.7"
+
+[dev-dependencies]
+embassy-futures = { workspace = true }
