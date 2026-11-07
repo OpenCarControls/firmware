@@ -242,6 +242,21 @@ pub const CAN_FILTERS: &[CanFilter] = &[
         id: Id::Standard(StandardId::new(1140).unwrap()),
         mask: 0x7FF,
     }, // unmapped
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(1230).unwrap()),
+        mask: 0x7FF,
+    }, // MEDIA_STATUS
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(0x6B0).unwrap()),
+        mask: 0x7F0,
+    }, // the cluster's flow control for the media text
+    CanFilter {
+        bus_id: 0,
+        id: Id::Standard(StandardId::new(0x6C0).unwrap()),
+        mask: 0x7F0,
+    }, // the cluster's flow control for the media text
 ];
 
 // ── Vehicle Tasks ─────────────────────────────────────────────────────────────
@@ -459,6 +474,7 @@ fn track_power(
         i = inputs.or(i);
         r = ready.or(r);
         cell.set((i, r));
+        crate::cluster_code::set_ready(r == Some(true));
         let (accessory, ignition) = i?;
         Some(power_state(accessory, ignition, r?))
     })
@@ -564,6 +580,7 @@ pub async fn handle_can_frame(frame: CanFrame) {
     };
     crate::platform::track_platform(id, &frame.data[..frame.dlc as usize]);
     crate::identity::track_identity(id, &frame.data[..frame.dlc as usize]);
+    crate::cluster_code::track_cluster_code(id, &frame.data[..frame.dlc as usize]);
 
     if let Ok(message) = m_can::Messages::from_can_message(id, &frame.data[..frame.dlc as usize]) {
         let mut state = CAR_STATE.lock().await;
