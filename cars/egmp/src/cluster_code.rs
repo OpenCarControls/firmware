@@ -35,6 +35,7 @@ pub static VALIDATION_METHODS: [ValidationMethod; 1] = [ValidationMethod {
     kind: ValidationKind::CodeEntry,
     needs_approval: true,
     is_available: || current_text_channel().is_some(),
+    can_continue: || READY.lock(Cell::get),
 }];
 
 const BUS_ID: u8 = 0;
@@ -245,8 +246,8 @@ impl ClusterCode {
 static DISPLAY: Mutex<CriticalSectionRawMutex, RefCell<ClusterCode>> =
     Mutex::new(RefCell::new(ClusterCode::new()));
 
-/// What the method's availability depends on, kept apart from `CAR_STATE` because
-/// [`ValidationMethod::is_available`] can't wait for a lock.
+/// What the method depends on, kept apart from `CAR_STATE` because `ValidationMethod`'s
+/// functions can't wait for a lock.
 static READY: Mutex<CriticalSectionRawMutex, Cell<bool>> = Mutex::new(Cell::new(false));
 static MEDIA_SOURCE: Mutex<CriticalSectionRawMutex, Cell<Option<u8>>> = Mutex::new(Cell::new(None));
 
@@ -749,8 +750,32 @@ mod tests {
         assert!(sent_frame().is_none(), "the session ended");
     }
 
+    fn tick() {
+        core_interface::tick_validation(Instant::now().as_millis());
+    }
+
     #[test]
-    fn the_display_pauses_outside_ready_or_while_read_only() {
+    fn the_display_pauses_while_no_source_can_show_it() {
+        setup();
+        set_ready(true);
+        track_cluster_code(MEDIA_STATUS_ID, &MEDIA_STATUS);
+        assert!(start().success);
+
+        let audio_off = [0x14, 0x01, 0, 0, 0, 0, 0, 0];
+        track_cluster_code(MEDIA_STATUS_ID, &audio_off);
+        assert!(sent_frame().is_none(), "audio off");
+        tick();
+        assert!(
+            core_interface::current_validation_challenge().is_some(),
+            "the session keeps running"
+        );
+
+        track_cluster_code(MEDIA_STATUS_ID, &MEDIA_STATUS);
+        assert!(sent_frame().is_some(), "resumes");
+    }
+
+    #[test]
+    fn leaving_ready_cancels_the_session() {
         setup();
         set_ready(true);
         track_cluster_code(MEDIA_STATUS_ID, &MEDIA_STATUS);
@@ -758,20 +783,31 @@ mod tests {
 
         set_ready(false);
         track_cluster_code(MEDIA_STATUS_ID, &MEDIA_STATUS);
-        assert!(sent_frame().is_none(), "out of Ready");
-        assert!(
-            core_interface::current_validation_challenge().is_some(),
-            "the session keeps running"
-        );
+        assert!(sent_frame().is_none(), "stops before the next tick");
+        tick();
+        assert!(core_interface::current_validation_challenge().is_none());
 
         set_ready(true);
+        track_cluster_code(MEDIA_STATUS_ID, &MEDIA_STATUS);
+        assert!(sent_frame().is_none(), "it doesn't come back");
+    }
+
+    #[test]
+    fn losing_read_write_stops_the_display_and_cancels_the_session() {
+        setup();
+        set_ready(true);
+        track_cluster_code(MEDIA_STATUS_ID, &MEDIA_STATUS);
+        assert!(start().success);
+
         core_interface::set_can_dev_write_unlocked(false).unwrap();
         track_cluster_code(MEDIA_STATUS_ID, &MEDIA_STATUS);
-        assert!(sent_frame().is_none(), "read-only");
+        assert!(sent_frame().is_none(), "stops before the next tick");
+        tick();
+        assert!(core_interface::current_validation_challenge().is_none());
 
         core_interface::set_can_dev_write_unlocked(true).unwrap();
         track_cluster_code(MEDIA_STATUS_ID, &MEDIA_STATUS);
-        assert!(sent_frame().is_some(), "resumes");
+        assert!(sent_frame().is_none(), "it doesn't come back");
     }
 
     #[test]

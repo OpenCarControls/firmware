@@ -171,12 +171,14 @@ pub static VALIDATION_METHODS: [ValidationMethod; 2] = [
         kind: ValidationKind::CodeEntry,
         needs_approval: true,
         is_available: || true,
+        can_continue: || true,
     },
     ValidationMethod {
         id: BUTTON_METHOD_ID,
         kind: ValidationKind::InCarAction,
         needs_approval: false,
         is_available: || true,
+        can_continue: || true,
     },
 ];
 

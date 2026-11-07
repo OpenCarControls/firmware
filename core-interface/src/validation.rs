@@ -6,11 +6,14 @@
 //! ([`validation_challenge_receiver`]: show the code, or watch for the in-car action) and
 //! reports a completed in-car action ([`complete_validation_action`]). It also says live
 //! whether each method can be used in the car's current state
-//! ([`ValidationMethod::is_available`]). The session always belongs to the phone that
+//! ([`ValidationMethod::is_available`]) and whether a running session can go on
+//! ([`ValidationMethod::can_continue`]). The session always belongs to the phone that
 //! started it, so the vehicle never chooses who is validated.
 //!
 //! One session runs at a time, for one phone, until it succeeds, fails, is cancelled or
-//! times out ([`VALIDATION_SESSION_MS`]). A code entry session uses a fresh
+//! times out ([`VALIDATION_SESSION_MS`]). It is cancelled when its method can't go on: the
+//! car changed, the method needs read-write mode and the device went read-only, or the
+//! vehicle says so. A code entry session uses a fresh
 //! [`CODE_LENGTH`]-digit code from the board's random source, accepts [`MAX_CODE_ATTEMPTS`]
 //! wrong codes, and then starts a cooldown ([`VALIDATION_COOLDOWN_MS`]) during which no
 //! session can start. The limits come from the contract (`[ble.phone_validation]` in
@@ -56,6 +59,11 @@ pub struct ValidationMethod {
     /// session starts. A running session isn't affected by it. It can't block, and can't
     /// call back into the validation functions.
     pub is_available: fn() -> bool,
+    /// Whether a running session can go on, decided by the vehicle: `false` cancels it.
+    /// For what a session doesn't survive, unlike something brief that only stops the
+    /// method for a moment (for example: the car was turned off, but not the audio). Asked
+    /// by [`tick_validation`], with the same limits as `is_available`.
+    pub can_continue: fn() -> bool,
 }
 
 /// The running challenge, for the vehicle: `code` holds the ASCII digits to show, for a
@@ -454,8 +462,10 @@ pub fn complete_validation_action_at(session: u32, now_ms: u64) -> bool {
     ok
 }
 
-/// Times out the running session, and cancels it if the identified car changed. Called
-/// every second by the access state publisher, and before every session change.
+/// Times out the running session, and cancels it if it can't go on: the identified car
+/// changed, its method needs read-write mode and the device is read-only, or the vehicle
+/// says so. Called every second by the access state publisher, and before every session
+/// change.
 pub fn tick_validation(now_ms: u64) {
     let car = crate::can_access::identified_car();
     let ended = STATE.lock(|s| {
@@ -466,7 +476,8 @@ pub fn tick_validation(now_ms: u64) {
         if session.status != Status::InProgress {
             return false;
         }
-        if car != Some(session.car) {
+        let lost_read_write = session.method.needs_approval && crate::can::is_can_read_only();
+        if car != Some(session.car) || lost_read_write || !(session.method.can_continue)() {
             end_session(&mut state, Status::Cancelled, now_ms)
         } else if now_ms >= session.deadline_ms {
             end_session(&mut state, Status::TimedOut, now_ms)
