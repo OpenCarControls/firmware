@@ -76,8 +76,8 @@ pub use can_probe::{
     open_identity_probe, reset_identity_probe_for_tests, standard_id,
 };
 pub use isotp::{
-    UDS_MAX_REQUEST, UDS_MAX_RESPONSE, UdsError, UdsRequest, UdsStep, iso_tp_flow_control,
-    uds_single_frame,
+    ISO_TP_MAX_PAYLOAD, IsoTpSender, UDS_MAX_REQUEST, UDS_MAX_RESPONSE, UdsError, UdsRequest,
+    UdsStep, iso_tp_flow_control, uds_single_frame,
 };
 
 // CAN read-write policy (car fingerprint, owner approval, dev lock)
