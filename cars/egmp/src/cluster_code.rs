@@ -105,11 +105,13 @@ fn text_channel(source: u8) -> Option<TextChannel> {
     }
 }
 
-/// The code as the cluster shows it, in UTF-16LE: the digits in two groups, then `dots`.
+/// The code as the cluster shows it, in UTF-16LE: the digits in two groups after a label
+/// that says what they are, then `dots`.
 fn code_text(code: &[u8; CODE_LENGTH], dots: usize) -> Vec<u8> {
     let (first, second) = code.split_at(CODE_LENGTH / 2);
-    first
+    b"Code: "
         .iter()
+        .chain(first)
         .chain(b" ")
         .chain(second)
         .chain(b" ")
@@ -370,11 +372,10 @@ mod tests {
             None,
             "the text waits for the trigger to settle"
         );
-        // The frames sent to the EV6 in the tests of 2026-11-05.
         let t = ms(last_trigger, 5);
         assert_eq!(
             display.on_frame(Some(&session), CAR_ID, &[0; 8], t),
-            Some((0x6D2, [0x10, 0x12, 0x34, 0x00, 0x38, 0x00, 0x32, 0x00]))
+            Some((0x6D2, [0x10, 0x1E, b'C', 0x00, b'o', 0x00, b'd', 0x00]))
         );
         assert_eq!(
             display.on_frame(Some(&session), CAR_ID, &[0; 8], ms(t, 1)),
@@ -383,19 +384,26 @@ mod tests {
         );
         assert_eq!(
             display.on_frame(Some(&session), 0x6B2, &FLOW_CONTROL, ms(t, 40)),
-            Some((0x6D2, [0x21, 0x20, 0x00, 0x39, 0x00, 0x31, 0x00, 0x33]))
+            Some((0x6D2, [0x21, b'e', 0x00, b':', 0x00, b' ', 0x00, b'4']))
         );
         assert_eq!(
             display.on_frame(Some(&session), CAR_ID, &[0; 8], ms(t, 44)),
             None,
             "the cluster's separation time"
         );
+        for (i, at) in [45, 50].into_iter().enumerate() {
+            let (id, frame) = display
+                .on_frame(Some(&session), CAR_ID, &[0; 8], ms(t, at))
+                .expect("a consecutive frame");
+            assert_eq!(id, 0x6D2);
+            assert_eq!(frame[0], 0x22 + i as u8);
+        }
         assert_eq!(
-            display.on_frame(Some(&session), CAR_ID, &[0; 8], ms(t, 45)),
-            Some((0x6D2, [0x22, 0x00, 0x20, 0x00, 0x2E, 0x00, 0xAA, 0xAA]))
+            display.on_frame(Some(&session), CAR_ID, &[0; 8], ms(t, 55)),
+            Some((0x6D2, [0x24, 0x00, b'.', 0x00, 0xAA, 0xAA, 0xAA, 0xAA]))
         );
         assert_eq!(
-            display.on_frame(Some(&session), CAR_ID, &[0; 8], ms(t, 50)),
+            display.on_frame(Some(&session), CAR_ID, &[0; 8], ms(t, 60)),
             None
         );
     }
@@ -489,9 +497,9 @@ mod tests {
             .filter(|(_, id, frame)| *id == 0x6D2 && frame[0] == 0x10)
             .map(|(at, _, frame)| (*at, frame[1]))
             .collect();
-        // 16 bytes of digits and spaces, then 2 per dot.
+        // 28 bytes of label, digits and spaces, then 2 per dot.
         let lengths: Vec<u8> = texts.iter().map(|(_, len)| *len).collect();
-        assert_eq!(lengths[..7], [18, 20, 22, 18, 20, 22, 18]);
+        assert_eq!(lengths[..7], [30, 32, 34, 30, 32, 34, 30]);
 
         for pair in texts.windows(2) {
             let gap = pair[1].0 - pair[0].0;
@@ -523,7 +531,7 @@ mod tests {
         let (_, frame) = display
             .on_frame(Some(&session), CAR_ID, &[0; 8], ms(first, TEXT_PERIOD_MS))
             .expect("the next text");
-        assert_eq!(frame[..2], [0x10, 20]);
+        assert_eq!(frame[..2], [0x10, 32]);
     }
 
     #[test]
@@ -596,11 +604,11 @@ mod tests {
     }
 
     #[test]
-    fn the_code_reads_in_two_groups_with_its_dots() {
+    fn the_code_reads_in_two_groups_after_its_label_with_its_dots() {
         let text = code_text(&CODE, 2);
         assert_eq!(
             text,
-            "482 913 .."
+            "Code: 482 913 .."
                 .encode_utf16()
                 .flat_map(u16::to_le_bytes)
                 .collect::<Vec<u8>>()
