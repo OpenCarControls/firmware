@@ -1,13 +1,15 @@
-//! A minimal diagnostic client over ISO-TP (ISO 15765-2) on classic CAN, normal
-//! addressing: one single-frame request (UDS `22 F18C`, OBD `09 02`, ...) and its
-//! answer, single or multi-frame.
+//! ISO-TP (ISO 15765-2) on classic CAN, normal addressing: a minimal diagnostic client
+//! (one single-frame request, UDS `22 F18C`, OBD `09 02`, ..., and its answer, single or
+//! multi-frame) and a sender for a payload of any length ([`IsoTpSender`]).
 //!
-//! It does no I/O. The vehicle sends [`UdsRequest::request_frame`], feeds every frame
+//! Neither does I/O. The vehicle sends [`UdsRequest::request_frame`], feeds every frame
 //! from the response ID to [`UdsRequest::on_frame`], sends
 //! [`UdsRequest::flow_control_frame`] when asked, and gives up when no frame arrives
 //! within [`UdsRequest::timeout_ms`]. Before the car is identified, the frames it sends
 //! can only go out through an identity probe (see `can_probe.rs`), which allows exactly
 //! the frames [`uds_single_frame`] and [`iso_tp_flow_control`] build.
+
+use alloc::vec::Vec;
 
 /// The largest answer kept (service byte, the request's parameters and the value).
 /// Longer answers fail with [`UdsError::TooLong`] before any flow control is sent.
@@ -23,6 +25,15 @@ const PENDING_TIMEOUT_MS: u64 = 5_000;
 const NEGATIVE_RESPONSE: u8 = 0x7F;
 const POSITIVE_RESPONSE_OFFSET: u8 = 0x40;
 const NRC_RESPONSE_PENDING: u8 = 0x78;
+
+/// The longest payload a first frame can announce.
+pub const ISO_TP_MAX_PAYLOAD: usize = 0xFFF;
+/// Payload bytes in a single frame.
+const SINGLE_FRAME_PAYLOAD: usize = 7;
+/// Payload bytes in a first frame.
+const FIRST_FRAME_PAYLOAD: usize = 6;
+/// Payload bytes in a consecutive frame.
+const CONSECUTIVE_FRAME_PAYLOAD: usize = 7;
 
 /// The single frame carrying `request` (service byte, then its parameters), the rest
 /// filled with `padding`: `uds_single_frame(&[0x22, 0xF1, 0x8C], 0x00)` is
@@ -257,6 +268,143 @@ impl UdsRequest {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SenderState {
+    AwaitingFlowControl,
+    /// Sending consecutive frames: `block_left` before the next flow control (`None`: all
+    /// of them), with at least `gap_ms` between two frames.
+    Sending {
+        block_left: Option<u8>,
+        gap_ms: u64,
+        next_at_ms: u64,
+    },
+    Done,
+    Failed,
+}
+
+/// Sends one payload: [`Self::first_frame`], then every frame from the receiver's flow
+/// control ID to [`Self::on_flow_control`], and [`Self::next_frame`] until it is
+/// [finished](Self::is_finished). The caller gives up when no flow control comes in time.
+pub struct IsoTpSender {
+    payload: Vec<u8>,
+    padding: u8,
+    sent: usize,
+    next_sequence: u8,
+    state: SenderState,
+}
+
+impl IsoTpSender {
+    /// `padding` fills the unused bytes of the frames. Panics for an empty payload or one
+    /// longer than [`ISO_TP_MAX_PAYLOAD`].
+    pub fn new(payload: Vec<u8>, padding: u8) -> Self {
+        assert!(
+            !payload.is_empty() && payload.len() <= ISO_TP_MAX_PAYLOAD,
+            "an ISO-TP payload is 1 to 4095 bytes"
+        );
+        Self {
+            payload,
+            padding,
+            sent: 0,
+            next_sequence: 1,
+            state: SenderState::AwaitingFlowControl,
+        }
+    }
+
+    /// The frame to send first: a single frame if the payload fits one (nothing more is
+    /// needed then), else a first frame.
+    pub fn first_frame(&mut self) -> [u8; 8] {
+        let mut frame = [self.padding; 8];
+        let len = self.payload.len();
+        if len <= SINGLE_FRAME_PAYLOAD {
+            frame[0] = len as u8;
+            frame[1..1 + len].copy_from_slice(&self.payload);
+            self.sent = len;
+            self.state = SenderState::Done;
+        } else {
+            frame[0] = 0x10 | (len >> 8) as u8;
+            frame[1] = len as u8;
+            frame[2..].copy_from_slice(&self.payload[..FIRST_FRAME_PAYLOAD]);
+            self.sent = FIRST_FRAME_PAYLOAD;
+        }
+        frame
+    }
+
+    /// Handles a frame received on the flow control ID at `now_ms`. Anything but a flow
+    /// control while one is expected is ignored; an overflow fails the transfer.
+    pub fn on_flow_control(&mut self, data: &[u8], now_ms: u64) {
+        if self.state != SenderState::AwaitingFlowControl {
+            return;
+        }
+        let &[pci, block_size, separation, ..] = data else {
+            return;
+        };
+        match pci {
+            0x30 => {
+                self.state = SenderState::Sending {
+                    block_left: (block_size != 0).then_some(block_size),
+                    gap_ms: separation_time_ms(separation),
+                    next_at_ms: now_ms,
+                }
+            }
+            0x32 => self.state = SenderState::Failed,
+            // Wait (0x31): another flow control follows.
+            _ => {}
+        }
+    }
+
+    /// The next consecutive frame, if the receiver allows one at `now_ms`.
+    pub fn next_frame(&mut self, now_ms: u64) -> Option<[u8; 8]> {
+        let SenderState::Sending {
+            block_left,
+            gap_ms,
+            next_at_ms,
+        } = self.state
+        else {
+            return None;
+        };
+        if now_ms < next_at_ms {
+            return None;
+        }
+        let end = (self.sent + CONSECUTIVE_FRAME_PAYLOAD).min(self.payload.len());
+        let chunk = &self.payload[self.sent..end];
+        let mut frame = [self.padding; 8];
+        frame[0] = 0x20 | self.next_sequence;
+        frame[1..1 + chunk.len()].copy_from_slice(chunk);
+        self.sent = end;
+        self.next_sequence = (self.next_sequence + 1) & 0x0F;
+        self.state = match block_left {
+            _ if end == self.payload.len() => SenderState::Done,
+            Some(1) => SenderState::AwaitingFlowControl,
+            _ => SenderState::Sending {
+                block_left: block_left.map(|left| left - 1),
+                gap_ms,
+                next_at_ms: now_ms + gap_ms,
+            },
+        };
+        Some(frame)
+    }
+
+    /// Nothing more to send: the payload is out, or the receiver refused it.
+    pub fn is_finished(&self) -> bool {
+        matches!(self.state, SenderState::Done | SenderState::Failed)
+    }
+
+    /// Waiting for the receiver's flow control.
+    pub fn is_awaiting_flow_control(&self) -> bool {
+        self.state == SenderState::AwaitingFlowControl
+    }
+}
+
+/// STmin in whole milliseconds: microsecond values round up, reserved ones are the
+/// longest gap.
+fn separation_time_ms(raw: u8) -> u64 {
+    match raw {
+        0x00..=0x7F => raw as u64,
+        0xF1..=0xF9 => 1,
+        _ => 0x7F,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,6 +582,123 @@ mod tests {
                 UdsStep::Failed(UdsError::Malformed)
             );
         }
+    }
+
+    /// "482 913 .." as UTF-16LE, sent to the cluster on an EV6.
+    const TEXT: [u8; 20] = [
+        0x34, 0, 0x38, 0, 0x32, 0, 0x20, 0, 0x39, 0, 0x31, 0, 0x33, 0, 0x20, 0, 0x2E, 0, 0x2E, 0,
+    ];
+    /// The EV6 cluster's flow control: everything, 5 ms apart.
+    const CLUSTER_FC: [u8; 8] = [0x30, 0x00, 0x05, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA];
+
+    #[test]
+    fn sends_a_multi_frame_payload_at_the_receivers_pace() {
+        let mut sender = IsoTpSender::new(TEXT.to_vec(), 0xAA);
+        assert_eq!(
+            sender.first_frame(),
+            [0x10, 0x14, 0x34, 0x00, 0x38, 0x00, 0x32, 0x00]
+        );
+        assert!(sender.is_awaiting_flow_control());
+        assert_eq!(sender.next_frame(0), None, "before the flow control");
+
+        sender.on_flow_control(&CLUSTER_FC, 100);
+        assert_eq!(
+            sender.next_frame(100),
+            Some([0x21, 0x20, 0x00, 0x39, 0x00, 0x31, 0x00, 0x33])
+        );
+        assert_eq!(sender.next_frame(104), None, "STmin");
+        assert!(!sender.is_finished());
+        assert_eq!(
+            sender.next_frame(105),
+            Some([0x22, 0x00, 0x20, 0x00, 0x2E, 0x00, 0x2E, 0x00])
+        );
+        assert!(sender.is_finished());
+        assert_eq!(sender.next_frame(200), None);
+    }
+
+    #[test]
+    fn the_last_frame_is_padded() {
+        let mut sender = IsoTpSender::new(TEXT[..16].to_vec(), 0xAA);
+        sender.first_frame();
+        sender.on_flow_control(&CLUSTER_FC, 0);
+        sender.next_frame(0);
+        assert_eq!(
+            sender.next_frame(5),
+            Some([0x22, 0x00, 0x20, 0x00, 0xAA, 0xAA, 0xAA, 0xAA])
+        );
+        assert!(sender.is_finished());
+    }
+
+    #[test]
+    fn a_short_payload_is_one_single_frame() {
+        let mut sender = IsoTpSender::new(alloc::vec![0x00, 0x00], 0xAA);
+        assert_eq!(
+            sender.first_frame(),
+            [0x02, 0x00, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]
+        );
+        assert!(sender.is_finished());
+        assert!(!sender.is_awaiting_flow_control());
+    }
+
+    #[test]
+    fn a_block_size_waits_for_the_next_flow_control() {
+        let mut sender = IsoTpSender::new(alloc::vec![7; 6 + 7 * 3], 0xAA);
+        sender.first_frame();
+        sender.on_flow_control(&[0x30, 0x02, 0x00], 0);
+        assert!(sender.next_frame(0).is_some());
+        assert!(sender.next_frame(0).is_some());
+        assert_eq!(sender.next_frame(0), None, "the block is out");
+        assert!(sender.is_awaiting_flow_control());
+        sender.on_flow_control(&[0x30, 0x00, 0x00], 10);
+        assert!(sender.next_frame(10).is_some());
+        assert!(sender.is_finished());
+    }
+
+    #[test]
+    fn the_sequence_number_wraps_to_zero() {
+        let mut sender = IsoTpSender::new(alloc::vec![7; 6 + 7 * 16], 0xAA);
+        sender.first_frame();
+        sender.on_flow_control(&[0x30, 0x00, 0x00], 0);
+        let sequence: Vec<u8> = (0..16).map(|_| sender.next_frame(0).unwrap()[0]).collect();
+        assert_eq!(sequence[14], 0x2F);
+        assert_eq!(sequence[15], 0x20);
+        assert!(sender.is_finished());
+    }
+
+    #[test]
+    fn a_flow_control_can_ask_to_wait_or_refuse() {
+        let mut sender = IsoTpSender::new(TEXT.to_vec(), 0xAA);
+        sender.first_frame();
+        sender.on_flow_control(&[0x31, 0x00, 0x00], 0);
+        assert!(sender.is_awaiting_flow_control());
+        assert_eq!(sender.next_frame(0), None);
+        sender.on_flow_control(&[0x32, 0x00, 0x00], 0);
+        assert!(sender.is_finished());
+        assert_eq!(sender.next_frame(0), None);
+    }
+
+    #[test]
+    fn other_frames_on_the_flow_control_id_are_ignored() {
+        let mut sender = IsoTpSender::new(TEXT.to_vec(), 0xAA);
+        sender.first_frame();
+        sender.on_flow_control(&[0x21, 0x00, 0x00, 0x00], 0);
+        sender.on_flow_control(&[0x30], 0);
+        assert!(sender.is_awaiting_flow_control());
+    }
+
+    #[test]
+    fn microsecond_and_reserved_separation_times_round_up() {
+        assert_eq!(separation_time_ms(0x05), 5);
+        assert_eq!(separation_time_ms(0xF1), 1);
+        assert_eq!(separation_time_ms(0xF9), 1);
+        assert_eq!(separation_time_ms(0x80), 127);
+        assert_eq!(separation_time_ms(0xFF), 127);
+    }
+
+    #[test]
+    #[should_panic(expected = "an ISO-TP payload is 1 to 4095 bytes")]
+    fn a_payload_must_fit_a_first_frame() {
+        IsoTpSender::new(alloc::vec![0; ISO_TP_MAX_PAYLOAD + 1], 0xAA);
     }
 
     #[test]

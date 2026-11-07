@@ -170,11 +170,15 @@ pub static VALIDATION_METHODS: [ValidationMethod; 2] = [
         id: CLUSTER_CODE_METHOD_ID,
         kind: ValidationKind::CodeEntry,
         needs_approval: true,
+        is_available: || true,
+        can_continue: || true,
     },
     ValidationMethod {
         id: BUTTON_METHOD_ID,
         kind: ValidationKind::InCarAction,
         needs_approval: false,
+        is_available: || true,
+        can_continue: || true,
     },
 ];
 

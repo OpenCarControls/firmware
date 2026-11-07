@@ -20,6 +20,7 @@ use embedded_can::{Id, StandardId};
 use proto::app_to_device::Payload;
 use proto::system_command::Action;
 use proto::{PhoneTrustLevel as Trust, PhoneValidationStatus as Status};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const PLATFORM_ID: u32 = 0xDEAD_BEEF;
 const CAR_A: &[u8] = b"KNAC381AAP5000001";
@@ -27,16 +28,39 @@ const CAR_B: &[u8] = b"KNAC381AAP5000002";
 const OWNER: &[u8] = b"ble:\x01\x02\x03\x04\x05\x06";
 const STRANGER: &[u8] = b"ble:\x0A\x0B\x0C\x0D\x0E\x0F";
 
-static METHODS: [ValidationMethod; 2] = [
+/// What the vehicle says about "test.live" right now.
+static LIVE_METHOD_AVAILABLE: AtomicBool = AtomicBool::new(false);
+/// What the vehicle says about a running "test.ending" session right now.
+static SESSION_CAN_CONTINUE: AtomicBool = AtomicBool::new(true);
+
+static METHODS: [ValidationMethod; 4] = [
     ValidationMethod {
         id: "test.code",
         kind: ValidationKind::CodeEntry,
         needs_approval: true,
+        is_available: || true,
+        can_continue: || true,
     },
     ValidationMethod {
         id: "test.button",
         kind: ValidationKind::InCarAction,
         needs_approval: false,
+        is_available: || true,
+        can_continue: || true,
+    },
+    ValidationMethod {
+        id: "test.live",
+        kind: ValidationKind::InCarAction,
+        needs_approval: false,
+        is_available: || LIVE_METHOD_AVAILABLE.load(Ordering::Relaxed),
+        can_continue: || true,
+    },
+    ValidationMethod {
+        id: "test.ending",
+        kind: ValidationKind::InCarAction,
+        needs_approval: false,
+        is_available: || true,
+        can_continue: || SESSION_CAN_CONTINUE.load(Ordering::Relaxed),
     },
 ];
 
@@ -56,6 +80,8 @@ fn boot() {
     reset_phone_trust_for_tests();
     reset_phone_validation_for_tests();
     declare_validation_methods(&METHODS);
+    LIVE_METHOD_AVAILABLE.store(false, Ordering::Relaxed);
+    SESSION_CAN_CONTINUE.store(true, Ordering::Relaxed);
     set_random_source(fixed_random);
     set_can_read_only(true);
     core_interface::set_link_up(core_interface::Transport::Ble, true);
@@ -258,7 +284,7 @@ fn methods_are_listed_with_their_availability() {
         Some(proto::system_command_result::Result::ValidationMethods(m)) => m.methods,
         other => panic!("{other:?}"),
     };
-    assert_eq!(methods.len(), 2);
+    assert_eq!(methods.len(), 4);
     assert_eq!(methods[0].method_id, "test.code");
     assert_eq!(
         methods[0].kind,
@@ -276,6 +302,89 @@ fn methods_are_listed_with_their_availability() {
         "{}",
         resp.error_message
     );
+}
+
+#[test]
+fn the_vehicle_decides_live_whether_a_method_can_start() {
+    boot();
+    identify(CAR_A);
+    let live_available = || {
+        let resp = system(
+            OWNER,
+            Action::ListPhoneValidationMethods(proto::ListPhoneValidationMethodsCommand {}),
+        );
+        match result_of(&resp) {
+            Some(proto::system_command_result::Result::ValidationMethods(m)) => {
+                m.methods[2].available
+            }
+            other => panic!("{other:?}"),
+        }
+    };
+    assert!(!live_available());
+    let resp = start(OWNER, "test.live");
+    assert!(!resp.success);
+    assert!(
+        resp.error_message.contains("current state"),
+        "{}",
+        resp.error_message
+    );
+
+    LIVE_METHOD_AVAILABLE.store(true, Ordering::Relaxed);
+    assert!(live_available());
+    assert!(start(OWNER, "test.live").success);
+
+    // A running session doesn't depend on it: the vehicle can still complete it.
+    LIVE_METHOD_AVAILABLE.store(false, Ordering::Relaxed);
+    let session = current_validation_challenge().unwrap().session;
+    assert!(complete_validation_action(session));
+    assert!(is_phone_validated(OWNER));
+}
+
+#[test]
+fn the_vehicle_can_end_a_running_session() {
+    boot();
+    identify(CAR_A);
+    assert!(start(OWNER, "test.ending").success);
+    let now = embassy_time::Instant::now().as_millis();
+    tick_validation(now);
+    assert!(current_validation_challenge().is_some());
+
+    SESSION_CAN_CONTINUE.store(false, Ordering::Relaxed);
+    tick_validation(now);
+    assert!(current_validation_challenge().is_none());
+    set_ble_peer(Some(OWNER));
+    let access = phone_access_state(now).unwrap();
+    assert_eq!(access.validation.unwrap().status, Status::Cancelled as i32);
+}
+
+#[test]
+fn losing_read_write_mode_cancels_a_session_that_needs_it() {
+    read_write();
+    assert!(start(OWNER, "test.code").success);
+    let code = the_code();
+    let now = embassy_time::Instant::now().as_millis();
+    tick_validation(now);
+    assert!(current_validation_challenge().is_some());
+
+    assert!(approve(OWNER, false).success);
+    assert!(
+        !submit(OWNER, &code).success,
+        "the code stops working with the session"
+    );
+    assert!(current_validation_challenge().is_none());
+    assert!(!is_phone_validated(OWNER));
+    set_ble_peer(Some(OWNER));
+    let access = phone_access_state(now).unwrap();
+    assert_eq!(access.validation.unwrap().status, Status::Cancelled as i32);
+}
+
+#[test]
+fn a_session_that_needs_no_approval_survives_read_only() {
+    read_write();
+    assert!(start(OWNER, "test.button").success);
+    set_can_dev_write_unlocked(false).unwrap();
+    tick_validation(embassy_time::Instant::now().as_millis());
+    assert!(current_validation_challenge().is_some());
 }
 
 #[test]

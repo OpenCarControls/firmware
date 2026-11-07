@@ -4,11 +4,13 @@
 extern crate alloc;
 
 pub mod can;
+mod cluster_code;
 pub mod commands;
 mod identity;
 mod platform;
 use alloc::string::String;
 pub use can::{CAN_FILTERS, can_rx_task};
+pub use cluster_code::{METHOD_ID as CLUSTER_CODE_METHOD_ID, VALIDATION_METHODS};
 use core_interface::{
     ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, CMD_RESP_CHANNEL, VEHICLE_STATE_CHANNEL,
     VehicleStatePayload,
@@ -462,9 +464,11 @@ async fn wait_for_state_change_or_heartbeat() -> bool {
 }
 
 /// Publishes the vehicle state on every heartbeat, and shortly after CAN-driven changes
-/// (rate-limited to one publish per `STATE_MIN_PUBLISH_INTERVAL`).
+/// (rate-limited to one publish per `STATE_MIN_PUBLISH_INTERVAL`). Declares the validation
+/// methods first.
 #[embassy_executor::task]
 pub async fn state_update_task() {
+    core_interface::declare_validation_methods(&VALIDATION_METHODS);
     #[allow(unused_variables, unused_mut)]
     let mut tick: u64 = 0;
     #[cfg(debug_assertions)]
