@@ -4,8 +4,10 @@
 //! `core-interface` runs the session; the vehicle provides the methods. The vehicle
 //! declares them once ([`declare_validation_methods`]), follows the running challenge
 //! ([`validation_challenge_receiver`]: show the code, or watch for the in-car action) and
-//! reports a completed in-car action ([`complete_validation_action`]). The session always
-//! belongs to the phone that started it, so the vehicle never chooses who is validated.
+//! reports a completed in-car action ([`complete_validation_action`]). It also says live
+//! whether each method can be used in the car's current state
+//! ([`ValidationMethod::is_available`]). The session always belongs to the phone that
+//! started it, so the vehicle never chooses who is validated.
 //!
 //! One session runs at a time, for one phone, until it succeeds, fails, is cancelled or
 //! times out ([`VALIDATION_SESSION_MS`]). A code entry session uses a fresh
@@ -49,6 +51,11 @@ pub struct ValidationMethod {
     /// The method sends frames to the car (a code on the cluster), so it can only start
     /// while the device may send the platform's frames (read-write mode).
     pub needs_approval: bool,
+    /// Whether the car's current state allows the method, decided by the vehicle (for
+    /// example: the car is on). Asked live when the app lists the methods and when a
+    /// session starts. A running session isn't affected by it. It can't block, and can't
+    /// call back into the validation functions.
+    pub is_available: fn() -> bool,
 }
 
 /// The running challenge, for the vehicle: `code` holds the ASCII digits to show, for a
@@ -67,6 +74,8 @@ pub enum ValidationError {
     UnknownMethod,
     /// The method needs read-write mode and the device is read-only.
     MethodUnavailable,
+    /// The car's current state doesn't allow the method.
+    MethodNotAvailableNow,
     CarNotIdentified,
     OtherPhoneSession,
     CoolingDown,
@@ -83,6 +92,7 @@ impl ValidationError {
             Self::MethodUnavailable => {
                 "this method needs CAN read-write mode, and the device is read-only"
             }
+            Self::MethodNotAvailableNow => "the car's current state doesn't allow this method",
             Self::CarNotIdentified => {
                 "the car is not identified yet, so the phone can't be validated"
             }
@@ -185,6 +195,7 @@ fn kind_proto(kind: ValidationKind) -> proto::PhoneValidationMethodKind {
 fn is_method_available(method: &ValidationMethod) -> bool {
     crate::can_access::identified_car().is_some()
         && (!method.needs_approval || !crate::can::is_can_read_only())
+        && (method.is_available)()
 }
 
 fn session_proto(session: &Session, state: &State, now_ms: u64) -> proto::PhoneValidationSession {
@@ -288,8 +299,11 @@ pub(crate) fn start_validation(
         {
             return Err((ValidationError::OtherPhoneSession, None));
         }
-        if !is_method_available(method) {
+        if method.needs_approval && crate::can::is_can_read_only() {
             return Err((ValidationError::MethodUnavailable, None));
+        }
+        if !(method.is_available)() {
+            return Err((ValidationError::MethodNotAvailableNow, None));
         }
         let code = match method.kind {
             ValidationKind::CodeEntry => match state.random {
