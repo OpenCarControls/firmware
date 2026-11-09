@@ -30,6 +30,7 @@ use embassy_time::Instant;
 use crate::can_access::CarDigest;
 use crate::proto;
 use crate::proto::PhoneValidationStatus as Status;
+use crate::proto::system_command_result::Result as Data;
 
 include!(concat!(env!("OUT_DIR"), "/phone_validation.rs"));
 
@@ -111,6 +112,38 @@ impl ValidationError {
             Self::NoRandomSource => "the device can't generate a code",
             Self::WrongCode => "wrong code",
         }
+    }
+
+    fn reason(self) -> proto::PhoneValidationRefusalReason {
+        use proto::PhoneValidationRefusalReason as Reason;
+        match self {
+            Self::UnknownMethod => Reason::UnknownMethod,
+            Self::MethodUnavailable => Reason::NeedsApproval,
+            Self::MethodNotAvailableNow => Reason::MethodNotAvailableNow,
+            Self::CarNotIdentified => Reason::CarNotIdentified,
+            Self::OtherPhoneSession => Reason::OtherPhoneValidating,
+            Self::CoolingDown => Reason::CoolingDown,
+            Self::NoSession => Reason::NoSession,
+            Self::NotCodeEntry => Reason::NotCodeEntry,
+            Self::NoRandomSource => Reason::NoRandomSource,
+            // Never sent: a wrong code answers with the session.
+            Self::WrongCode => Reason::Unspecified,
+        }
+    }
+
+    /// This error as a refused command, with no cooldown to report.
+    pub(crate) fn refused(self) -> Refused {
+        self.refused_for(0)
+    }
+
+    fn refused_for(self, cooldown_s: u32) -> Refused {
+        (
+            self,
+            Data::ValidationRefusal(proto::PhoneValidationRefusal {
+                reason: self.reason() as i32,
+                cooldown_s,
+            }),
+        )
     }
 }
 
@@ -220,11 +253,15 @@ fn session_proto(session: &Session, state: &State, now_ms: u64) -> proto::PhoneV
         } else {
             0
         },
-        cooldown_s: state
-            .cooldown_until_ms
-            .saturating_sub(now_ms)
-            .div_ceil(1000) as u32,
+        cooldown_s: cooldown_left_s(state, now_ms),
     }
+}
+
+fn cooldown_left_s(state: &State, now_ms: u64) -> u32 {
+    state
+        .cooldown_until_ms
+        .saturating_sub(now_ms)
+        .div_ceil(1000) as u32
 }
 
 /// Ends the running session with `status`. Returns whether there was one.
@@ -274,8 +311,9 @@ pub(crate) fn session_for(phone: &[u8], now_ms: u64) -> Option<proto::PhoneValid
     })
 }
 
-/// A refused validation command: why, and the phone's session when it explains it.
-pub(crate) type Refused = (ValidationError, Option<proto::PhoneValidationSession>);
+/// A refused validation command: why, and what the app is told about it: the session
+/// after a wrong code, the reason otherwise.
+pub(crate) type Refused = (ValidationError, Data);
 
 /// Starts validating `phone` with `method_id`. The phone must be bonded (checked by the
 /// dispatcher). Replaces the phone's own running session.
@@ -288,35 +326,30 @@ pub(crate) fn start_validation(
     let result = STATE.lock(|s| {
         let mut state = s.borrow_mut();
         let Some(method) = state.methods.iter().find(|m| m.id == method_id) else {
-            return Err((ValidationError::UnknownMethod, None));
+            return Err(ValidationError::UnknownMethod.refused());
         };
         let Some(car) = car else {
-            return Err((ValidationError::CarNotIdentified, None));
+            return Err(ValidationError::CarNotIdentified.refused());
         };
         if now_ms < state.cooldown_until_ms {
-            let own = state
-                .session
-                .as_ref()
-                .filter(|s| s.phone.as_slice() == phone)
-                .map(|s| session_proto(s, &state, now_ms));
-            return Err((ValidationError::CoolingDown, own));
+            return Err(ValidationError::CoolingDown.refused_for(cooldown_left_s(&state, now_ms)));
         }
         if let Some(session) = state.session.as_ref()
             && session.status == Status::InProgress
             && session.phone.as_slice() != phone
         {
-            return Err((ValidationError::OtherPhoneSession, None));
+            return Err(ValidationError::OtherPhoneSession.refused());
         }
         if method.needs_approval && crate::can::is_can_read_only() {
-            return Err((ValidationError::MethodUnavailable, None));
+            return Err(ValidationError::MethodUnavailable.refused());
         }
         if !(method.is_available)() {
-            return Err((ValidationError::MethodNotAvailableNow, None));
+            return Err(ValidationError::MethodNotAvailableNow.refused());
         }
         let code = match method.kind {
             ValidationKind::CodeEntry => match state.random {
                 Some(fill) => Some(uniform_code(fill)),
-                None => return Err((ValidationError::NoRandomSource, None)),
+                None => return Err(ValidationError::NoRandomSource.refused()),
             },
             ValidationKind::InCarAction => None,
         };
@@ -377,10 +410,10 @@ pub(crate) fn submit_validation_code(
             .as_mut()
             .filter(|s| s.phone.as_slice() == phone && s.status == Status::InProgress)
         else {
-            return (Err((ValidationError::NoSession, None)), None, false);
+            return (Err(ValidationError::NoSession.refused()), None, false);
         };
         let Some(expected) = session.code else {
-            return (Err((ValidationError::NotCodeEntry, None)), None, false);
+            return (Err(ValidationError::NotCodeEntry.refused()), None, false);
         };
         let typed = code.trim().as_bytes();
         // Compares every digit, whatever the first mismatch.
@@ -402,7 +435,11 @@ pub(crate) fn submit_validation_code(
             state.cooldown_until_ms = now_ms.saturating_add(VALIDATION_COOLDOWN_MS);
         }
         let reply = session_proto(state.session.as_ref().unwrap(), &state, now_ms);
-        (Err((ValidationError::WrongCode, Some(reply))), None, failed)
+        (
+            Err((ValidationError::WrongCode, Data::ValidationSession(reply))),
+            None,
+            failed,
+        )
     });
     if let Some((car, phone)) = validated {
         crate::phone_trust::add_phone_validation(car, &phone);

@@ -19,7 +19,10 @@ use core_interface::{
 use embedded_can::{Id, StandardId};
 use proto::app_to_device::Payload;
 use proto::system_command::Action;
-use proto::{PhoneTrustLevel as Trust, PhoneValidationStatus as Status};
+use proto::{
+    PhoneTrustLevel as Trust, PhoneValidationRefusalReason as Reason,
+    PhoneValidationStatus as Status,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const PLATFORM_ID: u32 = 0xDEAD_BEEF;
@@ -148,6 +151,14 @@ fn session_of(resp: &proto::CommandResponse) -> proto::PhoneValidationSession {
     match result_of(resp) {
         Some(proto::system_command_result::Result::ValidationSession(s)) => s,
         other => panic!("no session in {resp:?}: {other:?}"),
+    }
+}
+
+fn refusal_of(resp: &proto::CommandResponse) -> proto::PhoneValidationRefusal {
+    assert!(!resp.success);
+    match result_of(resp) {
+        Some(proto::system_command_result::Result::ValidationRefusal(r)) => r,
+        other => panic!("no refusal in {resp:?}: {other:?}"),
     }
 }
 
@@ -302,6 +313,7 @@ fn methods_are_listed_with_their_availability() {
         "{}",
         resp.error_message
     );
+    assert_eq!(refusal_of(&resp).reason, Reason::NeedsApproval as i32);
 }
 
 #[test]
@@ -327,6 +339,10 @@ fn the_vehicle_decides_live_whether_a_method_can_start() {
         resp.error_message.contains("current state"),
         "{}",
         resp.error_message
+    );
+    assert_eq!(
+        refusal_of(&resp).reason,
+        Reason::MethodNotAvailableNow as i32
     );
 
     LIVE_METHOD_AVAILABLE.store(true, Ordering::Relaxed);
@@ -404,6 +420,7 @@ fn a_session_needs_the_exact_car() {
     let resp = start(OWNER, "test.button");
     assert!(!resp.success);
     assert!(resp.error_message.contains("not identified"));
+    assert_eq!(refusal_of(&resp).reason, Reason::CarNotIdentified as i32);
 }
 
 #[test]
@@ -455,10 +472,13 @@ fn wrong_codes_use_the_attempts_then_the_cooldown_refuses_new_sessions() {
         "{}",
         resp.error_message
     );
-    assert!(
-        !start(STRANGER, "test.button").success,
-        "the cooldown is for every phone"
-    );
+    let refusal = refusal_of(&resp);
+    assert_eq!(refusal.reason, Reason::CoolingDown as i32);
+    assert!(refusal.cooldown_s > 0);
+    // The cooldown is for every phone, and each is told how long is left.
+    let refusal = refusal_of(&start(STRANGER, "test.button"));
+    assert_eq!(refusal.reason, Reason::CoolingDown as i32);
+    assert!(refusal.cooldown_s > 0);
 }
 
 #[test]
@@ -468,6 +488,9 @@ fn one_session_at_a_time_and_it_belongs_to_its_phone() {
     let resp = start(STRANGER, "test.button");
     assert!(!resp.success);
     assert!(resp.error_message.contains("another phone"));
+    let refusal = refusal_of(&resp);
+    assert_eq!(refusal.reason, Reason::OtherPhoneValidating as i32);
+    assert_eq!(refusal.cooldown_s, 0);
     // The stranger can't answer the owner's code, or complete it.
     assert!(!submit(STRANGER, &the_code()).success);
     assert!(!is_phone_validated(STRANGER));
@@ -532,6 +555,24 @@ fn code_entry_is_refused_without_a_random_source() {
     let resp = start(OWNER, "test.code");
     assert!(!resp.success);
     assert!(resp.error_message.contains("can't generate"));
+    assert_eq!(refusal_of(&resp).reason, Reason::NoRandomSource as i32);
+}
+
+#[test]
+fn commands_without_a_running_session_say_so() {
+    read_write();
+    let resp = submit(OWNER, "000000");
+    assert_eq!(refusal_of(&resp).reason, Reason::NoSession as i32);
+    let resp = system(
+        OWNER,
+        Action::CancelPhoneValidation(proto::CancelPhoneValidationCommand {}),
+    );
+    assert_eq!(refusal_of(&resp).reason, Reason::NoSession as i32);
+    assert!(start(OWNER, "test.button").success);
+    let resp = submit(OWNER, "000000");
+    assert_eq!(refusal_of(&resp).reason, Reason::NotCodeEntry as i32);
+    let resp = start(OWNER, "test.nope");
+    assert_eq!(refusal_of(&resp).reason, Reason::UnknownMethod as i32);
 }
 
 // ── Bound to the car ──────────────────────────────────────────────────────────

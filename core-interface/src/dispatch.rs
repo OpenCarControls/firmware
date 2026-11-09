@@ -74,7 +74,7 @@ async fn send_not_controller_response(message_id: u64) {
 }
 
 /// Why a system command was refused: the status code, the reason shown to the user, and
-/// data that explains it (a validation session with no attempts left, say).
+/// data that explains it (why a validation command was refused, say).
 struct Refusal {
     status: proto::CommandStatusCode,
     message: &'static str,
@@ -209,11 +209,11 @@ fn paired_phones_answer(source_device_id: &[u8], phones: Vec<Vec<u8>>) -> System
     )))
 }
 
-fn validation_refusal((error, session): crate::validation::Refused) -> Refusal {
+fn validation_refusal((error, data): crate::validation::Refused) -> Refusal {
     Refusal {
         status: proto::CommandStatusCode::Failed,
         message: error.message(),
-        result: session.map(proto::system_command_result::Result::ValidationSession),
+        result: Some(data),
     }
 }
 
@@ -247,7 +247,7 @@ async fn handle_phone_validation(
         Action::CancelPhoneValidation(_) => {
             crate::validation::cancel_validation(source_device_id, now_ms)
                 .map(|()| None)
-                .map_err(|e| Refusal::failed(e.message()))
+                .map_err(|e| validation_refusal(e.refused()))
         }
         _ => Ok(None),
     }
