@@ -77,11 +77,29 @@ The `wireless` status LED is lit while the PPP link is up (`FLAG_LTE`).
 *   **IPv4 only:** the PDP context is `"IP"`.
 *   **Data rate:** PPP at 115200 baud gives about 11 KB/s, plenty for MQTT.
 
+## Why PPP and not the modem's MQTT client
+
+Most LTE modems have their own MQTT client, driven by AT commands (SIMCom `AT+CMQTT*`, Quectel `AT+QMT*`, u-blox `AT+UMQTT*`). The firmware uses PPP instead:
+
+*   **One driver for every modem.** The PPP dial (`ATD*99#`) is standard across vendors, while each vendor's MQTT commands differ. Supporting another modem is then mostly its power-on timings.
+*   **One MQTT implementation.** WiFi and LTE share `mqtt_driver_task` and its resilience rules (see [Architecture](architecture.md#mqtt-driver-resilience)), and everything above the network stack (DNS, TLS once it exists) works the same on both.
+*   **TLS stays on the ESP.** WiFi builds need TLS on the ESP anyway, so the modem's TLS would only save RAM on LTE builds. It would also keep the client's private key on the modem, readable by whoever can reach its UART, and tie the TLS versions and cipher suites to the modem's firmware.
+*   **No modem MQTT limits:** these clients speak MQTT 3.1.1 (the firmware uses v5), cap the payload size, and return binary payloads inside AT notifications.
+
+What the modem's client would give: the ESP could deep-sleep while the modem keeps the session alive, and the AT channel would stay free while connected. If the sleep experiments below show that remote wake-up only works reliably that way, the client can be added as another MQTT driver for that modem: it would read and write the same `MQTT_RX_CHANNEL` / `MQTT_TX_CHANNEL`, and the power-on, SIM and registration steps would stay as they are.
+
 ## Sleep and remote wake-up (not implemented)
 
 The car's 12 V budget will need the device to sleep while parked. Carriers put the device behind NAT, so nothing on the internet can open a connection to it. A message can only reach a sleeping device in two ways:
 
-*   **Over a connection it keeps open.** The MQTT session stays up while the ESP light-sleeps (RAM, and so the TCP state, is kept) and the modem sleeps with DTR released (`AT+CSCLK=1`). When data arrives, the modem pulses its ring indicator, which wakes the ESP with a GPIO interrupt. The keepalive must stay below the carrier's NAT timeout (often a few minutes to about 30). Whether the SIM7670G pulses RI for incoming data in PPP mode, and not only for SMS and AT notifications, still has to be checked on the bench.
-*   **SMS wake-up.** The ESP deep-sleeps with almost everything off. An SMS makes the modem pulse RI, whatever PPP does. The ESP wakes, reconnects and receives the queued command, which needs a persistent MQTT session (`clean_start` off, QoS 1). It costs a server-side SMS gateway and a few seconds of latency.
+*   **Over a connection it keeps open.** The MQTT session stays up while the ESP light-sleeps (RAM, and so the TCP state, is kept) and the modem sleeps with DTR released (`AT+CSCLK=1`). When data arrives, the modem pulses its ring indicator, which wakes the ESP with a GPIO interrupt. The keepalive must stay below the carrier's NAT timeout (often a few minutes to about 30).
+*   **SMS wake-up.** The ESP deep-sleeps and an SMS makes the modem pulse RI. This is ruled out: many IoT SIMs are data-only.
 
-What is in place for that: the ring and DTR lines are part of the modem config (on the LilyGO board the ring line is GPIO 3, an RTC GPIO that can wake the ESP from deep sleep), DTR is driven by the firmware, and `lte_task` is organised in phases a sleeping phase can join. GNSS (the SIM7670G has it) would need the AT channel while PPP runs, through the modem's multiplexer (`AT+CMUX`); that is also for later.
+The first way is open questions with PPP. On SIMCom modems DTR controls both sleep (`AT+CSCLK`) and data mode (`AT&D`), so releasing DTR to let the modem sleep can end the PPP session; keeping both needs `AT&D0`, or the modem's multiplexer (`AT+CMUX`) to keep an AT channel next to PPP. It is also unknown whether the SIM7670G pulses RI for incoming PPP data, and not only for SMS and AT notifications. With the modem's MQTT client, holding back the notification of an incoming message and pulsing RI while asleep is the documented behaviour. Two bench experiments, from an AT console with RI (GPIO 3 on the LilyGO board) watched, decide between them:
+
+1.  **PPP:** with a data session up and `AT&D0`, release DTR. Does the modem sleep, keep the session, and pulse RI on incoming data?
+2.  **Modem MQTT:** connect and subscribe with `AT+CMQTT*`, set `AT+CSCLK=1`, release DTR and publish to the topic from the broker. Does RI pulse, and does the message arrive once DTR is asserted again?
+
+If only the second works, the LTE MQTT driver for that modem moves to its MQTT client (see above).
+
+Either way, what is in place: the ring and DTR lines are part of the modem config (on the LilyGO board the ring line is GPIO 3, an RTC GPIO that can wake the ESP from deep sleep), DTR is driven by the firmware, and `lte_task` is organised in phases a sleeping phase can join. GNSS (the SIM7670G has it) would need the AT channel while PPP runs, through the modem's multiplexer (`AT+CMUX`); that is also for later.
