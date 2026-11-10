@@ -27,6 +27,10 @@ mod validation;
 
 pub mod ble;
 
+use core::cell::Cell;
+
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use portable_atomic::{AtomicU32, Ordering};
 
 // ── Platform ID ───────────────────────────────────────────────────────────────
@@ -44,6 +48,23 @@ pub fn init(platform_id: u32) {
 /// transport tasks that need to emit system events).
 pub fn platform_id() -> u32 {
     PLATFORM_ID.load(Ordering::Relaxed)
+}
+
+// ── MQTT client ID ────────────────────────────────────────────────────────────
+
+static MQTT_CLIENT_ID: Mutex<CriticalSectionRawMutex, Cell<Option<&'static str>>> =
+    Mutex::new(Cell::new(None));
+
+/// Called once at boot by the generated `main.rs` of a build with MQTT, with the
+/// `network.mqtt.client_id` its topics are built from. The app learns it over BLE
+/// to use the same topics.
+pub fn set_mqtt_client_id(client_id: &'static str) {
+    MQTT_CLIENT_ID.lock(|id| id.set(Some(client_id)));
+}
+
+/// The device's MQTT client ID, or `None` when it has no MQTT.
+pub(crate) fn mqtt_client_id() -> Option<&'static str> {
+    MQTT_CLIENT_ID.lock(Cell::get)
 }
 
 // ── Public re-exports ─────────────────────────────────────────────────────────

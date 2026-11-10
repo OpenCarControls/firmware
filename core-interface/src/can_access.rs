@@ -288,8 +288,8 @@ pub fn can_access_state() -> proto::CanAccessState {
     }
 }
 
-/// A BLE state update carrying only the system state with [`can_access_state`] and the
-/// connected phone's [`crate::phone_access_state`].
+/// A BLE state update carrying only the system state with [`can_access_state`], the
+/// connected phone's [`crate::phone_access_state`] and the device's MQTT client ID.
 pub fn can_access_state_update(timestamp_ms: u64) -> proto::DeviceToApp {
     proto::DeviceToApp {
         timestamp_ms,
@@ -299,6 +299,7 @@ pub fn can_access_state_update(timestamp_ms: u64) -> proto::DeviceToApp {
                 system_state: Some(proto::SystemState {
                     can_access: Some(can_access_state()),
                     phone_access: crate::phone_trust::phone_access_state(timestamp_ms),
+                    mqtt_client_id: crate::mqtt_client_id().map(Into::into),
                     ..Default::default()
                 }),
                 vehicle_state: None,

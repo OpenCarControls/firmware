@@ -261,7 +261,8 @@ impl TargetBuilder for Builder {
             .to_string();
 
         let mqtt_driver_spawn =
-            "    spawner\n\
+            "    core_interface::set_mqtt_client_id(MQTT_CLIENT_ID);\n\
+             \x20   spawner\n\
              .spawn(board_pc::mqtt_driver_task(\n\
              MQTT_BROKER_HOST,\n\
              MQTT_BROKER_PORT,\n\

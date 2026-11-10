@@ -543,6 +543,7 @@ impl TargetBuilder for Builder {
 
         let mqtt_driver_spawn = if wifi_enabled {
             concat!(
+                "    core_interface::set_mqtt_client_id(MQTT_CLIENT_ID);\n",
                 "    spawner\n",
                 "        .spawn(board_esp::mqtt_driver_task(\n",
                 "            wifi_stack,\n",
