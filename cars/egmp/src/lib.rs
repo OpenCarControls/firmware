@@ -8,6 +8,7 @@ mod cluster_code;
 pub mod commands;
 mod identity;
 mod platform;
+mod preconditioning;
 use alloc::string::String;
 pub use can::{CAN_FILTERS, can_rx_task};
 pub use cluster_code::{METHOD_ID as CLUSTER_CODE_METHOD_ID, VALIDATION_METHODS};
@@ -92,6 +93,7 @@ pub struct EgmpCarState {
     pub preconditioning_state: Option<proto::advanced_state::PreconditioningState>,
     pub gear: Option<proto::advanced_state::Gear>,
     pub power_state: Option<proto::advanced_state::PowerState>,
+    pub is_manual_preconditioning_requested: Option<bool>,
     // Not published (see `RegenMode`).
     pub regen_mode: Option<RegenMode>,
     /// 0 to 3 for the paddle levels, 4 for the maximum.
@@ -157,6 +159,7 @@ impl EgmpCarState {
             preconditioning_state: None,
             gear: None,
             power_state: None,
+            is_manual_preconditioning_requested: None,
             regen_mode: None,
             regen_level: None,
         }
@@ -215,6 +218,7 @@ impl EgmpCarState {
             preconditioning_state: Some(proto::advanced_state::PreconditioningState::Off),
             gear: Some(proto::advanced_state::Gear::Park),
             power_state: Some(proto::advanced_state::PowerState::Off),
+            is_manual_preconditioning_requested: Some(false),
             regen_mode: Some(RegenMode::Manual),
             regen_level: Some(3),
         }
@@ -282,6 +286,7 @@ pub fn encode_state(state: &EgmpCarState) -> VehicleStatePayload {
         preconditioning_state: state.preconditioning_state.map(|s| s as i32),
         gear: state.gear.map(|g| g as i32),
         power_state: state.power_state.map(|p| p as i32),
+        is_manual_preconditioning_requested: state.is_manual_preconditioning_requested,
     };
     VehicleStatePayload {
         basic: basic.encode_to_vec(),
@@ -333,24 +338,41 @@ pub async fn process_basic_command(bytes: &[u8]) -> Result<(), core_interface::C
 pub async fn handle_advanced_commands_task() {
     loop {
         let inbound = ADVANCED_CMD_CHANNEL.receiver().receive().await;
-        let result = process_advanced_command(inbound.bytes.as_slice()).await;
+        let result =
+            process_advanced_command(inbound.bytes.as_slice(), inbound.authorization).await;
         core_interface::respond_to_command(inbound.transport, inbound.message_id, result).await;
     }
 }
 
 /// Decodes an advanced command, checks its requirements
-/// (`commands::advanced_requirements`) and only then runs it.
-pub async fn process_advanced_command(bytes: &[u8]) -> Result<(), core_interface::CommandError> {
+/// (`commands::advanced_requirements`) and only then runs it. `authorization` is the one the
+/// command came with: `None` (MQTT) can't send the command's frames, so the command fails.
+pub async fn process_advanced_command(
+    bytes: &[u8],
+    authorization: Option<core_interface::CommandAuthorization>,
+) -> Result<(), core_interface::CommandError> {
     use core_interface::CommandError;
     let cmd = proto::AdvancedCommand::decode(bytes)
         .map_err(|_| CommandError::Failed("Failed to decode AdvancedCommand"))?;
     let action = cmd
         .action
         .ok_or(CommandError::Failed("No action in AdvancedCommand"))?;
-    commands::admit_advanced(&action).map_err(CommandError::Rejected)?;
+    commands::admit_advanced(&action)
+        .await
+        .map_err(CommandError::Rejected)?;
     match action {
-        proto::advanced_command::Action::BatteryPreconditioningCommand(_) => {
-            Err(CommandError::Failed("Not implemented"))
+        proto::advanced_command::Action::BatteryPreconditioningCommand(command) => {
+            let authorization = authorization.ok_or(CommandError::Failed(
+                "command rejected: no validated phone sent it",
+            ))?;
+            // The session sends its frames from the CAN RX path, as the car answers.
+            preconditioning::request(command.enable, authorization)
+                .map_err(CommandError::Failed)?;
+            // Tell the app now rather than on the next CAN frame.
+            CAR_STATE.lock().await.is_manual_preconditioning_requested =
+                Some(preconditioning::is_requested());
+            STATE_CHANGED.signal(());
+            Ok(())
         }
     }
 }
@@ -595,6 +617,7 @@ mod tests {
             preconditioning_state: Some(proto::advanced_state::PreconditioningState::Heating),
             gear: Some(Gear::Drive),
             power_state: Some(proto::advanced_state::PowerState::Ready),
+            is_manual_preconditioning_requested: Some(true),
             regen_mode: Some(RegenMode::IPedal),
             regen_level: Some(u32::MAX),
         };
