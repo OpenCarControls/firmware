@@ -15,7 +15,7 @@ prost             = { workspace = true }
 log               = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-socketcan         = { version = "3.5.0", default-features = false }
+socketcan         = { version = "4.0.0", default-features = false }
 
 [dev-dependencies]
 embassy-futures   = { workspace = true }
