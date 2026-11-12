@@ -94,7 +94,7 @@ rust-mqtt = { workspace = true, optional = true }
 static_cell = { version = "2.1.1", optional = true }
 bt-hci = { version = "0.8.1", default-features = false }
 trouble-host = { version = "0.6.0", features = ["derive", "security", "default-packet-pool-mtu-255"] }
-sequential-storage = { version = "4" }
+sequential-storage = { version = "8" }
 embassy-embedded-hal = { version = "0.6.0", optional = true }
 embedded-storage-async = { version = "0.4", optional = true }
 rand_core = { version = "0.6", default-features = false, optional = true }
