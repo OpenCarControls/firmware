@@ -57,7 +57,7 @@ impl<'a> Value<'a> for StoredBond {
         Ok(41)
     }
 
-    fn deserialize_from(buffer: &'a [u8]) -> Result<Self, SerializationError> {
+    fn deserialize_from(buffer: &'a [u8]) -> Result<(Self, usize), SerializationError> {
         if buffer.len() < 41 {
             return Err(SerializationError::BufferTooSmall);
         }
@@ -72,7 +72,7 @@ impl<'a> Value<'a> for StoredBond {
         } else {
             None
         };
-        Ok(StoredBond(BondInformation {
+        let bond = StoredBond(BondInformation {
             ltk,
             identity: Identity { bd_addr, irk },
             is_bonded: buffer[39] != 0,
@@ -81,7 +81,8 @@ impl<'a> Value<'a> for StoredBond {
                 1 => SecurityLevel::Encrypted,
                 _ => SecurityLevel::EncryptedAuthenticated,
             },
-        }))
+        });
+        Ok((bond, 41))
     }
 }
 
@@ -107,7 +108,7 @@ impl<'a> Value<'a> for StoredApproval {
         Ok(33)
     }
 
-    fn deserialize_from(buffer: &'a [u8]) -> Result<Self, SerializationError> {
+    fn deserialize_from(buffer: &'a [u8]) -> Result<(Self, usize), SerializationError> {
         if buffer.len() < 33 {
             return Err(SerializationError::BufferTooSmall);
         }
@@ -115,7 +116,7 @@ impl<'a> Value<'a> for StoredApproval {
         if buffer[0] != APPROVAL_FORMAT_VERSION {
             return Err(SerializationError::InvalidFormat);
         }
-        Ok(StoredApproval(buffer[1..33].try_into().unwrap()))
+        Ok((StoredApproval(buffer[1..33].try_into().unwrap()), 33))
     }
 }
 
@@ -124,8 +125,8 @@ mod hardware {
     use core::ops::Range;
     use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlash};
     use sequential_storage::{
-        cache::NoCache,
-        map::{fetch_all_items, fetch_item, remove_item, store_item},
+        cache::{Cache, Uncached},
+        map::{Key, MapConfig, MapStorage},
     };
     use trouble_host::prelude::{BdAddr, BondInformation};
 
@@ -138,6 +139,14 @@ mod hardware {
     const ACCESS_BUFFER_BYTES: usize = 256;
     /// So is the short-boot count in its own.
     const SHORT_BOOTS_KEY: u8 = 0;
+
+    /// A map over one of the store's ranges, borrowing the shared flash for one
+    /// operation. Nothing is cached, so the next one starts from the flash as it is.
+    type Map<'f, K, S> = MapStorage<K, &'f mut S, Cache<Uncached, Uncached, Uncached, K>>;
+
+    fn map<K: Key, S: NorFlash>(flash: &mut S, range: Range<u32>) -> Map<'_, K, S> {
+        MapStorage::new(flash, MapConfig::new(range), Cache::new_uncached())
+    }
 
     /// Wraps a flash NorFlash storage backend and a flash range, and provides
     /// async load / store / remove operations for `BondInformation` records.
@@ -170,14 +179,9 @@ mod hardware {
         /// flash error: a lost count only makes the owner power-cycle again.
         pub(in crate::ble) async fn load_short_boots(&mut self) -> u8 {
             let mut data_buffer = [0u8; 32];
-            match fetch_item::<u8, u8, _>(
-                self.storage,
-                self.short_boots_range.clone(),
-                &mut NoCache::new(),
-                &mut data_buffer,
-                &SHORT_BOOTS_KEY,
-            )
-            .await
+            match map::<u8, _>(self.storage, self.short_boots_range.clone())
+                .fetch_item::<u8>(&mut data_buffer, &SHORT_BOOTS_KEY)
+                .await
             {
                 Ok(count) => count.unwrap_or(0),
                 Err(e) => {
@@ -194,8 +198,9 @@ mod hardware {
                 return;
             }
             log::warn!("Short-boot count: write failed, erasing its range and retrying");
-            if let Err(e) =
-                sequential_storage::erase_all(self.storage, self.short_boots_range.clone()).await
+            if let Err(e) = map::<u8, _>(self.storage, self.short_boots_range.clone())
+                .erase_all()
+                .await
             {
                 log::error!("Short-boot count: erase failed: {:?}", e);
                 return;
@@ -207,23 +212,18 @@ mod hardware {
 
         async fn write_short_boots(&mut self, count: u8) -> Result<(), ()> {
             let mut data_buffer = [0u8; 32];
-            store_item(
-                self.storage,
-                self.short_boots_range.clone(),
-                &mut NoCache::new(),
-                &mut data_buffer,
-                &SHORT_BOOTS_KEY,
-                &count,
-            )
-            .await
-            .map_err(|e| {
-                log::error!("Short-boot count: write failed: {:?}", e);
-            })
+            map::<u8, _>(self.storage, self.short_boots_range.clone())
+                .store_item(&mut data_buffer, &SHORT_BOOTS_KEY, &count)
+                .await
+                .map_err(|e| {
+                    log::error!("Short-boot count: write failed: {:?}", e);
+                })
         }
 
         /// Erase every stored bond. The approval and the short-boot count are kept.
         pub(in crate::ble) async fn clear_bonds(&mut self) -> Result<(), ()> {
-            sequential_storage::erase_all(self.storage, self.range.clone())
+            map::<[u8; 6], _>(self.storage, self.range.clone())
+                .erase_all()
                 .await
                 .map_err(|e| {
                     log::error!("BLE store: clear_bonds failed: {:?}", e);
@@ -234,14 +234,9 @@ mod hardware {
         /// error (erased, corrupt or an unknown format), which leaves the bus read-only.
         pub(in crate::ble) async fn load_can_rw_approval(&mut self) -> Option<[u8; 32]> {
             let mut data_buffer = [0u8; ACCESS_BUFFER_BYTES];
-            match fetch_item::<u8, StoredApproval, _>(
-                self.storage,
-                self.approval_range.clone(),
-                &mut NoCache::new(),
-                &mut data_buffer,
-                &APPROVAL_KEY,
-            )
-            .await
+            match map::<u8, _>(self.storage, self.approval_range.clone())
+                .fetch_item::<StoredApproval>(&mut data_buffer, &APPROVAL_KEY)
+                .await
             {
                 Ok(approval) => approval.map(|a| a.0),
                 Err(e) => {
@@ -288,8 +283,9 @@ mod hardware {
             approval: Option<[u8; 32]>,
             validations: &[u8],
         ) -> Result<(), ()> {
-            if let Err(e) =
-                sequential_storage::erase_all(self.storage, self.approval_range.clone()).await
+            if let Err(e) = map::<u8, _>(self.storage, self.approval_range.clone())
+                .erase_all()
+                .await
             {
                 log::error!("CAN approval store: erase failed: {:?}", e);
                 return Err(());
@@ -311,14 +307,9 @@ mod hardware {
             &mut self,
         ) -> heapless::Vec<u8, ACCESS_BUFFER_BYTES> {
             let mut data_buffer = [0u8; ACCESS_BUFFER_BYTES];
-            match fetch_item::<u8, &[u8], _>(
-                self.storage,
-                self.approval_range.clone(),
-                &mut NoCache::new(),
-                &mut data_buffer,
-                &VALIDATIONS_KEY,
-            )
-            .await
+            match map::<u8, _>(self.storage, self.approval_range.clone())
+                .fetch_item::<&[u8]>(&mut data_buffer, &VALIDATIONS_KEY)
+                .await
             {
                 Ok(Some(bytes)) => heapless::Vec::from_slice(bytes).unwrap_or_default(),
                 Ok(None) => heapless::Vec::new(),
@@ -331,25 +322,12 @@ mod hardware {
 
         async fn write_phone_validations(&mut self, validations: &[u8]) -> Result<(), ()> {
             let mut data_buffer = [0u8; ACCESS_BUFFER_BYTES];
+            let mut map = map::<u8, _>(self.storage, self.approval_range.clone());
             let result = if validations.is_empty() {
-                remove_item::<u8, _>(
-                    self.storage,
-                    self.approval_range.clone(),
-                    &mut NoCache::new(),
-                    &mut data_buffer,
-                    &VALIDATIONS_KEY,
-                )
-                .await
+                map.remove_item(&mut data_buffer, &VALIDATIONS_KEY).await
             } else {
-                store_item(
-                    self.storage,
-                    self.approval_range.clone(),
-                    &mut NoCache::new(),
-                    &mut data_buffer,
-                    &VALIDATIONS_KEY,
-                    &validations,
-                )
-                .await
+                map.store_item(&mut data_buffer, &VALIDATIONS_KEY, &validations)
+                    .await
             };
             result.map_err(|e| {
                 log::error!("Phone validations store: write failed: {:?}", e);
@@ -358,28 +336,13 @@ mod hardware {
 
         async fn write_can_rw_approval(&mut self, approval: Option<[u8; 32]>) -> Result<(), ()> {
             let mut data_buffer = [0u8; ACCESS_BUFFER_BYTES];
+            let mut map = map::<u8, _>(self.storage, self.approval_range.clone());
             let result = match approval {
                 Some(digest) => {
-                    store_item(
-                        self.storage,
-                        self.approval_range.clone(),
-                        &mut NoCache::new(),
-                        &mut data_buffer,
-                        &APPROVAL_KEY,
-                        &StoredApproval(digest),
-                    )
-                    .await
+                    map.store_item(&mut data_buffer, &APPROVAL_KEY, &StoredApproval(digest))
+                        .await
                 }
-                None => {
-                    remove_item::<u8, _>(
-                        self.storage,
-                        self.approval_range.clone(),
-                        &mut NoCache::new(),
-                        &mut data_buffer,
-                        &APPROVAL_KEY,
-                    )
-                    .await
-                }
+                None => map.remove_item(&mut data_buffer, &APPROVAL_KEY).await,
             };
             result.map_err(|e| {
                 log::error!("CAN approval store: write failed: {:?}", e);
@@ -390,19 +353,12 @@ mod hardware {
         pub(in crate::ble) async fn load_bonds(&mut self) -> heapless::Vec<BondInformation, 8> {
             let mut bonds = heapless::Vec::new();
             let mut data_buffer = [0u8; 128];
-            let mut cache = NoCache::new();
+            let mut map = map::<[u8; 6], _>(self.storage, self.range.clone());
 
-            match fetch_all_items::<[u8; 6], _, _>(
-                self.storage,
-                self.range.clone(),
-                &mut cache,
-                &mut data_buffer,
-            )
-            .await
-            {
+            match map.fetch_all_items(&mut data_buffer).await {
                 Ok(mut iter) => {
                     while let Ok(Some((_key, bond))) =
-                        iter.next::<[u8; 6], StoredBond>(&mut data_buffer).await
+                        iter.next::<StoredBond>(&mut data_buffer).await
                     {
                         if bonds.push(bond.0).is_err() {
                             log::warn!("BLE store: too many bonds; ignoring the rest");
@@ -428,18 +384,12 @@ mod hardware {
             key.copy_from_slice(&bond.identity.bd_addr.0);
             let mut data_buffer = [0u8; 128];
 
-            store_item(
-                self.storage,
-                self.range.clone(),
-                &mut NoCache::new(),
-                &mut data_buffer,
-                &key,
-                &StoredBond(bond.clone()),
-            )
-            .await
-            .map_err(|e| {
-                log::error!("BLE store: store_bond failed: {:?}", e);
-            })
+            map::<[u8; 6], _>(self.storage, self.range.clone())
+                .store_item(&mut data_buffer, &key, &StoredBond(bond.clone()))
+                .await
+                .map_err(|e| {
+                    log::error!("BLE store: store_bond failed: {:?}", e);
+                })
         }
 
         /// Remove the bond for `peer_addr` from flash (no-op if not found).
@@ -448,17 +398,12 @@ mod hardware {
             key.copy_from_slice(&peer_addr.0);
             let mut data_buffer = [0u8; 128];
 
-            remove_item(
-                self.storage,
-                self.range.clone(),
-                &mut NoCache::new(),
-                &mut data_buffer,
-                &key,
-            )
-            .await
-            .map_err(|e| {
-                log::error!("BLE store: remove_bond failed: {:?}", e);
-            })
+            map::<[u8; 6], _>(self.storage, self.range.clone())
+                .remove_item(&mut data_buffer, &key)
+                .await
+                .map_err(|e| {
+                    log::error!("BLE store: remove_bond failed: {:?}", e);
+                })
         }
     }
 }
@@ -512,7 +457,8 @@ mod tests {
             (None, SecurityLevel::EncryptedAuthenticated),
         ] {
             let bytes = serialize(bond(irk, level));
-            let StoredBond(restored) = StoredBond::deserialize_from(&bytes).unwrap();
+            let (StoredBond(restored), read) = StoredBond::deserialize_from(&bytes).unwrap();
+            assert_eq!(read, 41);
             assert_eq!(restored.ltk.0, 0x0011_2233_4455_6677_8899_AABB_CCDD_EEFF);
             assert_eq!(
                 restored.identity.bd_addr.raw(),
@@ -533,7 +479,8 @@ mod tests {
         assert_eq!(StoredApproval(digest).serialize_into(&mut buf), Ok(33));
         assert_eq!(buf[0], 1);
         assert_eq!(buf[1..33], digest);
-        let StoredApproval(restored) = StoredApproval::deserialize_from(&buf).unwrap();
+        let (StoredApproval(restored), read) = StoredApproval::deserialize_from(&buf).unwrap();
+        assert_eq!(read, 33);
         assert_eq!(restored, digest);
     }
 
