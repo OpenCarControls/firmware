@@ -11,7 +11,9 @@ module.exports = [
   {
     id: 'esp-radio-ble-stack',
     deps: [/^esp-radio$/],
-    message: `**esp-radio**: its BLE controller implements one \`bt-hci\` version, and \`trouble-host\` must use that same one. If this release moves to a newer \`bt-hci\`, remove the \`trouble-host\`/\`bt-hci\` \`ignore\` in \`.github/dependabot.yml\` and bump \`bt-hci\` and \`trouble-host\` in \`boards/esp/Cargo.toml\` in this PR.`,
+    message: `**esp-radio**: lift the matching holds in the \`ignore\` list of \`.github/dependabot.yml\` and move those crates in this PR:
+- If this release implements a newer \`bt-hci\`, bump \`bt-hci\` and \`trouble-host\` to match (\`trouble-host\` must use the \`bt-hci\` version \`esp-radio\` implements).
+- If it needs a newer \`esp-hal\`, move the whole esp-hal release set together: \`esp-hal\` (exact \`=\` pin), \`esp-rtos\`, \`esp-storage\`, \`esp-alloc\`, \`esp-println\`, \`esp-backtrace\` and \`esp-bootloader-esp-idf\`. Check each one's \`esp-hal\` requirement on crates.io.`,
   },
   {
     id: 'ble-host',

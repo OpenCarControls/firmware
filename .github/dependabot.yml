@@ -25,14 +25,35 @@ updates:
         patterns: ["prost", "prost-*"]
       minor-and-patch:
         update-types: ["minor", "patch"]
+    # Holds for crates that can't move until esp-radio does. esp-radio itself
+    # is never held, so its next release still opens a PR, and the reminder
+    # comment on it says to lift these.
     ignore:
       # esp-radio 0.18's BLE controller implements bt-hci 0.8, and trouble-host
-      # 0.7+ needs bt-hci 0.9+. Remove this once an esp-radio release moves to a
-      # newer bt-hci (the reminder comment on its PR says so).
+      # 0.7+ needs bt-hci 0.9+. Lift once an esp-radio release moves to a newer
+      # bt-hci.
       - dependency-name: "trouble-host"
         versions: [">= 0.7"]
       - dependency-name: "bt-hci"
         versions: [">= 0.9"]
+      # The esp-hal 1.2 release set. esp-radio 0.18 needs esp-hal ~1.1, and the
+      # 1.2 set uses newer esp-sync / esp-metadata-generated, so none of it can
+      # be mixed with the 1.1 set. Lift once an esp-radio release supports
+      # esp-hal 1.2, and move the whole set in that PR.
+      - dependency-name: "esp-hal"
+        versions: [">= 1.2"]
+      - dependency-name: "esp-rtos"
+        versions: [">= 0.4"]
+      - dependency-name: "esp-storage"
+        versions: [">= 0.10"]
+      - dependency-name: "esp-alloc"
+        versions: [">= 0.11"]
+      - dependency-name: "esp-println"
+        versions: [">= 0.18"]
+      - dependency-name: "esp-backtrace"
+        versions: [">= 0.20"]
+      - dependency-name: "esp-bootloader-esp-idf"
+        versions: [">= 0.6"]
 
   - package-ecosystem: github-actions
     directory: /
