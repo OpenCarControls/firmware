@@ -39,6 +39,10 @@ These get extra scrutiny, and changes to them need a clear explanation and tests
 
 Messages and transport constants live in the shared [`contracts`](https://github.com/OpenCarControls/contracts) repository (the `contracts/` submodule). Contract changes must follow its append-only rules. Open the contracts PR first, then bump the submodule pin here in its own commit.
 
+## Dependency updates
+
+Dependabot (`.github/dependabot.yml`) opens grouped update PRs monthly, and weekly for the `contracts/` submodule. On each one, `.github/workflows/dependabot-reminders.yml` posts a checklist of the manual steps that update needs, such as files Dependabot can't change or checks CI can't run. When an update turns out to need a manual step, add a rule for it to `.github/scripts/dependabot-reminders.js`. Held-back versions (for example a crate blocked by another crate's requirement) go in the `ignore` list of `.github/dependabot.yml`, with a comment saying when to lift them.
+
 ## Pull requests
 
 *   Keep them small and focused; one topic per PR.

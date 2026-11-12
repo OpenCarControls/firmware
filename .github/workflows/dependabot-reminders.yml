@@ -1,0 +1,85 @@
+# Posts a checklist on Dependabot PRs listing the manual steps their update
+# needs (files Dependabot can't change, hardware checks, release side effects).
+# The rules live in .github/scripts/dependabot-reminders.js.
+#
+# Runs on pull_request_target so the token can comment on Dependabot PRs. It
+# only checks out the base branch and reads the PR's file list through the API;
+# never check out or run the PR's code here.
+name: Dependabot reminders
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  remind:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      # The base branch, so the rules come from main and not from the PR.
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Read Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+
+      - name: Post or update the reminder comment
+        uses: actions/github-script@v8
+        env:
+          DEPENDENCY_NAMES: ${{ steps.meta.outputs.dependency-names }}
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          ECOSYSTEM: ${{ steps.meta.outputs.package-ecosystem }}
+        with:
+          script: |
+            const rules = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/dependabot-reminders.js`);
+            const marker = '<!-- dependabot-reminders -->';
+            const pr = context.payload.pull_request.number;
+            const { owner, repo } = context.repo;
+
+            const deps = (process.env.DEPENDENCY_NAMES || '').split(',').map(s => s.trim()).filter(Boolean);
+            // "version-update:semver-major" -> "major"
+            const updateType = (process.env.UPDATE_TYPE || '').replace(/^.*semver-/, '');
+            const ecosystem = process.env.ECOSYSTEM || '';
+            const files = (await github.paginate(github.rest.pulls.listFiles, { owner, repo, pull_number: pr }))
+              .map(f => f.filename);
+
+            const any = (patterns, values) => (patterns || []).some(p => values.some(v => p.test(v)));
+            const matched = rules.filter(r =>
+              (!r.ecosystems || r.ecosystems.includes(ecosystem)) &&
+              (!r.updateTypes || r.updateTypes.includes(updateType)) &&
+              (!r.deps && !r.files ? true : any(r.deps, deps) || any(r.files, files)));
+
+            core.info(`deps=${deps.join(',')} type=${updateType} ecosystem=${ecosystem}`);
+            core.info(`matched rules: ${matched.map(r => r.id).join(', ') || 'none'}`);
+
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: pr });
+            const existing = comments.find(c => c.user.type === 'Bot' && c.body.includes(marker));
+
+            if (matched.length === 0) {
+              if (existing) await github.rest.issues.deleteComment({ owner, repo, comment_id: existing.id });
+              return;
+            }
+
+            const body = [
+              marker,
+              '### Before merging',
+              '',
+              'This update needs some manual steps that Dependabot can\'t do:',
+              '',
+              ...matched.map(r => `- [ ] ${r.message.trim().replace(/\n/g, '\n  ')}`),
+              '',
+              '<sub>Posted by `.github/workflows/dependabot-reminders.yml`. Rules: `.github/scripts/dependabot-reminders.js`.</sub>',
+            ].join('\n');
+
+            if (existing) {
+              if (existing.body !== body) await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number: pr, body });
+            }
