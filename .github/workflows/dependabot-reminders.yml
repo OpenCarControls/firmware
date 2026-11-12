@@ -21,17 +21,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # The base branch, so the rules come from main and not from the PR.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           sparse-checkout: .github/scripts
           persist-credentials: false
 
       - name: Read Dependabot metadata
         id: meta
-        uses: dependabot/fetch-metadata@v2
+        uses: dependabot/fetch-metadata@v3
 
       - name: Post or update the reminder comment
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           DEPENDENCY_NAMES: ${{ steps.meta.outputs.dependency-names }}
           UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
