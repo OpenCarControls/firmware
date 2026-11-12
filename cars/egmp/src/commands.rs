@@ -3,15 +3,15 @@
 //! reports which commands are available. The table of requirements per command is in
 //! `docs/commands.md`.
 //!
-//! No command is implemented yet (firmware#37 to #42), so for now every command needs only
-//! what all of them need: the device is not read-only and the car was heard from recently.
-//! Each command's PR adds the requirements that command has, here, and its minimum interval
-//! between two runs (`CommandRequirements::min_interval`, none yet).
+//! Every command needs the device not to be read-only and the car to have been heard from
+//! recently. Battery preconditioning adds its own requirements; the other commands aren't
+//! implemented yet (firmware#37 to #41), and each one's PR adds the requirements it has, here,
+//! with its minimum interval between two runs (`CommandRequirements::min_interval`).
 
 use alloc::vec::Vec;
 use core_interface::proto::CommandAvailabilityState as Availability;
 use core_interface::{
-    ActivityClock, CommandKind, CommandRequirements, Rejection, RepeatGuard, Snapshot,
+    ActivityClock, CommandKind, CommandRequirements, Rejection, RepeatGuard, Requirement, Snapshot,
     report_command_availability,
 };
 use embassy_time::Duration;
@@ -49,11 +49,67 @@ pub fn basic_requirements(action: &Action, _state: &EgmpCarState) -> CommandRequ
     }
 }
 
-/// Requirements of an advanced command, see [`basic_requirements`].
-pub fn advanced_requirements(action: &proto::advanced_command::Action) -> CommandRequirements {
+/// Manual preconditioning isn't started on a battery at least this warm: the car would stop it
+/// at once. From wicant-i-precondition, which uses the coldest module; provisional until
+/// checked on our car.
+pub const PRECONDITIONING_MAX_BATTERY_TEMPERATURE_C: f32 = 21.0;
+/// Nor below this state of charge, which wicant-i-precondition also uses.
+pub const PRECONDITIONING_MIN_SOC_PERCENT: u32 = 20;
+/// Between two preconditioning commands, so a double tap doesn't start and stop it at once.
+pub const PRECONDITIONING_MIN_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Requirements of an advanced command, see [`basic_requirements`]. `manual_requested` is
+/// whether the device's own preconditioning session is running.
+pub fn advanced_requirements(
+    action: &proto::advanced_command::Action,
+    state: &EgmpCarState,
+    manual_requested: bool,
+) -> CommandRequirements {
+    use proto::advanced_state::{PowerState, PreconditioningState};
+    let base = CommandRequirements::new(MAX_STATE_AGE);
     match action {
-        proto::advanced_command::Action::BatteryPreconditioningCommand(_) => {
-            CommandRequirements::new(MAX_STATE_AGE)
+        proto::advanced_command::Action::BatteryPreconditioningCommand(command) => {
+            let base = base.min_interval(PRECONDITIONING_MIN_INTERVAL);
+            if !command.enable {
+                return base.require(Requirement::new(
+                    Some(manual_requested),
+                    crate::preconditioning::NOT_ON,
+                    crate::preconditioning::NOT_ON,
+                ));
+            }
+            if manual_requested {
+                // Already on: starting again changes nothing.
+                return base;
+            }
+            base.require(Requirement::new(
+                state.power_state.map(|p| p == PowerState::Ready),
+                "command rejected: the car isn't in Ready",
+                "command rejected: the car's power state is not known yet",
+            ))
+            .require(Requirement::new(
+                state.preconditioning_state.map(|p| {
+                    !matches!(
+                        p,
+                        PreconditioningState::Preparing | PreconditioningState::Heating
+                    )
+                }),
+                "command rejected: the car is already preconditioning the battery on its own",
+                "command rejected: the car's preconditioning state is not known yet",
+            ))
+            .require(Requirement::new(
+                state
+                    .battery_minimum_temperature
+                    .map(|t| t < PRECONDITIONING_MAX_BATTERY_TEMPERATURE_C),
+                "command rejected: the battery is already warm",
+                "command rejected: the battery temperature is not known yet",
+            ))
+            .require(Requirement::new(
+                state
+                    .battery_soc
+                    .map(|soc| soc >= PRECONDITIONING_MIN_SOC_PERCENT),
+                "command rejected: the battery charge is too low",
+                "command rejected: the battery charge is not known yet",
+            ))
         }
     }
 }
@@ -147,12 +203,21 @@ pub fn basic_availability(state: &EgmpCarState, snapshot: &Snapshot) -> Vec<(u32
         .collect()
 }
 
-/// What the app is told about each advanced command, see [`basic_availability`].
-pub fn advanced_availability(snapshot: &Snapshot) -> Vec<(u32, Availability)> {
-    let action = proto::advanced_command::Action::BatteryPreconditioningCommand(
-        proto::BatteryPreconditioningCommand { enable: true },
-    );
-    let accepted = advanced_requirements(&action).check(snapshot).is_ok();
+/// What the app is told about each advanced command, see [`basic_availability`]. Starting
+/// and stopping preconditioning are one command: available when either would be accepted.
+pub fn advanced_availability(
+    state: &EgmpCarState,
+    manual_requested: bool,
+    snapshot: &Snapshot,
+) -> Vec<(u32, Availability)> {
+    let accepted = [true, false].into_iter().any(|enable| {
+        let action = proto::advanced_command::Action::BatteryPreconditioningCommand(
+            proto::BatteryPreconditioningCommand { enable },
+        );
+        advanced_requirements(&action, state, manual_requested)
+            .check(snapshot)
+            .is_ok()
+    });
     alloc::vec![(command_id::BATTERY_PRECONDITIONING, availability(accepted))]
 }
 
@@ -160,9 +225,16 @@ pub fn advanced_availability(snapshot: &Snapshot) -> Vec<(u32, Availability)> {
 /// publishes it to the app. Called about once a second by `state_update_task`.
 pub async fn report_availability() {
     let snapshot = Snapshot::capture(&CAR_ACTIVITY);
-    let basic = basic_availability(&*CAR_STATE.lock().await, &snapshot);
+    let manual_requested = crate::preconditioning::is_requested();
+    let (basic, advanced) = {
+        let state = CAR_STATE.lock().await;
+        (
+            basic_availability(&state, &snapshot),
+            advanced_availability(&state, manual_requested, &snapshot),
+        )
+    };
     report_command_availability(CommandKind::Basic, &basic);
-    report_command_availability(CommandKind::Advanced, &advanced_availability(&snapshot));
+    report_command_availability(CommandKind::Advanced, &advanced);
 }
 
 // ── Admission ─────────────────────────────────────────────────────────────────
@@ -179,9 +251,12 @@ pub async fn admit_basic(action: &Action) -> Result<(), Rejection> {
     )
 }
 
-/// Runs the check for an advanced command against the live gate, then its repeat limit.
-pub fn admit_advanced(action: &proto::advanced_command::Action) -> Result<(), Rejection> {
-    advanced_requirements(action).admit(
+/// Runs the check for an advanced command against the live car state and gate, then its
+/// repeat limit.
+pub async fn admit_advanced(action: &proto::advanced_command::Action) -> Result<(), Rejection> {
+    let manual_requested = crate::preconditioning::is_requested();
+    let requirements = advanced_requirements(action, &*CAR_STATE.lock().await, manual_requested);
+    requirements.admit(
         &Snapshot::capture(&CAR_ACTIVITY),
         &COMMAND_REPEATS,
         (CommandKind::Advanced, advanced_command_id(action)),
@@ -229,8 +304,8 @@ mod tests {
     // ── Requirements ──
 
     #[test]
-    fn every_command_needs_only_the_gate_for_now() {
-        // Per-command requirements arrive with each command (firmware#37 to #42).
+    fn every_basic_command_needs_only_the_gate_for_now() {
+        // Per-command requirements arrive with each command (firmware#37 to #41).
         let state = EgmpCarState::new();
         for action in every_basic_action() {
             assert_eq!(
@@ -238,14 +313,10 @@ mod tests {
                 Ok(())
             );
         }
-        let advanced = proto::advanced_command::Action::BatteryPreconditioningCommand(
-            proto::BatteryPreconditioningCommand { enable: true },
-        );
-        assert_eq!(advanced_requirements(&advanced).check(&open_gate()), Ok(()));
     }
 
     #[test]
-    fn no_command_limits_its_repeats_yet() {
+    fn no_basic_command_limits_its_repeats_yet() {
         // Each command sets its interval in its own PR, from how the car behaves.
         let state = EgmpCarState::new();
         for action in every_basic_action() {
@@ -254,12 +325,130 @@ mod tests {
                 Duration::from_ticks(0)
             );
         }
-        let advanced = proto::advanced_command::Action::BatteryPreconditioningCommand(
-            proto::BatteryPreconditioningCommand { enable: true },
+        assert_eq!(
+            advanced_requirements(&precondition(true), &state, false).min_interval,
+            PRECONDITIONING_MIN_INTERVAL
+        );
+    }
+
+    fn precondition(enable: bool) -> proto::advanced_command::Action {
+        proto::advanced_command::Action::BatteryPreconditioningCommand(
+            proto::BatteryPreconditioningCommand { enable },
+        )
+    }
+
+    /// In Ready, not preconditioning, with a cold battery and enough charge.
+    fn ready_and_cold() -> EgmpCarState {
+        use proto::advanced_state::{PowerState, PreconditioningState};
+        EgmpCarState {
+            power_state: Some(PowerState::Ready),
+            preconditioning_state: Some(PreconditioningState::Off),
+            battery_minimum_temperature: Some(5.0),
+            battery_soc: Some(60),
+            ..EgmpCarState::new()
+        }
+    }
+
+    fn start_check(state: &EgmpCarState) -> Result<(), alloc::string::String> {
+        advanced_requirements(&precondition(true), state, false)
+            .check(&open_gate())
+            .map_err(|r| r.message())
+    }
+
+    #[test]
+    fn preconditioning_starts_in_ready_with_a_cold_battery_and_enough_charge() {
+        use proto::advanced_state::{PowerState, PreconditioningState};
+        assert_eq!(start_check(&ready_and_cold()), Ok(()));
+        let refused = |state: EgmpCarState| start_check(&state).unwrap_err();
+        assert_eq!(
+            refused(EgmpCarState {
+                power_state: Some(PowerState::On),
+                ..ready_and_cold()
+            }),
+            "command rejected: the car isn't in Ready"
         );
         assert_eq!(
-            advanced_requirements(&advanced).min_interval,
-            Duration::from_ticks(0)
+            refused(EgmpCarState {
+                battery_minimum_temperature: Some(21.0),
+                ..ready_and_cold()
+            }),
+            "command rejected: the battery is already warm"
+        );
+        assert_eq!(
+            refused(EgmpCarState {
+                battery_soc: Some(19),
+                ..ready_and_cold()
+            }),
+            "command rejected: the battery charge is too low"
+        );
+        for running in [
+            PreconditioningState::Preparing,
+            PreconditioningState::Heating,
+        ] {
+            assert_eq!(
+                refused(EgmpCarState {
+                    preconditioning_state: Some(running),
+                    ..ready_and_cold()
+                }),
+                "command rejected: the car is already preconditioning the battery on its own"
+            );
+        }
+        assert!(
+            refused(EgmpCarState::new()).contains("not known yet"),
+            "an unknown state fails"
+        );
+    }
+
+    #[test]
+    fn stopping_needs_the_devices_own_session() {
+        let state = ready_and_cold();
+        let stop = |requested| {
+            advanced_requirements(&precondition(false), &state, requested).check(&open_gate())
+        };
+        assert_eq!(stop(true), Ok(()));
+        assert_eq!(
+            stop(false).map_err(|r| r.message()),
+            Err(crate::preconditioning::NOT_ON.into())
+        );
+    }
+
+    #[test]
+    fn starting_a_running_session_needs_nothing_more() {
+        use proto::advanced_state::PreconditioningState;
+        let heating = EgmpCarState {
+            preconditioning_state: Some(PreconditioningState::Heating),
+            battery_minimum_temperature: Some(30.0),
+            ..ready_and_cold()
+        };
+        assert_eq!(
+            advanced_requirements(&precondition(true), &heating, true).check(&open_gate()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn preconditioning_is_unavailable_while_the_car_does_it_on_its_own() {
+        use proto::advanced_state::PreconditioningState;
+        let heating = EgmpCarState {
+            preconditioning_state: Some(PreconditioningState::Heating),
+            ..ready_and_cold()
+        };
+        let available = |state: &EgmpCarState, requested| {
+            avail(
+                &advanced_availability(state, requested, &open_gate()),
+                command_id::BATTERY_PRECONDITIONING,
+            )
+        };
+        assert_eq!(available(&ready_and_cold(), false), Availability::Available);
+        assert_eq!(
+            available(&heating, false),
+            Availability::Unavailable,
+            "the car's own"
+        );
+        assert_eq!(
+            available(&heating, true),
+            Availability::Available,
+            "ours: can stop"
         );
     }
 
@@ -441,7 +630,7 @@ mod tests {
         let list = basic_availability(&EgmpCarState::new(), &open_gate());
         assert!(list.iter().all(|(_, a)| *a == Availability::Available));
         assert_eq!(
-            advanced_availability(&open_gate()),
+            advanced_availability(&ready_and_cold(), false, &open_gate()),
             [(command_id::BATTERY_PRECONDITIONING, Availability::Available)]
         );
     }
@@ -452,7 +641,7 @@ mod tests {
             let basic = basic_availability(&EgmpCarState::new(), &snapshot);
             assert!(basic.iter().all(|(_, a)| *a == Availability::Unavailable));
             assert!(
-                advanced_availability(&snapshot)
+                advanced_availability(&ready_and_cold(), true, &snapshot)
                     .iter()
                     .all(|(_, a)| *a == Availability::Unavailable)
             );

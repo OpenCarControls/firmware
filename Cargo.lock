@@ -572,6 +572,7 @@ dependencies = [
  "embassy-sync 0.7.2",
  "embassy-time",
  "embedded-can",
+ "log",
  "prost",
 ]
 

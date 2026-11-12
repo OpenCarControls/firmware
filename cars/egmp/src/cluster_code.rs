@@ -13,8 +13,12 @@
 //! head unit's own MEDIA_STATUS: forcing a source while the audio is off makes the cluster
 //! flip between the two sources, and the text never shows.
 //!
+//! The same display shows manual battery preconditioning's progress (`preconditioning.rs`)
+//! when no code is being shown.
+//!
 //! Driven by received frames, from `can_rx_task`, so nothing is sent on a sleeping bus.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
@@ -121,11 +125,32 @@ fn code_text(code: &[u8; CODE_LENGTH], dots: usize) -> Vec<u8> {
         .collect()
 }
 
-/// What to show now.
+/// Plain text as the cluster shows it, in UTF-16LE.
+fn plain_text(text: &str) -> Vec<u8> {
+    text.encode_utf16().flat_map(u16::to_le_bytes).collect()
+}
+
+/// Whose text is shown: a new one starts a new popup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Session {
+    /// A phone validation session.
+    Validation(u32),
+    /// A manual preconditioning session.
+    Preconditioning(u32),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Text {
+    /// A validation code, with dots that show it is live.
+    Code([u8; CODE_LENGTH]),
+    Plain(String),
+}
+
+/// What to show now.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Shown {
-    session: u32,
-    code: [u8; CODE_LENGTH],
+    session: Session,
+    text: Text,
     channel: TextChannel,
 }
 
@@ -139,7 +164,7 @@ struct Transfer {
 type ToSend = (u16, [u8; 8]);
 
 pub(crate) struct ClusterCode {
-    session: Option<u32>,
+    session: Option<Session>,
     /// When the next trigger is due, `None` for the next MEDIA_STATUS.
     next_trigger: Option<Instant>,
     triggers_left: u8,
@@ -215,7 +240,11 @@ impl ClusterCode {
         let due = self.next_text.filter(|&at| now >= at)?;
         self.texts_left -= 1;
         self.next_text = (self.texts_left > 0).then(|| due + Duration::from_millis(TEXT_PERIOD_MS));
-        let mut sender = IsoTpSender::new(code_text(&shown.code, self.dots), PADDING);
+        let text = match &shown.text {
+            Text::Code(code) => code_text(code, self.dots),
+            Text::Plain(text) => plain_text(text),
+        };
+        let mut sender = IsoTpSender::new(text, PADDING);
         self.dots = self.dots % TEXTS_PER_REFRESH as usize + 1;
         let frame = sender.first_frame();
         self.transfer = Some(Transfer {
@@ -265,15 +294,26 @@ fn current_text_channel() -> Option<TextChannel> {
     text_channel(MEDIA_SOURCE.lock(Cell::get)?)
 }
 
+/// The validation code while a session shows one, otherwise preconditioning's progress.
 fn shown_now(challenge: Option<ValidationChallenge>) -> Option<Shown> {
-    let challenge = challenge.filter(|c| c.method_id == METHOD_ID)?;
     if core_interface::is_can_read_only() {
         return None;
     }
+    let channel = current_text_channel()?;
+    if let Some(challenge) = challenge.filter(|c| c.method_id == METHOD_ID)
+        && let Some(code) = challenge.code
+    {
+        return Some(Shown {
+            session: Session::Validation(challenge.session),
+            text: Text::Code(code),
+            channel,
+        });
+    }
+    let (session, text) = crate::preconditioning::cluster_text()?;
     Some(Shown {
-        session: challenge.session,
-        code: challenge.code?,
-        channel: current_text_channel()?,
+        session: Session::Preconditioning(session),
+        text: Text::Plain(text),
+        channel,
     })
 }
 
@@ -332,8 +372,8 @@ mod tests {
 
     fn shown(session: u32, channel: TextChannel) -> Shown {
         Shown {
-            session,
-            code: CODE,
+            session: Session::Validation(session),
+            text: Text::Code(CODE),
             channel,
         }
     }
@@ -808,6 +848,35 @@ mod tests {
         core_interface::set_can_dev_write_unlocked(true).unwrap();
         track_cluster_code(MEDIA_STATUS_ID, &MEDIA_STATUS);
         assert!(sent_frame().is_none(), "it doesn't come back");
+    }
+
+    #[test]
+    fn preconditioning_shows_when_no_code_is_shown() {
+        setup();
+        set_ready(true);
+        crate::preconditioning::reset_preconditioning_for_tests();
+        track_cluster_code(MEDIA_STATUS_ID, &MEDIA_STATUS);
+        assert!(shown_now(None).is_none(), "nothing to show");
+
+        crate::preconditioning::request(
+            true,
+            core_interface::CommandAuthorization::for_tests(PHONE),
+        )
+        .unwrap();
+        let shown = shown_now(None).expect("the countdown");
+        assert_eq!(shown.session, Session::Preconditioning(1));
+        assert_eq!(shown.text, Text::Plain("Precond. starting... 70".into()));
+        assert_eq!(shown.channel, AA);
+
+        assert!(start().success);
+        let shown = shown_now(core_interface::current_validation_challenge()).unwrap();
+        assert!(matches!(shown.text, Text::Code(_)), "the code comes first");
+        crate::preconditioning::reset_preconditioning_for_tests();
+    }
+
+    #[test]
+    fn plain_text_is_utf16le() {
+        assert_eq!(plain_text("On"), [b'O', 0, b'n', 0]);
     }
 
     #[test]

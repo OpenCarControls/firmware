@@ -249,6 +249,11 @@ pub const CAN_FILTERS: &[CanFilter] = &[
     }, // MEDIA_STATUS
     CanFilter {
         bus_id: 0,
+        id: Id::Standard(StandardId::new(1261).unwrap()),
+        mask: 0x7FF,
+    }, // NAV_PRECOND_STATUS, copied during manual preconditioning
+    CanFilter {
+        bus_id: 0,
         id: Id::Standard(StandardId::new(0x6B0).unwrap()),
         mask: 0x7F0,
     }, // the cluster's flow control for the media text
@@ -475,6 +480,7 @@ fn track_power(
         r = ready.or(r);
         cell.set((i, r));
         crate::cluster_code::set_ready(r == Some(true));
+        crate::preconditioning::set_ready(r == Some(true));
         let (accessory, ignition) = i?;
         Some(power_state(accessory, ignition, r?))
     })
@@ -580,6 +586,7 @@ pub async fn handle_can_frame(frame: CanFrame) {
     };
     crate::platform::track_platform(id, &frame.data[..frame.dlc as usize]);
     crate::identity::track_identity(id, &frame.data[..frame.dlc as usize]);
+    crate::preconditioning::track_preconditioning(id, &frame.data[..frame.dlc as usize]);
     crate::cluster_code::track_cluster_code(id, &frame.data[..frame.dlc as usize]);
 
     if let Ok(message) = m_can::Messages::from_can_message(id, &frame.data[..frame.dlc as usize]) {
@@ -712,8 +719,9 @@ pub async fn handle_can_frame(frame: CanFrame) {
                 _ => {}
             },
             m_can::Messages::BmsPrecondStatus(m) => {
-                state.preconditioning_state =
-                    Some(preconditioning_state(m.battery_precond_state()));
+                let status = preconditioning_state(m.battery_precond_state());
+                crate::preconditioning::on_status(status);
+                state.preconditioning_state = Some(status);
             }
             m_can::Messages::ClimateTemperature(m) => {
                 // OFF is also sent with the car off; keep the last set temperature then.
@@ -827,6 +835,8 @@ pub async fn handle_can_frame(frame: CanFrame) {
             // - charge_port_state errors and V2L
             _ => {}
         }
+
+        state.is_manual_preconditioning_requested = Some(crate::preconditioning::is_requested());
 
         // Publishing is left to `state_update_task`, which rate-limits it; the CAN path
         // must never block on the outbound state channel.
