@@ -27,7 +27,7 @@ jobs:
       releases: ${{ steps.tag.outputs.releases }}
       has_releases: ${{ steps.tag.outputs.has_releases }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0   # full history needed for git log / git tag
 
@@ -203,7 +203,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: refs/tags/${{ matrix.tag }}
@@ -219,7 +219,7 @@ jobs:
           targets: riscv32imc-unknown-none-elf,riscv32imac-unknown-none-elf
 
       - name: Install Rust toolchain (Xtensa / ESP)
-        uses: esp-rs/xtensa-toolchain@v1.6
+        uses: esp-rs/xtensa-toolchain@v1.7
         with:
           buildtargets: esp32s3
         env:
