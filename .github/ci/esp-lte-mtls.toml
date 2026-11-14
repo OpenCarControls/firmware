@@ -1,0 +1,118 @@
+# CI only: an ESP32-S3 on LTE with MQTT over mTLS, so the TLS code (the `mqtt-tls`
+# feature, off in the example config) is linted and built on Xtensa. ci.yml makes
+# throwaway certificates in /tmp/mqtt-certs first.
+# ==============================================
+#    OPEN CAR INTERFACE - BUILD CONFIGURATION
+# ==============================================
+
+[target]
+# Optional: Inherit hardware configuration from a profile in `hardware-profiles/`
+# Any settings defined in the `[hardware]` section below will override the profile.
+hardware_profile = "lilygo-t-sim7670g-s3"
+
+# Select which board family you want to use. See the available boards in `boards/`
+# (This is automatically set by the hardware_profile if one is used)
+# board = "esp"
+
+# Select which platform (vehicle crate) you want to use. See the available platforms in `cars/`
+platform = "virtual-car"
+
+# ===================================
+#    BOARD SPECIFIC CONFIGURATIONS
+# ===================================
+# When using a `hardware_profile` above, you can leave these sections commented out 
+# unless you specifically want to override a value from the profile.
+
+# [hardware.esp]
+# mcu = "esp32c3"
+
+# A cellular modem on a UART (see docs/lte.md). Hardware profiles with a modem set this.
+# [hardware.esp.modem]
+# kind = "sim7670g"
+# uart_tx_pin = 11
+# uart_rx_pin = 10
+# pwrkey_pin = 18
+# reset_pin = 17
+# dtr_pin = 9
+
+[hardware.esp.ble]
+device_name = "OpenCar"
+pairing_button_hold_s = 3
+max_bonded_phones = 8
+controller_lease_ttl_s = 15
+
+# The LilyGO board has no CAN transceiver: any free GPIOs do for a build.
+[[hardware.esp.can_buses]]
+interface = "twai"
+tx_pin = 5
+rx_pin = 6
+
+# [hardware.pc]
+# Where the owner's CAN read-write approval is kept (the ESP keeps it in flash).
+# can_rw_approval_file = "/tmp/opencar-can-rw-approval.txt"
+# Where the phones validated in the car are kept (the ESP keeps them in flash).
+# phone_validations_file = "/tmp/opencar-phone-validations.txt"
+
+[hardware.pc.ble]
+device_name = "OpenCar"
+# The debug HTTP server has no authentication, so it only listens on localhost by default.
+# Use "0.0.0.0" to reach it from a phone, an emulator or from outside the dev container.
+http_bind = "127.0.0.1"
+http_port = 4242
+max_bonded_phones = 8
+paired_phones_file = "/tmp/opencar-paired-phones.txt"
+
+# CAN bus definitions — order determines bus_id (0-based).
+# Each entry maps to a SocketCAN network interface (real or virtual).
+[[hardware.pc.can_buses]]
+interface = "vcan0"
+
+# Development only. start_simulation starts the vehicle's state simulation at boot (the
+# virtual car drives a 100 s cycle), on any board. Needs a --debug build; refused in
+# release and --production builds.
+# [debug]
+# start_simulation = true
+
+# ===========================
+#    NETWORK CONFIGURATION
+# ===========================
+
+[network.wifi]
+enabled = false
+ssid = "YourSSID"
+password = "YourPassword"
+
+# LTE uplink instead of WiFi (one uplink per build: set [network.wifi].enabled = false).
+# Needs a board with a modem, e.g. hardware_profile = "lilygo-t-sim7670g-s3". See docs/lte.md.
+[network.lte]
+enabled = true
+apn = "your.carrier.apn"
+
+# SavvyCAN logger: streams every CAN frame to SavvyCAN over WiFi (add a "Network
+# connection" in SavvyCAN's Connection > Open Connection Window, type GVRET, this
+# device's IP and `port`). While SavvyCAN is connected the buses are read-only and the
+# vehicle receives no frames. The port has no authentication, so keep it off unless
+# you are reverse engineering a car on a network you trust.
+[network.can_logger]
+enabled = false
+port = 23
+
+[network.mqtt]
+# Use mqtt:// for basic auth (plain TCP). Use mqtts:// for mTLS.
+broker_url = "mqtts://broker.example.com"
+# Names this device's MQTT topics, and the app learns it over BLE: give each device its own.
+client_id = "dev-car"
+
+# Specify the type of authentication to the broker.
+# - `basic` is for username/password combo (no certs needed)
+# - `mtls` is for using mTLS with certificates
+auth_mode = "mtls"
+
+# Basic authentication configuration
+username = "user"
+password = "password"
+
+# mTLS authentication configuration (only used when auth_mode = "mtls")
+ca_cert_file = "/tmp/mqtt-certs/ca.pem"
+client_cert_file = "/tmp/mqtt-certs/device.pem"
+client_key_file = "/tmp/mqtt-certs/device.key"

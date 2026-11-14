@@ -1,7 +1,7 @@
 use embassy_executor::Spawner;
 
 const PLATFORM_ID: u32 = {PLATFORM_ID};
-{MTLS_CERTS}
+{MQTT_TLS}
 {NETWORK_CONSTANTS}
 
 #[embassy_executor::main]

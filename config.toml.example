@@ -100,21 +100,25 @@ enabled = false
 port = 23
 
 [network.mqtt]
-# Use mqtt:// for basic auth (plain TCP). Use mqtts:// for mTLS.
+# mqtts:// is MQTT over TLS (port 8883 by default): the broker's certificate is checked
+# against ca_cert_file and its name. mqtt:// is plain TCP (port 1883): state and the
+# password travel unencrypted, so only use it on a network you trust. A broker on the
+# internet (LTE) should use mqtts:// with auth_mode = "mtls". See docs/mqtt-tls.md.
 broker_url = "mqtt://192.168.0.100:1883"
 # Names this device's MQTT topics, and the app learns it over BLE: give each device its own.
 client_id = "dev-car"
 
-# Specify the type of authentication to the broker.
-# - `basic` is for username/password combo (no certs needed)
-# - `mtls` is for using mTLS with certificates
+# How the device authenticates to the broker:
+# - `basic`: username and password (inside TLS with mqtts://)
+# - `mtls`: the client certificate and key below; needs mqtts://. No password is sent.
 auth_mode = "basic"
 
-# Basic authentication configuration
+# Basic authentication (auth_mode = "basic")
 username = "user"
 password = "password"
 
-# mTLS authentication configuration (only used when auth_mode = "mtls")
-ca_cert_file = "certs/ca.pem"
-client_cert_file = "certs/client_cert.pem"
-client_key_file = "certs/client_key.pem"
+# TLS (mqtts://). PEM files, relative to the firmware directory (certs/ is gitignored)
+# or absolute. They are compiled into the image.
+ca_cert_file = "certs/ca.pem"               # any mqtts:// URL
+client_cert_file = "certs/client_cert.pem"  # auth_mode = "mtls" only
+client_key_file = "certs/client_key.pem"    # auth_mode = "mtls" only, unencrypted
