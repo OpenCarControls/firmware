@@ -66,6 +66,12 @@ paired_phones_file = "/tmp/opencar-paired-phones.txt"
 [[hardware.pc.can_buses]]
 interface = "vcan0"
 
+# Development only. start_simulation starts the vehicle's state simulation at boot (the
+# virtual car drives a 100 s cycle), on any board. Needs a --debug build; refused in
+# release and --production builds.
+# [debug]
+# start_simulation = true
+
 # ===========================
 #    NETWORK CONFIGURATION
 # ===========================

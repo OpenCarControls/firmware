@@ -32,7 +32,7 @@ cargo xtask build                          # build with the default config.toml
 cargo xtask build path/to/config.toml      # build with a custom config file
 cargo xtask build --board pc               # override the board (pc | esp)
 cargo xtask build --board esp --debug      # unoptimised, for the VS Code probe-rs debugger
-cargo xtask run                            # run (PC board only)
+cargo xtask run                            # run (PC board only); add --debug for the vehicle simulation
 cargo xtask flash --port /dev/ttyACM0      # build and flash (ESP)
 cargo xtask clippy                         # run clippy on the generated app crate
 cargo xtask test                           # run all host tests
