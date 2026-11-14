@@ -1,11 +1,12 @@
 //! WiFi stack initialisation and MQTT driver for the ESP32 board.
 //!
 //! `init_wifi` brings up the ESP radio WiFi peripheral and creates the `embassy-net` stack,
-//! spawning an internal connection-management task that reconnects automatically.
+//! spawning an internal connection-management task that reconnects automatically. The
+//! LTE uplink (`modem::init_lte`) creates the same kind of stack over PPP instead.
 //!
-//! `mqtt_driver_task` connects to the MQTT broker over TCP, subscribes to the command
-//! topic, and bridges the `MQTT_RX_CHANNEL` / `MQTT_TX_CHANNEL` channel pair.
-//! It reconnects from scratch on any session failure.
+//! `mqtt_driver_task` connects to the MQTT broker over TCP on whichever stack it is
+//! given, subscribes to the command topic, and bridges the `MQTT_RX_CHANNEL` /
+//! `MQTT_TX_CHANNEL` channel pair. It reconnects from scratch on any session failure.
 
 #[cfg(feature = "hardware")]
 mod hardware {
@@ -13,7 +14,7 @@ mod hardware {
     use alloc::vec::Vec;
 
     use core_interface::{MQTT_RX_CHANNEL, MQTT_STATE_TX, MQTT_TX_CHANNEL, Transport, proto};
-    use embassy_net::{Runner, Stack, StackResources, tcp::TcpSocket};
+    use embassy_net::{Runner, Stack, StackResources, dns::DnsQueryType, tcp::TcpSocket};
     use esp_radio::wifi::sta::StationConfig;
     use esp_radio::wifi::{
         Config as WifiModeConfig, ControllerConfig as WifiControllerConfig,
@@ -32,12 +33,12 @@ mod hardware {
         types::{MqttBinary, MqttString, TopicFilter, TopicName},
     };
 
-    // 1 socket for the MQTT TCP connection + 1 for the SavvyCAN CAN logger + 2 for
-    // smoltcp internals (DHCP, ARP).
-    const NET_RESOURCES_SOCKETS: usize = 4;
+    // 1 socket for the MQTT TCP connection + 1 for the SavvyCAN CAN logger + 1 for DNS
+    // + 2 for smoltcp internals (DHCP, ARP).
+    pub(crate) const NET_RESOURCES_SOCKETS: usize = 5;
 
-    /// The concrete WiFi stack type produced by `init_wifi`.
-    pub type WifiStack = Stack<'static>;
+    /// A network stack, over WiFi (`init_wifi`) or LTE (`init_lte`).
+    pub type NetStack = Stack<'static>;
 
     /// Internal task: drives the smoltcp network stack.
     #[embassy_executor::task]
@@ -91,11 +92,11 @@ mod hardware {
         wifi_peri: esp_hal::peripherals::WIFI<'static>,
         ssid: &'static str,
         password: &'static str,
-    ) -> &'static WifiStack {
+    ) -> &'static NetStack {
         use static_cell::StaticCell;
 
         static RESOURCES: StaticCell<StackResources<NET_RESOURCES_SOCKETS>> = StaticCell::new();
-        static STACK: StaticCell<WifiStack> = StaticCell::new();
+        static STACK: StaticCell<NetStack> = StaticCell::new();
 
         let (controller, interfaces) =
             esp_radio::wifi::new(wifi_peri, WifiControllerConfig::default())
@@ -236,11 +237,11 @@ mod hardware {
         }
     }
 
-    /// Public MQTT driver task. Waits for DHCP, opens a TCP connection to the
+    /// Public MQTT driver task. Waits for the network, resolves the broker, opens a TCP connection to the
     /// broker, runs the session, and reconnects on any failure.
     #[embassy_executor::task]
     pub async fn mqtt_driver_task(
-        stack: &'static WifiStack,
+        stack: &'static NetStack,
         broker_host: &'static str,
         broker_port: u16,
         client_id: &'static str,
@@ -266,14 +267,12 @@ mod hardware {
             let mut socket = TcpSocket::new(*stack, &mut rx_buffer, &mut tx_buffer);
             socket.set_timeout(Some(embassy_time::Duration::from_secs(30)));
 
-            let addr: embassy_net::IpAddress = match broker_host.parse() {
-                Ok(ip) => ip,
-                Err(_) => {
-                    log::error!(
-                        "MQTT: broker_host '{}' is not a numeric IP - DNS not yet supported",
-                        broker_host
-                    );
-                    Timer::after(Duration::from_secs(30)).await;
+            // Numeric addresses are returned as they are, without a query.
+            let addr = match stack.dns_query(broker_host, DnsQueryType::A).await {
+                Ok(addrs) if !addrs.is_empty() => addrs[0],
+                Ok(_) | Err(_) => {
+                    log::warn!("MQTT: can't resolve '{}', retrying in 10s", broker_host);
+                    Timer::after(Duration::from_secs(10)).await;
                     continue;
                 }
             };
@@ -302,7 +301,7 @@ mod hardware {
     /// CAN buses to it until it disconnects. The protocol and session logic live in
     /// `core-interface`.
     #[embassy_executor::task]
-    pub async fn can_logger_task(stack: &'static WifiStack, port: u16, num_buses: u8) {
+    pub async fn can_logger_task(stack: &'static NetStack, port: u16, num_buses: u8) {
         use embassy_time::{Duration, Timer};
 
         let mut rx_buffer = [0u8; 1024];

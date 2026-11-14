@@ -106,7 +106,15 @@ impl Builder {
 }
 
 impl TargetBuilder for Builder {
-    fn validate(&self, _config: &Config) {
+    fn validate(&self, config: &Config) {
+        if config.network.lte.enabled {
+            eprintln!(
+                "\u{274c} [network.lte] is for boards with a modem the firmware drives. On the PC \
+                 board the OS brings LTE up (e.g. ModemManager) and the firmware uses it like any \
+                 network: set [network.lte].enabled = false."
+            );
+            std::process::exit(1);
+        }
         if cfg!(windows) {
             println!("Warning: Running PC simulator on Windows. Native SocketCAN will not be available.");
         }
@@ -294,7 +302,7 @@ impl TargetBuilder for Builder {
             .replace("{NETWORK_CONSTANTS}", &network_constants)
             .replace("{MQTT_DRIVER_SPAWN}", &mqtt_driver_spawn)
             .replace("{CAN_LOGGER_SPAWN}", &can_logger_spawn)
-            .replace("{BUILD_KIND_INIT}", crate::build_kind_init(config));
+            .replace("{BUILD_KIND_INIT}", &crate::build_kind_init(config));
 
         fs::create_dir_all(".app_build/src").expect("Failed to create .app_build/src");
         fs::write(".app_build/Cargo.toml", cargo_toml).expect("Failed to write .app_build/Cargo.toml");
@@ -307,9 +315,9 @@ impl TargetBuilder for Builder {
         self.execute_cargo_command("build", release);
     }
 
-    fn run(&self, _config: &Config) {
+    fn run(&self, _config: &Config, release: bool) {
         println!("Running the PC simulator natively...");
-        self.execute_cargo_command("run", true);
+        self.execute_cargo_command("run", release);
     }
 
     fn clippy(&self, _config: &Config) {

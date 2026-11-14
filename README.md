@@ -32,7 +32,7 @@ cargo xtask build                          # build with the default config.toml
 cargo xtask build path/to/config.toml      # build with a custom config file
 cargo xtask build --board pc               # override the board (pc | esp)
 cargo xtask build --board esp --debug      # unoptimised, for the VS Code probe-rs debugger
-cargo xtask run                            # run (PC board only)
+cargo xtask run                            # run (PC board only); add --debug for the vehicle simulation
 cargo xtask flash --port /dev/ttyACM0      # build and flash (ESP)
 cargo xtask clippy                         # run clippy on the generated app crate
 cargo xtask test                           # run all host tests
@@ -58,7 +58,7 @@ broker_url = "mqtt://192.168.0.100:1883"
 auth_mode  = "basic"                       # only "basic" works for now; "mtls" is not implemented yet
 ```
 
-Per-board settings live under `[hardware.esp]` / `[hardware.pc]`, including CAN buses (`[[hardware.<board>.can_buses]]`, where order determines `bus_id`) and BLE options. The `board` and `platform` values can be overridden with `--board` and `--platform`. To reverse engineer a car, `[network.can_logger] enabled = true` streams the CAN buses to SavvyCAN over WiFi (see [CAN bus](docs/can.md#savvycan-logging)). Hardware profiles in `hardware-profiles/` are ready-made pin/CAN setups for specific devices; anything set in `config.toml`, including `board`, wins over the profile.
+To reach the broker over a cellular modem instead of WiFi, disable `[network.wifi]` and set the SIM's APN in `[network.lte]` (see [LTE](docs/lte.md)). Per-board settings live under `[hardware.esp]` / `[hardware.pc]`, including CAN buses (`[[hardware.<board>.can_buses]]`, where order determines `bus_id`) and BLE options. The `board` and `platform` values can be overridden with `--board` and `--platform`. To reverse engineer a car, `[network.can_logger] enabled = true` streams the CAN buses to SavvyCAN over WiFi (see [CAN bus](docs/can.md#savvycan-logging)). Hardware profiles in `hardware-profiles/` are ready-made pin/CAN setups for specific devices; anything set in `config.toml`, including `board`, wins over the profile.
 
 ### Switching boards in the IDE
 
@@ -105,7 +105,7 @@ The firmware is a Cargo workspace of independently compiled crates that cooperat
 | `cars/*` | Vehicle logic: CAN decoding, command handling, state encoding |
 | `xtask` | Build orchestrator: reads `config.toml`, generates `.app_build/`, invokes cargo |
 
-Details: [Architecture](docs/architecture.md) · [BLE](docs/ble.md) · [CAN bus](docs/can.md) · [Vehicle commands](docs/commands.md)
+Details: [Architecture](docs/architecture.md) · [BLE](docs/ble.md) · [CAN bus](docs/can.md) · [LTE](docs/lte.md) · [Vehicle commands](docs/commands.md)
 
 ## 📂 Project Structure
 

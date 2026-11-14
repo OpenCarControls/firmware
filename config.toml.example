@@ -23,6 +23,15 @@ platform = "virtual-car"
 # [hardware.esp]
 # mcu = "esp32c3"
 
+# A cellular modem on a UART (see docs/lte.md). Hardware profiles with a modem set this.
+# [hardware.esp.modem]
+# kind = "sim7670g"
+# uart_tx_pin = 11
+# uart_rx_pin = 10
+# pwrkey_pin = 18
+# reset_pin = 17
+# dtr_pin = 9
+
 [hardware.esp.ble]
 device_name = "OpenCar"
 pairing_button_hold_s = 3
@@ -57,6 +66,12 @@ paired_phones_file = "/tmp/opencar-paired-phones.txt"
 [[hardware.pc.can_buses]]
 interface = "vcan0"
 
+# Development only. start_simulation starts the vehicle's state simulation at boot (the
+# virtual car drives a 100 s cycle), on any board. Needs a --debug build; refused in
+# release and --production builds.
+# [debug]
+# start_simulation = true
+
 # ===========================
 #    NETWORK CONFIGURATION
 # ===========================
@@ -65,6 +80,15 @@ interface = "vcan0"
 enabled = true
 ssid = "YourSSID"
 password = "YourPassword"
+
+# LTE uplink instead of WiFi (one uplink per build: set [network.wifi].enabled = false).
+# Needs a board with a modem, e.g. hardware_profile = "lilygo-t-sim7670g-s3". See docs/lte.md.
+# [network.lte]
+# enabled = true
+# apn = "your.carrier.apn"
+# username = ""
+# password = ""
+# sim_pin = ""    # only for a SIM with a PIN; a wrong one is tried once per boot
 
 # SavvyCAN logger: streams every CAN frame to SavvyCAN over WiFi (add a "Network
 # connection" in SavvyCAN's Connection > Open Connection Window, type GVRET, this

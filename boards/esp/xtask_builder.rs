@@ -90,13 +90,162 @@ fn mcu_to_target_arch(mcu: &str) -> &'static str {
     }
 }
 
+/// A cellular modem on a UART (`[hardware.esp.modem]`): how it is wired. The SIM
+/// settings are in `[network.lte]`. See docs/lte.md.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EspModemConfig {
+    /// The modem model, e.g. "sim7670g".
+    kind: String,
+    /// ESP pin that sends to the modem (the modem's RXD).
+    uart_tx_pin: u8,
+    /// ESP pin that receives from the modem (the modem's TXD).
+    uart_rx_pin: u8,
+    #[serde(default = "default_modem_baudrate")]
+    baudrate: u32,
+    pwrkey_pin: Option<u8>,
+    /// Level that presses the power key at the ESP pin (a board transistor may invert it).
+    #[serde(default = "default_level_high")]
+    pwrkey_level: String,
+    reset_pin: Option<u8>,
+    #[serde(default = "default_level_low")]
+    reset_level: String,
+    /// Switches the modem's supply, on boards that can.
+    power_enable_pin: Option<u8>,
+    #[serde(default = "default_level_high")]
+    power_enable_level: String,
+    /// DTR, held low so the modem stays awake.
+    dtr_pin: Option<u8>,
+    /// The ring indicator. Reserved for waking the ESP from sleep; not used yet.
+    #[allow(dead_code)]
+    ring_pin: Option<u8>,
+}
+
+fn default_modem_baudrate() -> u32 {
+    115_200
+}
+
+fn default_level_high() -> String {
+    "high".into()
+}
+
+fn default_level_low() -> String {
+    "low".into()
+}
+
+/// The modem models board-esp drives, by their `kind` name.
+fn modem_kind_ident(kind: &str) -> Result<&'static str, String> {
+    match kind {
+        "sim7670g" => Ok("board_esp::ModemKind::Sim7670g"),
+        _ => Err(format!(
+            "[hardware.esp.modem].kind = \"{kind}\" is not supported. Supported: \"sim7670g\"."
+        )),
+    }
+}
+
+/// `"high"` → true, `"low"` → false.
+fn parse_level(field: &str, level: &str) -> Result<bool, String> {
+    match level {
+        "high" => Ok(true),
+        "low" => Ok(false),
+        _ => Err(format!("[hardware.esp.modem].{field} must be \"high\" or \"low\", got \"{level}\"")),
+    }
+}
+
+/// The network the MQTT driver runs on. One per build for now (see docs/lte.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Uplink {
+    None,
+    Wifi,
+    Lte,
+}
+
+fn select_uplink(
+    wifi_enabled: bool,
+    lte_enabled: bool,
+    has_modem: bool,
+    can_logger_enabled: bool,
+) -> Result<Uplink, String> {
+    let uplink = match (wifi_enabled, lte_enabled) {
+        (true, true) => {
+            return Err("[network.wifi] and [network.lte] are both enabled; a build has one \
+                        uplink for now. Set [network.wifi].enabled = false to use LTE."
+                .into());
+        }
+        (true, false) => Uplink::Wifi,
+        (false, true) => Uplink::Lte,
+        (false, false) => Uplink::None,
+    };
+    if uplink == Uplink::Lte && !has_modem {
+        return Err("[network.lte].enabled = true needs a modem: this board has no \
+                    [hardware.esp.modem] (use a hardware profile with one, or add it)."
+            .into());
+    }
+    if can_logger_enabled && uplink != Uplink::Wifi {
+        return Err("[network.can_logger].enabled = true needs [network.wifi].enabled = true: \
+                    SavvyCAN connects to the device, which a carrier network doesn't allow."
+            .into());
+    }
+    Ok(uplink)
+}
+
+/// Checks `[network.lte]` with the rules the firmware applies to what it sends the modem.
+fn check_lte_settings(lte: &crate::LteConfig) -> Result<(), String> {
+    let apn = lte
+        .apn
+        .as_deref()
+        .ok_or("[network.lte].apn is required when [network.lte].enabled = true (your carrier's APN)")?;
+    // The firmware quotes it in AT+CGDCONT, which can't escape anything.
+    if apn.len() > 100 || !apn.bytes().all(|b| (0x20..0x7f).contains(&b) && b != b'"') {
+        return Err("[network.lte].apn must be printable ASCII without '\"', at most 100 characters".into());
+    }
+    let pin = &lte.sim_pin;
+    if !pin.is_empty() && (!(4..=8).contains(&pin.len()) || !pin.bytes().all(|b| b.is_ascii_digit())) {
+        return Err("[network.lte].sim_pin must be 4 to 8 digits, or empty for a SIM without a PIN".into());
+    }
+    Ok(())
+}
+
+/// The generated `main.rs` code that opens the modem's UART and starts the LTE stack
+/// as `net_stack`.
+fn lte_init_code(modem: &EspModemConfig) -> Result<String, String> {
+    let kind = modem_kind_ident(&modem.kind)?;
+    let pin = |field: &str, pin: Option<u8>, active_high: bool| match pin {
+        Some(p) => format!(
+            "        {field}: Some(board_esp::ControlPin::new(peripherals.GPIO{p}, {active_high})),\n"
+        ),
+        None => format!("        {field}: None,\n"),
+    };
+    let mut code = String::new();
+    code.push_str("    let net_stack = board_esp::init_lte(\n        &spawner,\n");
+    code.push_str(&format!(
+        "        board_esp::new_modem_uart(peripherals.UART1, peripherals.GPIO{}, peripherals.GPIO{}, {}),\n",
+        modem.uart_tx_pin, modem.uart_rx_pin, modem.baudrate
+    ));
+    code.push_str("        board_esp::ModemPins {\n");
+    code.push_str(&pin("    power_enable", modem.power_enable_pin, parse_level("power_enable_level", &modem.power_enable_level)?));
+    code.push_str(&pin("    pwrkey", modem.pwrkey_pin, parse_level("pwrkey_level", &modem.pwrkey_level)?));
+    code.push_str(&pin("    reset", modem.reset_pin, parse_level("reset_level", &modem.reset_level)?));
+    // DTR is asserted low, as on the modem's own pin.
+    code.push_str(&pin("    dtr", modem.dtr_pin, false));
+    code.push_str("        },\n");
+    code.push_str(&format!(
+        "        board_esp::LteSettings {{\n\
+         \x20           kind: {kind},\n\
+         \x20           apn: LTE_APN,\n\
+         \x20           username: LTE_USERNAME,\n\
+         \x20           password: LTE_PASSWORD,\n\
+         \x20           sim_pin: LTE_SIM_PIN,\n\
+         \x20       }},\n    );\n"
+    ));
+    Ok(code)
+}
+
 #[derive(Deserialize)]
 struct EspConfig {
     mcu: String,
-    #[allow(dead_code)]
-    modem_tx_pin: Option<u8>,
-    #[allow(dead_code)]
-    modem_rx_pin: Option<u8>,
+    #[serde(default)]
+    modem: Option<EspModemConfig>,
     #[serde(default)]
     ble: EspBleConfig,
     #[serde(default)]
@@ -447,7 +596,18 @@ impl TargetBuilder for Builder {
             .unwrap_or(transport.ble.service.name.as_str());
         let ble_device_name = escape_rust_string(ble_device_name);
 
-        let wifi_enabled = config.network.wifi.enabled;
+        let lte = &config.network.lte;
+        let uplink = select_uplink(
+            config.network.wifi.enabled,
+            lte.enabled,
+            esp_hw.modem.is_some(),
+            config.network.can_logger.enabled,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("\u{274c} {e}");
+            exit(1);
+        });
+        let wifi_enabled = uplink == Uplink::Wifi;
         let wifi_ssid = if wifi_enabled {
             config.network.wifi.ssid.as_deref().unwrap_or_else(|| {
                 eprintln!("\u{274c} [network.wifi].ssid is required for the ESP board when [network.wifi].enabled=true");
@@ -491,10 +651,33 @@ impl TargetBuilder for Builder {
             },
         );
 
-        let network_constants = if wifi_enabled {
+        let uplink_constants = match uplink {
+            Uplink::Wifi => format!(
+                "const WIFI_SSID: &str = \"{}\";\nconst WIFI_PASSWORD: &str = \"{}\";\n",
+                wifi_ssid, wifi_password
+            ),
+            Uplink::Lte => {
+                check_lte_settings(lte).unwrap_or_else(|e| {
+                    eprintln!("\u{274c} {e}");
+                    exit(1);
+                });
+                format!(
+                    "const LTE_APN: &str = \"{}\";\n\
+                     const LTE_USERNAME: &str = \"{}\";\n\
+                     const LTE_PASSWORD: &str = \"{}\";\n\
+                     const LTE_SIM_PIN: &str = \"{}\";\n",
+                    escape_rust_string(lte.apn.as_deref().unwrap_or("")),
+                    escape_rust_string(&lte.username),
+                    escape_rust_string(&lte.password),
+                    escape_rust_string(&lte.sim_pin),
+                )
+            }
+            Uplink::None => String::new(),
+        };
+
+        let network_constants = if uplink != Uplink::None {
             format!(
-                "const WIFI_SSID: &str = \"{ssid}\";\n\
-                 const WIFI_PASSWORD: &str = \"{wifi_pw}\";\n\
+                "{uplink}\
                  const MQTT_BROKER_HOST: &str = \"{host}\";\n\
                  const MQTT_BROKER_PORT: u16 = {port};\n\
                  const MQTT_CLIENT_ID: &str = \"{cid}\";\n\
@@ -503,8 +686,7 @@ impl TargetBuilder for Builder {
                  const MQTT_USERNAME: &str = \"{user}\";\n\
                  const MQTT_PASSWORD: &str = \"{pass}\";\n\
                  {ble}",
-                ssid = wifi_ssid,
-                wifi_pw = wifi_password,
+                uplink = uplink_constants,
                 host = broker_host,
                 port = broker_port,
                 cid = client_id,
@@ -518,17 +700,23 @@ impl TargetBuilder for Builder {
             ble_constants
         };
 
-        let network_hardware_init = if wifi_enabled {
-            concat!(
-                "    let wifi_stack = board_esp::init_wifi(\n",
+        let network_hardware_init = match uplink {
+            Uplink::Wifi => concat!(
+                "    let net_stack = board_esp::init_wifi(\n",
                 "        &spawner,\n",
                 "        peripherals.WIFI,\n",
                 "        WIFI_SSID,\n",
                 "        WIFI_PASSWORD,\n",
                 "    );\n",
-            ).to_string()
-        } else {
-            String::new()
+            ).to_string(),
+            Uplink::Lte => {
+                let modem = esp_hw.modem.as_ref().expect("select_uplink checked the modem");
+                lte_init_code(modem).unwrap_or_else(|e| {
+                    eprintln!("\u{274c} {e}");
+                    exit(1);
+                })
+            }
+            Uplink::None => String::new(),
         };
 
         let ble_driver_spawn = concat!(
@@ -541,12 +729,12 @@ impl TargetBuilder for Builder {
             "        ).unwrap());\n",
         ).to_string();
 
-        let mqtt_driver_spawn = if wifi_enabled {
+        let mqtt_driver_spawn = if uplink != Uplink::None {
             concat!(
                 "    core_interface::set_mqtt_client_id(MQTT_CLIENT_ID);\n",
                 "    spawner\n",
                 "        .spawn(board_esp::mqtt_driver_task(\n",
-                "            wifi_stack,\n",
+                "            net_stack,\n",
                 "            MQTT_BROKER_HOST,\n",
                 "            MQTT_BROKER_PORT,\n",
                 "            MQTT_CLIENT_ID,\n",
@@ -557,18 +745,15 @@ impl TargetBuilder for Builder {
                 "        ).unwrap());\n",
             ).to_string()
         } else {
-            "    // WiFi disabled: MQTT driver not spawned.\n".to_string()
+            "    // No uplink (WiFi and LTE disabled): MQTT driver not spawned.\n".to_string()
         };
 
         let can_logger = &config.network.can_logger;
+        // `select_uplink` only allows the logger on WiFi.
         let can_logger_spawn = if can_logger.enabled {
-            if !wifi_enabled {
-                eprintln!("\u{274c} [network.can_logger].enabled=true needs [network.wifi].enabled=true");
-                exit(1);
-            }
             format!(
                 "    spawner\n\
-                 \x20       .spawn(board_esp::can_logger_task(wifi_stack, {port}, {buses}).unwrap());\n",
+                 \x20       .spawn(board_esp::can_logger_task(net_stack, {port}, {buses}).unwrap());\n",
                 port = can_logger.port,
                 buses = can_bus_count,
             )
@@ -679,7 +864,7 @@ impl TargetBuilder for Builder {
             .replace("{MQTT_DRIVER_SPAWN}", &mqtt_driver_spawn)
             .replace("{CAN_LOGGER_SPAWN}", &can_logger_spawn)
             .replace("{IDLE_LOOP}", &idle_loop)
-            .replace("{BUILD_KIND_INIT}", crate::build_kind_init(config));
+            .replace("{BUILD_KIND_INIT}", &crate::build_kind_init(config));
 
         let target_arch = mcu_to_target_arch(&esp_hw.mcu);
         let cargo_config = if target_arch.starts_with("xtensa") {
@@ -757,9 +942,9 @@ impl TargetBuilder for Builder {
         }
     }
 
-    fn run(&self, config: &Config) {
+    fn run(&self, config: &Config, release: bool) {
         println!("Running the firmware build pipeline...");
-        self.execute_cargo_command(config, "run", true);
+        self.execute_cargo_command(config, "run", release);
     }
 
     fn clippy(&self, config: &Config) {
@@ -905,3 +1090,100 @@ impl TargetBuilder for Builder {
     }
 }
 
+
+#[cfg(test)]
+mod lte_tests {
+    use super::*;
+
+    fn modem(toml_str: &str) -> EspModemConfig {
+        toml::from_str(toml_str).unwrap()
+    }
+
+    #[test]
+    fn one_uplink_per_build() {
+        assert_eq!(select_uplink(true, false, false, false), Ok(Uplink::Wifi));
+        assert_eq!(select_uplink(false, true, true, false), Ok(Uplink::Lte));
+        assert_eq!(select_uplink(false, false, true, false), Ok(Uplink::None));
+        assert!(select_uplink(true, true, true, false).is_err());
+    }
+
+    #[test]
+    fn lte_needs_a_modem() {
+        assert!(select_uplink(false, true, false, false).is_err());
+    }
+
+    #[test]
+    fn can_logger_needs_wifi() {
+        assert_eq!(select_uplink(true, false, false, true), Ok(Uplink::Wifi));
+        assert!(select_uplink(false, true, true, true).is_err());
+        assert!(select_uplink(false, false, false, true).is_err());
+    }
+
+    #[test]
+    fn lte_settings_are_checked() {
+        let lte = |apn: Option<&str>, pin: &str| crate::LteConfig {
+            enabled: true,
+            apn: apn.map(str::to_string),
+            sim_pin: pin.to_string(),
+            ..Default::default()
+        };
+        assert!(check_lte_settings(&lte(Some("internet"), "")).is_ok());
+        assert!(check_lte_settings(&lte(Some("internet"), "1234")).is_ok());
+        assert!(check_lte_settings(&lte(None, "")).is_err());
+        assert!(check_lte_settings(&lte(Some("bad\"apn"), "")).is_err());
+        assert!(check_lte_settings(&lte(Some(&"a".repeat(101)), "")).is_err());
+        assert!(check_lte_settings(&lte(Some("internet"), "123")).is_err());
+        assert!(check_lte_settings(&lte(Some("internet"), "12a4")).is_err());
+    }
+
+    #[test]
+    fn modem_config_defaults_and_unknown_fields() {
+        let m = modem("kind = \"sim7670g\"\nuart_tx_pin = 11\nuart_rx_pin = 10");
+        assert_eq!(m.baudrate, 115_200);
+        assert_eq!(m.pwrkey_level, "high");
+        assert_eq!(m.reset_level, "low");
+        assert!(toml::from_str::<EspModemConfig>(
+            "kind = \"sim7670g\"\nuart_tx_pin = 11\nuart_rx_pin = 10\ntx_pin = 3"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn lte_init_code_wires_the_pins() {
+        let code = lte_init_code(&modem(
+            "kind = \"sim7670g\"\nuart_tx_pin = 11\nuart_rx_pin = 10\n\
+             pwrkey_pin = 18\nreset_pin = 17\ndtr_pin = 9",
+        ))
+        .unwrap();
+        assert!(code.contains("new_modem_uart(peripherals.UART1, peripherals.GPIO11, peripherals.GPIO10, 115200)"));
+        assert!(code.contains("power_enable: None,"));
+        assert!(code.contains("pwrkey: Some(board_esp::ControlPin::new(peripherals.GPIO18, true)),"));
+        assert!(code.contains("reset: Some(board_esp::ControlPin::new(peripherals.GPIO17, false)),"));
+        assert!(code.contains("dtr: Some(board_esp::ControlPin::new(peripherals.GPIO9, false)),"));
+        assert!(code.contains("kind: board_esp::ModemKind::Sim7670g,"));
+    }
+
+    #[test]
+    fn unknown_modem_and_bad_levels_are_rejected() {
+        assert!(lte_init_code(&modem("kind = \"bg96\"\nuart_tx_pin = 1\nuart_rx_pin = 2")).is_err());
+        assert!(lte_init_code(&modem(
+            "kind = \"sim7670g\"\nuart_tx_pin = 1\nuart_rx_pin = 2\npwrkey_pin = 3\npwrkey_level = \"up\""
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn lilygo_profile_parses() {
+        let profile: toml::Value = toml::from_str(
+            &fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../hardware-profiles/lilygo-t-sim7670g-s3.toml"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let esp: EspConfig = profile["hardware"]["esp"].clone().try_into().unwrap();
+        assert_eq!(esp.mcu, "esp32s3");
+        assert!(lte_init_code(esp.modem.as_ref().unwrap()).is_ok());
+    }
+}
