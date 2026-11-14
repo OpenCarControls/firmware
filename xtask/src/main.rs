@@ -22,17 +22,62 @@ pub struct Config {
     /// `--production`: a release image. Set from the command line, not `config.toml`.
     #[serde(skip)]
     pub production: bool,
+    #[serde(default)]
+    pub debug: DebugConfig,
 }
 
-/// The line the generated `main.rs` runs after `core_interface::init`. A `--production`
+/// Development-only options (`[debug]`). xtask refuses them in builds they don't belong
+/// in (see `check_debug_options`).
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DebugConfig {
+    /// Starts the vehicle's state simulation at boot, for boards with no other way to
+    /// switch it on (the PC board also has `POST /simulate`). Needs `--debug`: the
+    /// simulation is only compiled into debug builds.
+    #[serde(default)]
+    pub start_simulation: bool,
+}
+
+/// Checks the `[debug]` options against the build: none of them may reach a production
+/// image, and the simulation can only start in a debug build, the only one it is
+/// compiled into. `builds_image` is false for commands that only lint or test.
+pub fn check_debug_options(
+    debug: &DebugConfig,
+    production: bool,
+    release: bool,
+    builds_image: bool,
+) -> Result<(), String> {
+    if debug.start_simulation {
+        if production {
+            return Err("[debug].start_simulation can't be used in a --production build".into());
+        }
+        if release && builds_image {
+            return Err(
+                "[debug].start_simulation needs --debug: the simulation is only \
+                        compiled into debug builds"
+                    .into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The lines the generated `main.rs` runs after `core_interface::init`. A `--production`
 /// build declares itself, which removes the CAN dev write lock; every other build keeps
 /// the lock (one more condition before the device may transmit). See docs/can.md.
-pub fn build_kind_init(config: &Config) -> &'static str {
+/// `[debug].start_simulation` switches the vehicle's simulation on; the line is
+/// `cfg`-gated like the simulation itself, so a release lint still compiles.
+pub fn build_kind_init(config: &Config) -> String {
+    let mut init = String::new();
     if config.production {
-        "    core_interface::declare_production_build();\n"
-    } else {
-        ""
+        init.push_str("    core_interface::declare_production_build();\n");
     }
+    if config.debug.start_simulation {
+        init.push_str(
+            "    #[cfg(debug_assertions)]\n    core_interface::set_simulation_enabled(true);\n",
+        );
+    }
+    init
 }
 
 fn default_empty_toml_table() -> toml::Value {
@@ -71,6 +116,27 @@ pub struct NetworkConfig {
     pub wifi: WifiConfig,
     #[serde(default)]
     pub can_logger: CanLoggerConfig,
+    #[serde(default)]
+    pub lte: LteConfig,
+}
+
+/// LTE uplink settings: the SIM's, not the board's (the modem's wiring is in the
+/// board's `[hardware.<board>.modem]`). Off by default.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct LteConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// The carrier's access point name.
+    pub apn: Option<String>,
+    /// PAP credentials for PPP; most carriers don't need any.
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
+    /// Empty when the SIM has no PIN.
+    #[serde(default)]
+    pub sim_pin: String,
 }
 
 /// SavvyCAN network logger. Off by default: the port is open to the whole network and
@@ -628,6 +694,12 @@ fn main() {
 
     builder.validate(&config);
 
+    let builds_image = matches!(command, "build" | "flash" | "run");
+    if let Err(e) = check_debug_options(&config.debug, config.production, release, builds_image) {
+        eprintln!("\u{274c} {e}");
+        exit(1);
+    }
+
     if command == "ide" {
         write_vscode_config(
             board,
@@ -646,7 +718,7 @@ fn main() {
         _ => {
             builder.generate_app_build(&config);
             match command {
-                "run" => builder.run(&config),
+                "run" => builder.run(&config, release),
                 "clippy" => builder.clippy(&config),
                 "build" => builder.compile(&config, release),
                 "flash" => {
@@ -856,9 +928,13 @@ pub trait TargetBuilder {
     }
 
     // Default implementation for running the project
-    fn run(&self, _config: &Config) {
-        let status = Command::new("cargo")
-            .arg("run")
+    fn run(&self, _config: &Config, release: bool) {
+        let mut cmd = Command::new("cargo");
+        cmd.arg("run");
+        if release {
+            cmd.arg("--release");
+        }
+        let status = cmd
             .current_dir(".app_build")
             .status()
             .expect("Failed to execute cargo run");
@@ -887,6 +963,36 @@ pub trait TargetBuilder {
 
 // Automatically discovered and linked board builders
 include!(concat!(env!("OUT_DIR"), "/board_registry.rs"));
+
+#[cfg(test)]
+mod debug_option_tests {
+    use super::*;
+
+    const SIM: DebugConfig = DebugConfig {
+        start_simulation: true,
+    };
+
+    #[test]
+    fn simulation_needs_a_debug_build() {
+        assert!(check_debug_options(&SIM, false, false, true).is_ok());
+        assert!(check_debug_options(&SIM, false, true, true).is_err());
+        // Lint and test commands don't build an image.
+        assert!(check_debug_options(&SIM, false, true, false).is_ok());
+    }
+
+    #[test]
+    fn simulation_never_reaches_production() {
+        assert!(check_debug_options(&SIM, true, false, true).is_err());
+        assert!(check_debug_options(&SIM, true, true, false).is_err());
+    }
+
+    #[test]
+    fn no_debug_options_build_anything() {
+        let none = DebugConfig::default();
+        assert!(check_debug_options(&none, true, true, true).is_ok());
+        assert!(check_debug_options(&none, false, false, true).is_ok());
+    }
+}
 
 #[cfg(test)]
 mod can_bus_tests {

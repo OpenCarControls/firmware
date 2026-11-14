@@ -1,0 +1,40 @@
+# =======================================================
+#    LilyGO T-SIM7670G-S3 Hardware Configuration
+# =======================================================
+# ESP32-S3 with a SIMCom SIM7670G LTE Cat-1 modem. Not the
+# "T-SIM7670G-S3 (SIMCom standard interface)" variant, whose pins differ.
+# Pins from LilyGO's LilyGo-Modem-Series examples (utilities.h).
+#
+# Use LTE with [network.lte] in config.toml (and [network.wifi].enabled = false).
+#
+# The board has no CAN transceiver: wire one to free GPIOs and add a
+# [[hardware.esp.can_buses]] entry in config.toml.
+
+[target]
+board = "esp"
+
+[hardware.esp]
+mcu = "esp32s3"
+
+[hardware.esp.modem]
+kind = "sim7670g"
+uart_tx_pin = 11
+uart_rx_pin = 10
+baudrate = 115200
+# Through a transistor on the board: a high pulse presses the modem's power key.
+pwrkey_pin = 18
+pwrkey_level = "high"
+reset_pin = 17
+reset_level = "low"
+dtr_pin = 9
+ring_pin = 3
+
+[[hardware.esp.status_leds]]
+type = "gpio"
+pin = 12
+role = "wireless"
+active_low = true
+
+[hardware.esp.ble]
+# Bonds are reset by power-cycling (see docs/ble.md).
+pairing_button_pin = -1

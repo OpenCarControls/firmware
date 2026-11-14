@@ -3,15 +3,18 @@ use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 // Bit 0: Power/Booted
-// Bit 1: Wireless Connected
+// Bit 1: WiFi connected
 // Bit 2: CAN Activity
+// Bit 3: BLE
+// Bit 4: LTE online
 pub static SYSTEM_STATUS_FLAGS: Mutex<CriticalSectionRawMutex, Cell<u32>> =
     Mutex::new(Cell::new(0));
 
 pub const FLAG_POWER: u32 = 1 << 0;
 pub const FLAG_WIFI: u32 = 1 << 1;
 pub const FLAG_BLE: u32 = 1 << 3;
-pub const FLAG_WIRELESS: u32 = FLAG_WIFI | FLAG_BLE;
+pub const FLAG_LTE: u32 = 1 << 4;
+pub const FLAG_WIRELESS: u32 = FLAG_WIFI | FLAG_BLE | FLAG_LTE;
 pub const FLAG_CAN: u32 = 1 << 2;
 
 pub fn set_flag(flag: u32, active: bool) {
