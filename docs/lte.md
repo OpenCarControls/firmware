@@ -52,7 +52,7 @@ The modem's UART is `UART1`. `board-esp` keeps the control lines (`ControlPin`) 
 |---|---|---|
 | SIMCom SIM7670G (LTE Cat-1 bis) | `sim7670g` | LilyGO T-SIM7670G-S3 (`lilygo-t-sim7670g-s3` profile) |
 
-The LilyGO profile has no CAN bus: the board has no transceiver, so wire one to free GPIOs and add a `[[hardware.esp.can_buses]]` entry in `config.toml`. LilyGO also sells a "SIMCom standard interface" variant of the board with different pins; the profile is not for that one.
+The LilyGO profile has no CAN bus: the board has no transceiver, so wire one to free GPIOs and add a `[[hardware.esp.can_buses]]` entry in `config.toml`. Connect the LTE antenna before powering the modem, and give the board a supply that holds up under the modem's transmit current peaks: on a weak USB port they can brown the modem out, which looks like it resetting or dropping off the network. LilyGO also sells a "SIMCom standard interface" variant of the board with different pins; the profile is not for that one.
 
 **Adding a modem** is a new `ModemKind` variant in `boards/esp/src/modem/kind.rs` (its power-on timings), its name in `modem_kind_ident` in `boards/esp/xtask_builder.rs`, and any AT differences in the bring-up. **Adding a board** with a supported modem is only a hardware profile.
 
@@ -63,9 +63,11 @@ The LilyGO profile has no CAN bus: the board has no transceiver, so wire one to 
 1.  **Make sure the modem answers `AT`.** A modem that kept running while the ESP restarted answers at once and is left alone. Otherwise the task pulses RESET, then PWRKEY, and waits for the modem to boot.
 2.  **Bring it up:** echo off, the SIM (`AT+CPIN?`, entering the PIN if needed), the PDP context with the APN (`AT+CGDCONT`), then polls the LTE registration (`AT+CEREG?`) until the modem is registered at home or roaming, logging the signal strength (`AT+CSQ`) now and then.
 3.  **Dial** `ATD*99#`. On `CONNECT` the UART carries PPP. The address and DNS servers the network assigns (IPCP) become the stack's static config, and the MQTT driver, waiting for the network, connects.
-4.  **When PPP ends**, the stack's config is cleared (the MQTT session drops and waits), the task leaves data mode (`+++`, then `ATH`) and starts over at 1.
+4.  **When PPP ends**, the stack's config is cleared (the MQTT session drops and waits), the task leaves data mode (`+++`, then `ATH`) and starts over at 1. A watchdog also ends the session if the link isn't up 30 s after `CONNECT`, or if nothing has come from the modem for 3 minutes: a data call the network dropped can otherwise leave PPP waiting forever, since the modem's `NO CARRIER` is text PPP ignores. A live link always has traffic, as the MQTT keepalive is answered about once a minute; with a broker that silently drops the connection attempts, the session restarts every 3 minutes.
 
 Any failure goes back to 1 after a pause. Two failures stop the task until the next boot, because retrying can't help: a SIM locked with its PUK, and a SIM PIN the SIM refused. A wrong PIN is entered once per boot at most: three wrong PINs lock the SIM, so fix `sim_pin` before rebooting the device again.
+
+**Receiving.** The UART's hardware FIFO holds 128 bytes, about 11 ms at 115200 baud, and the boards have no RTS/CTS to make the modem wait. Neither layer reads all the time: PPP doesn't read while it writes a packet (a full one takes about 130 ms), and the AT layer only reads during a command. So the UART is split, and `modem_rx_task` moves every received byte into a 4 KB buffer (`MODEM_RX`) as it arrives, woken at half the FIFO. A FIFO overflow or a full buffer is logged; PPP drops the damaged frame and TCP resends it.
 
 The AT layer (`at.rs`: reply parsing and the commands sent; `channel.rs`: the line reader on top of a buffered UART) is generic over the serial port and host-tested against a scripted modem. Reads keep their state in the channel rather than in the future, so a command dropped on a timeout loses no bytes, and input nobody read is discarded before each command so a late reply can't answer the next one.
 

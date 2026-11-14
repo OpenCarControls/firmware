@@ -31,7 +31,9 @@ impl ModemKind {
             ModemKind::Sim7670g => ModemTimings {
                 pwrkey_on_ms: 100,
                 reset_ms: 2600,
-                boot_timeout_ms: 15_000,
+                // Generous: a modem still booting when this runs out is reset, so too
+                // short a wait would restart it forever.
+                boot_timeout_ms: 30_000,
                 registration_timeout_ms: 180_000,
                 dial_timeout_ms: 30_000,
             },

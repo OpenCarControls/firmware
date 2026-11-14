@@ -6,12 +6,21 @@
 //! active here so the modem stays awake), the ring pin (reserved in the config), and
 //! the phases of `lte_task`, which a sleeping phase will join. See docs/lte.md.
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use embassy_futures::select::{Either, select};
 use embassy_net::{ConfigV4, Ipv4Cidr, Runner, Stack, StackResources, StaticConfigV4};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::pipe::Pipe;
 use embassy_time::{Duration, Instant, Timer, with_timeout};
+use embedded_io_async::{ErrorType, Read, ReadReady, Write};
 use esp_hal::Async;
 use esp_hal::gpio::interconnect::{PeripheralInput, PeripheralOutput};
 use esp_hal::gpio::{Level, Output, OutputConfig, OutputPin};
-use esp_hal::uart::{Config as UartConfig, Instance as UartInstance, Uart};
+use esp_hal::uart::{
+    Config as UartConfig, Instance as UartInstance, RxConfig, RxError, TxError, Uart, UartRx,
+    UartTx,
+};
 use static_cell::StaticCell;
 
 use super::at::{self, Final, Registration, SimState};
@@ -26,7 +35,113 @@ pub type ModemUart = Uart<'static, Async>;
 /// Read buffer between the UART and the AT/PPP layers.
 const RX_BUFFER: usize = 512;
 
-type Channel = AtChannel<ModemUart, RX_BUFFER>;
+type Channel = AtChannel<ModemPort, RX_BUFFER>;
+
+/// Bytes received from the modem, waiting for the AT or PPP layer. The UART's hardware
+/// FIFO holds only 128 bytes (about 11 ms at 115200 baud), and nothing else reads it while
+/// PPP writes a packet (a full one takes about 130 ms) or the AT layer sleeps, so
+/// `modem_rx_task` moves everything here as it arrives. The board has no RTS/CTS to make
+/// the modem wait.
+static MODEM_RX: Pipe<CriticalSectionRawMutex, 4096> = Pipe::new();
+
+/// The RX FIFO level that wakes `modem_rx_task`: well below the 128-byte FIFO, so a
+/// busy executor has several milliseconds before bytes are lost. Bytes below it arrive
+/// on the RX idle timeout.
+const RX_FIFO_THRESHOLD: u16 = 64;
+
+/// When `modem_rx_task` last received a byte, in seconds since boot.
+static LAST_RX_S: AtomicU32 = AtomicU32::new(0);
+
+fn now_s() -> u32 {
+    Instant::now().as_secs() as u32
+}
+
+/// How long PPP may take to come up after `CONNECT`.
+const PPP_UP_TIMEOUT_S: u64 = 30;
+
+/// Silence from the modem that ends a PPP session. A dropped data call can leave the
+/// session waiting forever (the modem's `NO CARRIER` is text PPP ignores), and the MQTT
+/// keepalive (about once a minute) gets an answer on a live link.
+const PPP_SILENCE_LIMIT_S: u32 = 180;
+
+/// The modem's serial port as the AT and PPP layers see it: reads come from
+/// `MODEM_RX`, writes go to the UART.
+pub struct ModemPort {
+    tx: UartTx<'static, Async>,
+}
+
+impl ErrorType for ModemPort {
+    type Error = TxError;
+}
+
+impl Read for ModemPort {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        Ok(MODEM_RX.read(buf).await)
+    }
+}
+
+impl embedded_io::Read for ModemPort {
+    /// Only what is already buffered; 0 when there is nothing.
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        Ok(MODEM_RX.try_read(buf).unwrap_or(0))
+    }
+}
+
+impl ReadReady for ModemPort {
+    fn read_ready(&mut self) -> Result<bool, Self::Error> {
+        Ok(!MODEM_RX.is_empty())
+    }
+}
+
+impl Write for ModemPort {
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        self.tx.write_async(buf).await
+    }
+
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        self.tx.flush_async().await
+    }
+}
+
+/// Moves received bytes from the UART to `MODEM_RX` as they arrive. Never waits on the
+/// reader: if `MODEM_RX` is full (nothing has read it for a while, e.g. after the
+/// bring-up stopped), the newest bytes are dropped and counted.
+#[embassy_executor::task]
+async fn modem_rx_task(mut rx: UartRx<'static, Async>) {
+    let mut buf = [0u8; 128];
+    let mut dropped: u32 = 0;
+    loop {
+        match rx.read_async(&mut buf).await {
+            Ok(n) => {
+                LAST_RX_S.store(now_s(), Ordering::Relaxed);
+                let mut data = &buf[..n];
+                while !data.is_empty() {
+                    match MODEM_RX.try_write(data) {
+                        Ok(written) => data = &data[written..],
+                        Err(_) => {
+                            if dropped == 0 {
+                                log::warn!("LTE: modem RX buffer full, dropping input");
+                            }
+                            dropped = dropped.saturating_add(data.len() as u32);
+                            break;
+                        }
+                    }
+                }
+                if dropped != 0 && MODEM_RX.is_empty() {
+                    log::warn!("LTE: dropped {} byte(s) from the modem", dropped);
+                    dropped = 0;
+                }
+            }
+            // Lost bytes: PPP drops the damaged frame and TCP resends it; the AT layer
+            // times out and retries. Logged so a bench test shows it.
+            Err(RxError::FifoOverflowed) => log::warn!("LTE: UART RX FIFO overflowed"),
+            Err(e) => log::warn!("LTE: UART RX error: {:?}", e),
+        }
+    }
+}
 
 /// PPP packet queues (each slot holds one 1500-byte packet).
 const PPP_RX_PACKETS: usize = 4;
@@ -42,7 +157,10 @@ pub fn new_modem_uart(
     rx: impl PeripheralInput<'static>,
     baudrate: u32,
 ) -> ModemUart {
-    Uart::new(uart, UartConfig::default().with_baudrate(baudrate))
+    let config = UartConfig::default()
+        .with_baudrate(baudrate)
+        .with_rx(RxConfig::default().with_fifo_full_threshold(RX_FIFO_THRESHOLD));
+    Uart::new(uart, config)
         .expect("modem UART config")
         .with_tx(tx)
         .with_rx(rx)
@@ -129,8 +247,10 @@ pub fn init_lte(
     );
     let stack = STACK.init(stack);
 
+    let (rx, tx) = uart.split();
+    spawner.spawn(modem_rx_task(rx).unwrap());
     spawner.spawn(ppp_net_task(net_runner).unwrap());
-    spawner.spawn(lte_task(uart, pins, settings, ppp_runner, *stack).unwrap());
+    spawner.spawn(lte_task(ModemPort { tx }, pins, settings, ppp_runner, *stack).unwrap());
     stack
 }
 
@@ -150,14 +270,14 @@ enum BringUpError {
 
 #[embassy_executor::task]
 async fn lte_task(
-    uart: ModemUart,
+    port: ModemPort,
     mut pins: ModemPins,
     settings: LteSettings,
     mut ppp: embassy_net_ppp::Runner<'static>,
     stack: Stack<'static>,
 ) {
     let timings = settings.kind.timings();
-    let mut at = Channel::new(uart);
+    let mut at = Channel::new(port);
     // A wrong PIN is entered at most once per boot: three wrong ones lock the SIM.
     let mut pin_refused = false;
 
@@ -195,38 +315,63 @@ async fn lte_task(
             username: settings.username.as_bytes(),
             password: settings.password.as_bytes(),
         };
-        let result = ppp
-            .run(at.data_mode(), config, |ipv4| {
-                let Some(address) = ipv4.address else {
-                    log::warn!("LTE: PPP up without an address");
-                    return;
-                };
-                let mut dns_servers = heapless::Vec::new();
-                for dns in ipv4.dns_servers.iter().flatten() {
-                    let _ = dns_servers.push(*dns);
-                }
-                log::info!("LTE: online, address {}, DNS {:?}", address, dns_servers);
-                stack.set_config_v4(ConfigV4::Static(StaticConfigV4 {
-                    // Point-to-point: everything goes to the peer.
-                    address: Ipv4Cidr::new(address, 0),
-                    gateway: None,
-                    dns_servers,
-                }));
-                status_leds::set_flag(status_leds::FLAG_LTE, true);
-            })
-            .await;
+        LAST_RX_S.store(now_s(), Ordering::Relaxed);
+        let session = ppp.run(at.data_mode(), config, |ipv4| {
+            let Some(address) = ipv4.address else {
+                log::warn!("LTE: PPP up without an address");
+                return;
+            };
+            let mut dns_servers = heapless::Vec::new();
+            for dns in ipv4.dns_servers.iter().flatten() {
+                let _ = dns_servers.push(*dns);
+            }
+            log::info!("LTE: online, address {}, DNS {:?}", address, dns_servers);
+            stack.set_config_v4(ConfigV4::Static(StaticConfigV4 {
+                // Point-to-point: everything goes to the peer.
+                address: Ipv4Cidr::new(address, 0),
+                gateway: None,
+                dns_servers,
+            }));
+            status_leds::set_flag(status_leds::FLAG_LTE, true);
+        });
+        // Dropping the PPP session (the watchdog won) ends it and marks the link down.
+        let ended = select(session, watch_ppp(stack)).await;
         stack.set_config_v4(ConfigV4::None);
         status_leds::set_flag(status_leds::FLAG_LTE, false);
-        match result {
-            Err(embassy_net_ppp::RunError::Terminated) => {
+        match ended {
+            Either::First(Err(embassy_net_ppp::RunError::Terminated)) => {
                 log::warn!("LTE: PPP ended by the network")
             }
-            Err(embassy_net_ppp::RunError::Eof) => log::warn!("LTE: modem closed the link"),
-            Err(e) => log::warn!("LTE: PPP failed: {:?}", e),
-            Ok(never) => match never {},
+            Either::First(Err(embassy_net_ppp::RunError::Eof)) => {
+                log::warn!("LTE: modem closed the link")
+            }
+            Either::First(Err(e)) => log::warn!("LTE: PPP failed: {:?}", e),
+            Either::First(Ok(never)) => match never {},
+            Either::Second(reason) => log::warn!("LTE: ending PPP: {}", reason),
         }
         leave_data_mode(&mut at).await;
         Timer::after(Duration::from_secs(2)).await;
+    }
+}
+
+/// Returns when a PPP session looks dead: not up soon after `CONNECT`, or no data from
+/// the modem for `PPP_SILENCE_LIMIT_S`.
+async fn watch_ppp(stack: Stack<'static>) -> &'static str {
+    if with_timeout(
+        Duration::from_secs(PPP_UP_TIMEOUT_S),
+        stack.wait_config_up(),
+    )
+    .await
+    .is_err()
+    {
+        return "the link didn't come up after CONNECT";
+    }
+    loop {
+        Timer::after(Duration::from_secs(10)).await;
+        let silent = now_s().saturating_sub(LAST_RX_S.load(Ordering::Relaxed));
+        if silent >= PPP_SILENCE_LIMIT_S {
+            return "no data from the modem";
+        }
     }
 }
 
