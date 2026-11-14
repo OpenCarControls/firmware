@@ -213,6 +213,27 @@ jobs:
       - name: Build Firmware via xtask
         run: cargo xtask build --board ${{ matrix.board }} --platform ${{ matrix.platform }}
 
+      # The example config uses plain MQTT, which leaves the ESP's TLS code (the
+      # `mqtt-tls` feature) out. Lint and build it too, on Xtensa over LTE.
+      - name: Make throwaway MQTT certificates
+        if: matrix.board == 'esp'
+        run: |
+          mkdir -p /tmp/mqtt-certs && cd /tmp/mqtt-certs
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+            -keyout ca.key -out ca.pem -subj "/CN=CI CA" -days 1
+          openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+            -keyout device.key -out device.csr -subj "/CN=ci-car"
+          openssl x509 -req -in device.csr -CA ca.pem -CAkey ca.key -CAcreateserial \
+            -days 1 -out device.pem
+
+      - name: Run Clippy via xtask (ESP, MQTT over mTLS)
+        if: matrix.board == 'esp'
+        run: cargo xtask clippy .github/ci/esp-lte-mtls.toml --platform ${{ matrix.platform }}
+
+      - name: Build Firmware via xtask (ESP, MQTT over mTLS)
+        if: matrix.board == 'esp'
+        run: cargo xtask build .github/ci/esp-lte-mtls.toml --platform ${{ matrix.platform }}
+
 
   # Branch protection can't require the matrix checks above: their names change with
   # the platforms a change touches. Require this job instead, under its fixed name.

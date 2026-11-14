@@ -1,6 +1,6 @@
 # LTE uplink
 
-An ESP board with a cellular modem can reach the MQTT broker over LTE instead of WiFi. The modem is a plain data pipe: the firmware brings it online with AT commands, then runs PPP over the same UART and hands the link to `embassy-net`. Everything above the network stack (the MQTT driver, DNS, TLS once it exists) works the same over LTE as over WiFi.
+An ESP board with a cellular modem can reach the MQTT broker over LTE instead of WiFi. The modem is a plain data pipe: the firmware brings it online with AT commands, then runs PPP over the same UART and hands the link to `embassy-net`. Everything above the network stack (the MQTT driver, DNS, TLS) works the same over LTE as over WiFi.
 
 Related docs: [Architecture](architecture.md) · [Hardware setup](hardware-setup.md)
 
@@ -75,7 +75,7 @@ The `wireless` status LED is lit while the PPP link is up (`FLAG_LTE`).
 
 ## Limits
 
-*   **Security over a public network:** the broker is on the internet once the device uses LTE, but MQTT over TLS (`mqtts://`, mTLS) isn't implemented yet. Inbound MQTT commands are already refused until they are authenticated (see [Architecture](architecture.md#channels)), but the published state isn't encrypted.
+*   **Security over a public network:** the broker is on the internet once the device uses LTE, so use `mqtts://` with `auth_mode = "mtls"` (see [MQTT over TLS](mqtt-tls.md)); with `mqtt://` the state and credentials travel unencrypted. Inbound MQTT commands stay refused until they are authenticated (see [Architecture](architecture.md#channels)).
 *   **IPv4 only:** the PDP context is `"IP"`.
 *   **Data rate:** PPP at 115200 baud gives about 11 KB/s, plenty for MQTT.
 
@@ -84,7 +84,7 @@ The `wireless` status LED is lit while the PPP link is up (`FLAG_LTE`).
 Most LTE modems have their own MQTT client, driven by AT commands (SIMCom `AT+CMQTT*`, Quectel `AT+QMT*`, u-blox `AT+UMQTT*`). The firmware uses PPP instead:
 
 *   **One driver for every modem.** The PPP dial (`ATD*99#`) is standard across vendors, while each vendor's MQTT commands differ. Supporting another modem is then mostly its power-on timings.
-*   **One MQTT implementation.** WiFi and LTE share `mqtt_driver_task` and its resilience rules (see [Architecture](architecture.md#mqtt-driver-resilience)), and everything above the network stack (DNS, TLS once it exists) works the same on both.
+*   **One MQTT implementation.** WiFi and LTE share `mqtt_driver_task` and its resilience rules (see [Architecture](architecture.md#mqtt-driver-resilience)), and everything above the network stack (DNS, TLS) works the same on both.
 *   **TLS stays on the ESP.** WiFi builds need TLS on the ESP anyway, so the modem's TLS would only save RAM on LTE builds. It would also keep the client's private key on the modem, readable by whoever can reach its UART, and tie the TLS versions and cipher suites to the modem's firmware.
 *   **No modem MQTT limits:** these clients speak MQTT 3.1.1 (the firmware uses v5), cap the payload size, and return binary payloads inside AT notifications.
 

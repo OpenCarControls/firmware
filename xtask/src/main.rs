@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use std::env;
 use std::fs;
+use std::path::Path;
 use std::process::{Command, exit};
 
 // ==========================================
@@ -380,37 +381,131 @@ pub fn generate_fd_bus_declarations(buses: &[VehicleCanBus], bus_count: usize) -
         .collect()
 }
 
-/// Generates `include_bytes!` constants for mTLS certs when `auth_mode = "mtls"`,
-/// or an empty string for other auth modes.
-/// The paths are relative to the generated `.app_build/src/main.rs` (hence `../../`).
-pub fn generate_mtls_certs(config: &Config) -> String {
-    if config.network.mqtt.auth_mode != "mtls" {
-        return String::new();
+/// How the device secures its MQTT connection, from `[network.mqtt]`.
+#[derive(Debug, PartialEq)]
+pub enum MqttSecurity {
+    /// `mqtt://`: plain TCP. State and credentials travel unencrypted.
+    Plain,
+    /// `mqtts://`: TLS, the broker verified against `ca`. With `client` (`auth_mode =
+    /// "mtls"`) the device also presents its certificate and key.
+    Tls {
+        ca: String,
+        client: Option<(String, String)>,
+    },
+}
+
+/// Checks the MQTT security settings. `file_exists` gets each certificate path as
+/// written in config.toml (relative to the firmware directory, or absolute).
+pub fn mqtt_security(
+    mqtt: &MqttConfig,
+    file_exists: impl Fn(&str) -> bool,
+) -> Result<MqttSecurity, String> {
+    let tls = mqtt.broker_url.starts_with("mqtts://");
+    let mtls = match mqtt.auth_mode.as_str() {
+        "basic" => false,
+        "mtls" => true,
+        other => {
+            return Err(format!(
+                "[network.mqtt].auth_mode must be \"basic\" or \"mtls\", got \"{other}\""
+            ));
+        }
+    };
+    if !tls {
+        if mtls {
+            return Err(
+                "[network.mqtt].auth_mode = \"mtls\" needs a mqtts:// broker_url".to_string(),
+            );
+        }
+        return Ok(MqttSecurity::Plain);
     }
-    let ca = config
-        .network
-        .mqtt
-        .ca_cert_file
-        .as_ref()
-        .expect("[network.mqtt].ca_cert_file is required when auth_mode = \"mtls\"");
-    let cert = config
-        .network
-        .mqtt
-        .client_cert_file
-        .as_ref()
-        .expect("[network.mqtt].client_cert_file is required when auth_mode = \"mtls\"");
-    let key = config
-        .network
-        .mqtt
-        .client_key_file
-        .as_ref()
-        .expect("[network.mqtt].client_key_file is required when auth_mode = \"mtls\"");
-    format!(
-        "const CA_CERT: &[u8] = include_bytes!(\"../../{}\");\n\
-         const CLIENT_CERT: &[u8] = include_bytes!(\"../../{}\");\n\
-         const CLIENT_KEY: &[u8] = include_bytes!(\"../../{}\");",
-        ca, cert, key
-    )
+    let file = |value: &Option<String>, key: &str| -> Result<String, String> {
+        let path = value.as_deref().filter(|p| !p.is_empty()).ok_or_else(|| {
+            format!("[network.mqtt].{key} is required with a mqtts:// broker_url")
+        })?;
+        if !file_exists(path) {
+            return Err(format!("[network.mqtt].{key}: {path} not found"));
+        }
+        Ok(path.to_string())
+    };
+    let ca = file(&mqtt.ca_cert_file, "ca_cert_file")?;
+    let client = if mtls {
+        Some((
+            file(&mqtt.client_cert_file, "client_cert_file")?,
+            file(&mqtt.client_key_file, "client_key_file")?,
+        ))
+    } else {
+        None
+    };
+    Ok(MqttSecurity::Tls { ca, client })
+}
+
+/// The generated `MQTT_TLS` constant (`Option<core_interface::MqttTls>`), and the
+/// username and password to send. mTLS sends none: the broker takes the device's
+/// identity from its certificate.
+pub fn mqtt_security_code(mqtt: &MqttConfig, security: &MqttSecurity) -> (String, String, String) {
+    // Paths are relative to the generated `.app_build/src/main.rs`, hence `../../`.
+    let include = |path: &str| {
+        let path = if Path::new(path).is_absolute() {
+            path.to_string()
+        } else {
+            format!("../../{path}")
+        };
+        format!("include_bytes!(\"{}\")", escape_rust_string(&path))
+    };
+    let user = || escape_rust_string(mqtt.username.as_deref().unwrap_or(""));
+    let pass = || escape_rust_string(mqtt.password.as_deref().unwrap_or(""));
+    match security {
+        MqttSecurity::Plain => (
+            "#[allow(dead_code)]\nconst MQTT_TLS: Option<core_interface::MqttTls> = None;"
+                .to_string(),
+            user(),
+            pass(),
+        ),
+        MqttSecurity::Tls { ca, client } => {
+            let client_code = match client {
+                Some((cert, key)) => format!(
+                    "Some(core_interface::MqttClientCert {{\n\
+                     \x20       cert_pem: {},\n\
+                     \x20       key_pem: {},\n\
+                     \x20   }})",
+                    include(cert),
+                    include(key)
+                ),
+                None => "None".to_string(),
+            };
+            let code = format!(
+                "#[allow(dead_code)]\n\
+                 const MQTT_TLS: Option<core_interface::MqttTls> = Some(core_interface::MqttTls {{\n\
+                 \x20   ca_pem: {},\n\
+                 \x20   client: {},\n\
+                 }});",
+                include(ca),
+                client_code
+            );
+            if client.is_some() {
+                (code, String::new(), String::new())
+            } else {
+                (code, user(), pass())
+            }
+        }
+    }
+}
+
+/// `mqtt_security` against the files on disk, exiting on an error.
+pub fn checked_mqtt_security(config: &Config) -> MqttSecurity {
+    let mqtt = &config.network.mqtt;
+    let security = mqtt_security(mqtt, |p| Path::new(p).is_file()).unwrap_or_else(|e| {
+        eprintln!("\u{274c} {e}");
+        exit(1);
+    });
+    if security == MqttSecurity::Plain {
+        eprintln!(
+            "\u{26a0}\u{fe0f}  MQTT uses plain TCP ({}): vehicle state and the broker password \
+             travel unencrypted. Use mqtts:// for a broker outside your own network (docs/mqtt-tls.md).",
+            mqtt.broker_url
+        );
+    }
+    security
 }
 
 /// Strips the scheme from a broker URL and returns `(host, port)` as strings.
@@ -1065,5 +1160,112 @@ mod can_bus_tests {
             generate_fd_bus_declarations(&buses, 2),
             "    core_interface::declare_can_fd_bus(1);\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod mqtt_security_tests {
+    use super::*;
+
+    fn mqtt(url: &str, auth: &str) -> MqttConfig {
+        MqttConfig {
+            broker_url: url.into(),
+            client_id: "car".into(),
+            auth_mode: auth.into(),
+            ca_cert_file: Some("certs/ca.pem".into()),
+            client_cert_file: Some("certs/client_cert.pem".into()),
+            client_key_file: Some("certs/client_key.pem".into()),
+            username: Some("user".into()),
+            password: Some("secret".into()),
+        }
+    }
+
+    fn all_exist(_: &str) -> bool {
+        true
+    }
+
+    #[test]
+    fn plain_url_is_plain() {
+        assert_eq!(
+            mqtt_security(&mqtt("mqtt://broker:1883", "basic"), all_exist),
+            Ok(MqttSecurity::Plain)
+        );
+    }
+
+    #[test]
+    fn mtls_needs_mqtts() {
+        assert!(mqtt_security(&mqtt("mqtt://broker", "mtls"), all_exist).is_err());
+    }
+
+    #[test]
+    fn unknown_auth_mode_is_rejected() {
+        assert!(mqtt_security(&mqtt("mqtts://broker", "token"), all_exist).is_err());
+    }
+
+    #[test]
+    fn mqtts_with_basic_verifies_the_broker_only() {
+        assert_eq!(
+            mqtt_security(&mqtt("mqtts://broker", "basic"), all_exist),
+            Ok(MqttSecurity::Tls {
+                ca: "certs/ca.pem".into(),
+                client: None
+            })
+        );
+    }
+
+    #[test]
+    fn mtls_takes_the_client_certificate() {
+        assert_eq!(
+            mqtt_security(&mqtt("mqtts://broker", "mtls"), all_exist),
+            Ok(MqttSecurity::Tls {
+                ca: "certs/ca.pem".into(),
+                client: Some((
+                    "certs/client_cert.pem".into(),
+                    "certs/client_key.pem".into()
+                ))
+            })
+        );
+    }
+
+    #[test]
+    fn tls_needs_the_ca_and_existing_files() {
+        let mut no_ca = mqtt("mqtts://broker", "basic");
+        no_ca.ca_cert_file = None;
+        assert!(mqtt_security(&no_ca, all_exist).is_err());
+
+        let missing_key = |p: &str| p != "certs/client_key.pem";
+        assert!(mqtt_security(&mqtt("mqtts://broker", "mtls"), missing_key).is_err());
+        // Basic auth doesn't read the client files.
+        assert!(mqtt_security(&mqtt("mqtts://broker", "basic"), missing_key).is_ok());
+    }
+
+    #[test]
+    fn mtls_sends_no_password() {
+        let config = mqtt("mqtts://broker", "mtls");
+        let security = mqtt_security(&config, all_exist).unwrap();
+        let (code, user, pass) = mqtt_security_code(&config, &security);
+        assert!(code.contains("include_bytes!(\"../../certs/ca.pem\")"));
+        assert!(code.contains("key_pem: include_bytes!(\"../../certs/client_key.pem\")"));
+        assert_eq!((user.as_str(), pass.as_str()), ("", ""));
+    }
+
+    #[test]
+    fn plain_and_basic_keep_the_password() {
+        let config = mqtt("mqtt://broker", "basic");
+        let (code, user, pass) = mqtt_security_code(&config, &MqttSecurity::Plain);
+        assert!(code.contains("= None;"));
+        assert_eq!((user.as_str(), pass.as_str()), ("user", "secret"));
+    }
+
+    #[test]
+    fn absolute_paths_are_kept() {
+        let config = mqtt("mqtts://broker", "basic");
+        let security = MqttSecurity::Tls {
+            ca: "/etc/opencar/ca.pem".into(),
+            client: None,
+        };
+        let (code, _, _) = mqtt_security_code(&config, &security);
+        assert!(code.contains("include_bytes!(\"/etc/opencar/ca.pem\")"));
+        assert!(code.contains("client: None"));
     }
 }
