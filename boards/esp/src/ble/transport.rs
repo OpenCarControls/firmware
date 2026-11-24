@@ -626,8 +626,26 @@ mod hardware {
         core_interface::remove_paired_phone(&phone_device_id(&bond.identity.bd_addr.0)).await;
     }
 
-    /// Apply a queued `RemovePairedPhone` / `ClearPairedPhones`. Only called while
-    /// no connection is active; a live connection handles its own ops in
+    /// Writes what `core-interface` still has to store, then resets the chip. Called from
+    /// the BLE task, which owns the flash, so no write is in progress, and every bond op
+    /// queued before the restart has already been applied.
+    async fn flush_and_restart<S: NorFlash + MultiwriteNorFlash>(
+        bond_store: &mut BondStore<'_, S>,
+    ) -> ! {
+        if let Some(approval) = core_interface::try_take_can_read_write_approval_to_store() {
+            let _ = bond_store.store_can_rw_approval(approval).await;
+        }
+        if let Some(validations) = core_interface::try_take_phone_validations_to_store() {
+            let _ = bond_store.store_phone_validations(&validations).await;
+        }
+        log::warn!("SYSTEM: restarting");
+        // Lets the BLE runner send a pending disconnect and the log drain.
+        embassy_time::Timer::after(embassy_time::Duration::from_millis(100)).await;
+        esp_hal::system::software_reset()
+    }
+
+    /// Apply a queued `RemovePairedPhone` / `ClearPairedPhones`, or restart. Only called
+    /// while no connection is active; a live connection handles its own ops in
     /// `gatt_event_task`.
     async fn apply_bond_op<C, P, S>(
         op: BondOp,
@@ -655,6 +673,7 @@ mod hardware {
                 }
                 log::info!("BLE: revoked all {} bond(s)", bonds.len());
             }
+            BondOp::Restart => flush_and_restart(bond_store).await,
         }
     }
 
@@ -788,9 +807,14 @@ mod hardware {
                     continue;
                 }
                 Either4::Second(op) => {
+                    if op == BondOp::Restart {
+                        // The phone sees the link end at once instead of waiting for the
+                        // supervision timeout. Applying the op never returns.
+                        conn.raw().disconnect();
+                    }
                     apply_bond_op(op, stack, bond_store).await;
                     let hits_peer = match op {
-                        BondOp::Clear => true,
+                        BondOp::Clear | BondOp::Restart => true,
                         BondOp::Remove(addr) => addr == peer_bd_addr.0 || addr == source_addr.0,
                     };
                     if hits_peer {

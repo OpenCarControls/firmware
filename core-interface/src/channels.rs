@@ -31,6 +31,10 @@ pub static MQTT_STATE_TX: Signal<CriticalSectionRawMutex, proto::DeviceToApp> = 
 /// Decoded system commands (restart, etc.) for the board to act on.
 pub static SYSTEM_COMMAND_CHANNEL: Channel<CriticalSectionRawMutex, proto::SystemCommand, 1> =
     Channel::new();
+/// How long a board waits after taking a `RestartCommand` off [`SYSTEM_COMMAND_CHANNEL`]
+/// before it restarts. The dispatcher has already queued the command's response, and this
+/// gives it time to reach the phone before the link goes down.
+pub const RESTART_RESPONSE_GRACE: embassy_time::Duration = embassy_time::Duration::from_secs(2);
 /// Basic vehicle commands routed to the vehicle task. Sent from BLE and MQTT.
 pub static BASIC_CMD_CHANNEL: Channel<CriticalSectionRawMutex, InboundCommand, 4> = Channel::new();
 /// Advanced vehicle commands routed to the vehicle task. BLE only.

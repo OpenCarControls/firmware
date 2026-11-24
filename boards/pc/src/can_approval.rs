@@ -69,16 +69,32 @@ pub async fn can_rw_approval_store_task() {
         return;
     };
     loop {
-        let result = match core_interface::can_read_write_approval_to_store().await {
-            Some(digest) => std::fs::write(path, format_approval(&digest)),
-            None => match std::fs::remove_file(path) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                other => other,
-            },
-        };
-        if let Err(e) = result {
-            log::error!("CAN approval store: failed to update '{}': {:?}", path, e);
-        }
+        let approval = core_interface::can_read_write_approval_to_store().await;
+        write_approval(path, approval);
+    }
+}
+
+/// Writes an approval change that the store task hasn't taken yet. Called before a
+/// restart.
+pub(crate) fn flush_pending_approval() {
+    if let (Some(path), Some(approval)) = (
+        CAN_RW_APPROVAL_PATH.get().copied(),
+        core_interface::try_take_can_read_write_approval_to_store(),
+    ) {
+        write_approval(path, approval);
+    }
+}
+
+fn write_approval(path: &str, approval: Option<[u8; 32]>) {
+    let result = match approval {
+        Some(digest) => std::fs::write(path, format_approval(&digest)),
+        None => match std::fs::remove_file(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        },
+    };
+    if let Err(e) = result {
+        log::error!("CAN approval store: failed to update '{}': {:?}", path, e);
     }
 }
 

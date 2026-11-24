@@ -77,7 +77,14 @@ mod hardware {
             let cmd = SYSTEM_COMMAND_CHANNEL.receiver().receive().await;
             match cmd.action {
                 Some(core_interface::proto::system_command::Action::RestartCommand(_)) => {
-                    log::warn!("SYSTEM: restart requested (ESP handler not wired yet)");
+                    // The dispatcher has answered already: give the answer time to reach
+                    // the phone, then let the BLE task, which owns the flash, finish its
+                    // writes and reset the chip.
+                    log::warn!("SYSTEM: restart requested");
+                    embassy_time::Timer::after(core_interface::RESTART_RESPONSE_GRACE).await;
+                    ble::bond_ops::BOND_OPS
+                        .send(ble::bond_ops::BondOp::Restart)
+                        .await;
                 }
                 Some(core_interface::proto::system_command::Action::RemovePairedPhone(req)) => {
                     if !pairing_window_open_or_warn("remove paired phone") {
