@@ -302,25 +302,27 @@ mod hardware {
         next_report: embassy_time::Instant,
     ) {
         let window = stats.take();
-        log_rx_stats(bus_id, listen_only, &window);
         let started = next_report - RX_STATS_INTERVAL;
         let window_ms = embassy_time::Instant::now()
             .saturating_duration_since(started)
             .as_millis();
+        log_rx_stats(bus_id, listen_only, &window, window_ms);
         core_interface::report_can_bus_window(bus_id, &window.counts, window_ms, Some(listen_only));
     }
 
-    /// Logs one RX stats window. A silent bus logs zeros, so "no data" is visible on the
+    /// Logs one RX stats window, `window_ms` long (to a tenth of a second: a mode change or
+    /// a bus-off ends it early). A silent bus logs zeros, so "no data" is visible on the
     /// serial console; errors without frames usually mean a wrong bitrate or wiring.
-    fn log_rx_stats(bus_id: u8, listen_only: bool, stats: &TwaiRxStats) {
+    fn log_rx_stats(bus_id: u8, listen_only: bool, stats: &TwaiRxStats, window_ms: u64) {
         let mode = if listen_only { "listen-only" } else { "normal" };
-        let secs = RX_STATS_INTERVAL.as_secs();
+        let (secs, tenths) = (window_ms / 1000, window_ms % 1000 / 100);
         match stats.last_error {
             Some(e) => log::info!(
-                "CAN bus {} ({}), last {}s: {} frames, {} matched filters, {} RX errors (last: {:?}), {} overruns, {} bus-offs",
+                "CAN bus {} ({}), last {}.{}s: {} frames, {} matched filters, {} RX errors (last: {:?}), {} overruns, {} bus-offs",
                 bus_id,
                 mode,
                 secs,
+                tenths,
                 stats.counts.received,
                 stats.counts.matched,
                 stats.counts.errors,
@@ -329,10 +331,11 @@ mod hardware {
                 stats.counts.bus_offs
             ),
             None => log::info!(
-                "CAN bus {} ({}), last {}s: {} frames, {} matched filters, 0 RX errors, {} overruns, {} bus-offs",
+                "CAN bus {} ({}), last {}.{}s: {} frames, {} matched filters, 0 RX errors, {} overruns, {} bus-offs",
                 bus_id,
                 mode,
                 secs,
+                tenths,
                 stats.counts.received,
                 stats.counts.matched,
                 stats.counts.overruns,
