@@ -5,6 +5,11 @@
 //! owns them. `system_command_task` queues a [`BondOp`] here once the pairing
 //! window check has passed; the BLE task applies it and keeps the paired-phone
 //! registry in `core-interface` mirroring the bonds.
+//!
+//! The BLE task also owns the flash, so a restart goes through the same queue
+//! ([`BondOp::Restart`]): the task applies the ops queued before it, writes what
+//! `core-interface` still has to store, then resets the chip. A restart never cuts a
+//! flash write short.
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
@@ -16,6 +21,8 @@ const DEVICE_ID_PREFIX: &[u8] = b"ble:";
 pub(crate) enum BondOp {
     Remove([u8; 6]),
     Clear,
+    /// Write what is pending to flash, then reset the chip.
+    Restart,
 }
 
 #[cfg_attr(not(feature = "hardware"), allow(dead_code))]

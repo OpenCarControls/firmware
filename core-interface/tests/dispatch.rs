@@ -23,6 +23,7 @@ fn setup() {
     set_link_up(Transport::Ble, true);
     set_link_up(Transport::Mqtt, true);
     while BLE_TX_CHANNEL.try_receive().is_ok() {}
+    while SYSTEM_COMMAND_CHANNEL.try_receive().is_ok() {}
 }
 
 /// The phones the tests send vehicle commands from.
@@ -73,6 +74,33 @@ fn make_system_cmd() -> SystemCommand {
     }
 }
 
+/// A phone that is bonded but not validated.
+const BONDED_PHONE: &[u8] = &[0xCC];
+
+/// A restart from `source`, which the tests bond first when `bond` is set.
+fn restart_from(source: &[u8], bond: bool) -> proto::AppToDevice {
+    if bond {
+        embassy_futures::block_on(core_interface::add_paired_phone(source));
+    }
+    ble_msg_with_source(
+        PLATFORM_ID,
+        source.to_vec(),
+        Some(Payload::SystemCommand(make_system_cmd())),
+    )
+}
+
+/// The command response queued for the BLE link.
+fn take_ble_response() -> proto::CommandResponse {
+    match BLE_TX_CHANNEL
+        .try_receive()
+        .expect("no BLE response")
+        .payload
+    {
+        Some(proto::device_to_app::Payload::CommandResponse(r)) => r,
+        other => panic!("unexpected payload: {:?}", other),
+    }
+}
+
 // ── Platform-ID filtering ─────────────────────────────────────────────────────
 
 #[test]
@@ -98,9 +126,7 @@ fn mqtt_wrong_platform_id_drops_message() {
 #[test]
 fn ble_system_command_goes_to_system_channel() {
     setup();
-    let cmd = make_system_cmd();
-    let msg = ble_msg(PLATFORM_ID, Some(Payload::SystemCommand(cmd)));
-    embassy_futures::block_on(handle_ble_message(msg));
+    embassy_futures::block_on(handle_ble_message(restart_from(BONDED_PHONE, true)));
     let received = SYSTEM_COMMAND_CHANNEL
         .try_receive()
         .expect("SystemCommand not forwarded");
@@ -331,17 +357,67 @@ fn ble_deprecated_can_debug_commands_are_ignored() {
 #[test]
 fn ble_restart_command_still_forwarded_to_system_channel_when_debug_available() {
     setup();
-    let msg = ble_msg(
-        PLATFORM_ID,
-        Some(Payload::SystemCommand(SystemCommand {
-            action: Some(Action::RestartCommand(RestartCommand {})),
-        })),
-    );
-    embassy_futures::block_on(handle_ble_message(msg));
+    embassy_futures::block_on(handle_ble_message(restart_from(BONDED_PHONE, true)));
     let received = SYSTEM_COMMAND_CHANNEL
         .try_receive()
         .expect("RestartCommand not in SYSTEM_COMMAND_CHANNEL");
     assert!(matches!(received.action, Some(Action::RestartCommand(_))));
+}
+
+#[test]
+fn ble_restart_is_answered_before_the_board_gets_it() {
+    setup();
+    embassy_futures::block_on(handle_ble_message(restart_from(BONDED_PHONE, true)));
+    // The response is already queued when the board takes the command, so it can leave
+    // during the board's grace period.
+    let resp = take_ble_response();
+    assert_eq!(resp.message_id, MSG_ID);
+    assert!(resp.success);
+    assert_eq!(resp.status_code, proto::CommandStatusCode::Ok as i32);
+    assert!(SYSTEM_COMMAND_CHANNEL.try_receive().is_ok());
+}
+
+#[test]
+fn ble_restart_from_a_phone_that_is_not_bonded_is_refused() {
+    setup();
+    for source in [&[0xDD][..], &[][..]] {
+        reset_recent_commands_for_tests();
+        embassy_futures::block_on(handle_ble_message(restart_from(source, false)));
+        let resp = take_ble_response();
+        assert!(!resp.success);
+        assert_eq!(resp.status_code, proto::CommandStatusCode::Failed as i32);
+        assert_eq!(
+            resp.error_message,
+            "command rejected: only a bonded phone can restart the device"
+        );
+        assert!(
+            SYSTEM_COMMAND_CHANNEL.try_receive().is_err(),
+            "a refused restart must not reach the board"
+        );
+    }
+}
+
+#[test]
+fn ble_restart_needs_a_validated_phone_once_one_is_validated() {
+    setup();
+    allow_read_write();
+    embassy_futures::block_on(handle_ble_message(restart_from(BONDED_PHONE, true)));
+    let resp = take_ble_response();
+    assert!(!resp.success);
+    assert_eq!(
+        resp.status_code,
+        proto::CommandStatusCode::RejectedNotValidated as i32
+    );
+    assert_eq!(
+        resp.error_message,
+        "command rejected: only a phone validated in this car can restart the device"
+    );
+    assert!(SYSTEM_COMMAND_CHANNEL.try_receive().is_err());
+
+    reset_recent_commands_for_tests();
+    embassy_futures::block_on(handle_ble_message(restart_from(VALIDATED_PHONES[0], false)));
+    assert!(take_ble_response().success);
+    assert!(SYSTEM_COMMAND_CHANNEL.try_receive().is_ok());
 }
 
 #[test]
@@ -473,8 +549,7 @@ fn ble_repeated_command_runs_once() {
 fn ble_repeated_system_command_runs_once() {
     setup();
     for _ in 0..2 {
-        let msg = ble_msg(PLATFORM_ID, Some(Payload::SystemCommand(make_system_cmd())));
-        embassy_futures::block_on(handle_ble_message(msg));
+        embassy_futures::block_on(handle_ble_message(restart_from(BONDED_PHONE, true)));
     }
     assert!(SYSTEM_COMMAND_CHANNEL.try_receive().is_ok());
     assert!(SYSTEM_COMMAND_CHANNEL.try_receive().is_err());

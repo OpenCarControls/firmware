@@ -61,17 +61,32 @@ pub async fn phone_validations_store_task() {
     };
     loop {
         let bytes = core_interface::phone_validations_to_store().await;
-        let result = if bytes.is_empty() {
-            match std::fs::remove_file(path) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                other => other,
-            }
-        } else {
-            std::fs::write(path, format_validations(&bytes))
-        };
-        if let Err(e) = result {
-            log::error!("Phone validations: failed to update '{}': {:?}", path, e);
+        write_validations(path, &bytes);
+    }
+}
+
+/// Writes a change of the validations that the store task hasn't taken yet. Called
+/// before a restart.
+pub(crate) fn flush_pending_validations() {
+    if let (Some(path), Some(bytes)) = (
+        PHONE_VALIDATIONS_PATH.get().copied(),
+        core_interface::try_take_phone_validations_to_store(),
+    ) {
+        write_validations(path, &bytes);
+    }
+}
+
+fn write_validations(path: &str, bytes: &[u8]) {
+    let result = if bytes.is_empty() {
+        match std::fs::remove_file(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
         }
+    } else {
+        std::fs::write(path, format_validations(bytes))
+    };
+    if let Err(e) = result {
+        log::error!("Phone validations: failed to update '{}': {:?}", path, e);
     }
 }
 

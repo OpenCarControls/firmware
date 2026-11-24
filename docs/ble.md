@@ -88,7 +88,7 @@ A vehicle command needs all three, plus the dev lock in development builds. The 
 
 **Bound to the car.** Validations are stored with the `CarDigest` they were made in and only apply while that car is identified. On another car of the same platform they stop applying; a bonded phone then does the first setup there, and approving that car erases every validation (the phones stay bonded and validate again). Approving the same car again keeps them. A validation also ends when its phone's bond is removed, when the phone pairs again (new keys may be another phone claiming its address), and when the bonds are reset or cleared. Validations don't expire otherwise.
 
-**Who controls what.** Once a phone is validated for the identified car, only a validated phone can change (approve or revoke) the approval, remove a validated phone or clear the phones; a merely bonded phone gets `REJECTED_NOT_VALIDATED`, so it can't lock the owner out. Before that, any bonded phone can, which is the first setup. The dev lock only needs a bonded phone.
+**Who controls what.** Once a phone is validated for the identified car, only a validated phone can change (approve or revoke) the approval, remove a validated phone, clear the phones or restart the device; a merely bonded phone gets `REJECTED_NOT_VALIDATED`, so it can't lock the owner out. Before that, any bonded phone can, which is the first setup. The dev lock only needs a bonded phone.
 
 **The connected phone.** The ESP has one BLE connection at a time, so what it publishes over BLE is for that phone: `gatt_event_task` reports its stamped `source_device_id` with `set_ble_peer` at connect (and again once a first pairing stores its bond), and the link going down clears it. The command availability is unavailable while that phone isn't validated (see [Vehicle commands](commands.md#command-availability)). The PC mock has no connections and takes the last phone that sent a command.
 
@@ -98,6 +98,16 @@ The platform-specific methods are added per vehicle (E-GMP: a [code shown on the
 `RemovePairedPhone` / `ClearPairedPhones` (only accepted while the pairing window is open) queue a `BondOp` for the BLE task, which owns the bonds. Removing a validated phone, or clearing them while one is validated, needs a validated phone; the dispatcher answers a refused one with `REJECTED_NOT_VALIDATED` and doesn't forward it. It removes each bond from the stack, the `BondStore` flash, the controller's filter accept and resolving lists, and the paired-phone registry in `core-interface`, and disconnects the phone if it is connected. A removed phone can no longer reconnect. The `device_id` is `ble:` followed by the phone's 6-byte address (the same stamp as `source_device_id`).
 
 The registry only mirrors the bonds (restored from flash at startup, updated on pairing and removal), so `ListPairedPhones` reports real bonds; `core-interface` answers it with each phone's trust level. Removing a phone from the registry also ends its validation. `UpsertPairedPhone` is ignored on ESP: phones enter by pairing.
+
+## Restart
+`RestartCommand` is checked and answered by `core-interface`'s dispatcher, then forwarded to the board. It needs a bonded phone, and a validated one once a phone is validated for the identified car (see [Phone trust](#phone-trust)): a restart ends what the device is doing for the owner, such as a battery preconditioning session, and unlocks nothing. A refusal is answered like the approval's and never reaches the board. It doesn't need the pairing window. MQTT drops it, like every system command.
+
+The successful `CommandResponse` is queued before the command reaches the board, which waits `RESTART_RESPONSE_GRACE` (2 s) so the answer reaches the phone before the link goes down. Then:
+
+*   **ESP:** `system_command_task` queues `BondOp::Restart` for the BLE task, which owns the flash, so a restart never cuts a write short. The task applies the bond ops queued before it, writes the approval and validations `core-interface` hasn't handed it yet, disconnects the phone so it sees the link end at once, and calls `esp_hal::system::software_reset()`. A software reset isn't a power-on, so it never counts towards the [bond reset by power-cycling](#bond-reset-by-power-cycling); it ends a run of short boots instead.
+*   **PC:** the process writes the pending approval and validations to their files and replaces itself with a fresh copy of the same binary and arguments (`exec` on Unix; elsewhere it starts the copy and exits).
+
+Like a power cycle, the device then boots read-only until the vehicle identifies the car again (see [CAN](can.md#read-write-policy)), and in a development build the dev lock is locked again.
 
 `max_bonded_phones` applies to BLE bonds: while that many phones are bonded, a new phone is disconnected even with the pairing window open (a bonded phone can still re-pair). The flash store holds at most 8 bonds regardless.
 

@@ -175,6 +175,27 @@ async fn handle_can_dev_write_unlock(source_device_id: &[u8], unlocked: bool) ->
     Ok(None)
 }
 
+// ── Restart ───────────────────────────────────────────────────────────────────
+
+const RESTART_NOT_BONDED: &str = "command rejected: only a bonded phone can restart the device";
+
+/// Once a phone is validated for this car, a merely bonded phone can't restart the device:
+/// a restart ends what it is doing for the owner (a battery preconditioning session, the
+/// dev lock) and drops the owner's connection.
+const RESTART_NOT_VALIDATED: &str =
+    "command rejected: only a phone validated in this car can restart the device";
+
+/// Who may restart the device: the same rule as the CAN read-write approval. `None` when
+/// the restart is allowed.
+async fn restart_refusal(source_device_id: &[u8]) -> Option<Refusal> {
+    if !crate::pairing::is_phone_paired(source_device_id).await {
+        return Some(Refusal::failed(RESTART_NOT_BONDED));
+    }
+    (crate::phone_trust::car_has_validated_phone()
+        && !crate::phone_trust::is_phone_validated(source_device_id))
+    .then(|| Refusal::not_validated(RESTART_NOT_VALIDATED))
+}
+
 // ── Phone trust ───────────────────────────────────────────────────────────────
 
 const VALIDATION_NOT_BONDED: &str = "command rejected: only a bonded phone can be validated";
@@ -332,7 +353,9 @@ pub async fn reset_ble_controller_lease_for_tests() {
 /// Processes a single `AppToDevice` message arriving from the BLE driver.
 /// Validates `platform_id` and routes each payload variant to the correct channel:
 /// - `system_command`:
-///   - `restart_command` → `SYSTEM_COMMAND_CHANNEL` (board handles it)
+///   - `restart_command` → answered with a successful `CommandResponse`, then
+///     `SYSTEM_COMMAND_CHANNEL` (the board restarts after `RESTART_RESPONSE_GRACE`). From a
+///     bonded phone only, and a validated one once a phone is validated for this car
 ///   - `set_can_debug_enabled` / `update_can_debug_filters` → dropped (deprecated: the
 ///     BLE CAN debug stream is gone, CAN logging goes to SavvyCAN instead)
 ///   - `set_can_read_write_approval` / `set_can_dev_write_unlock` → handled here (the CAN
@@ -370,6 +393,13 @@ pub async fn handle_ble_message(msg: proto::AppToDevice) {
     match msg.payload {
         Some(proto::app_to_device::Payload::SystemCommand(cmd)) => match cmd.action {
             Some(proto::system_command::Action::RestartCommand(restart)) => {
+                if let Some(refusal) = restart_refusal(&source_device_id).await {
+                    send_system_command_response(msg.message_id, Err(refusal)).await;
+                    return;
+                }
+                // Answered before the board acts: it waits `RESTART_RESPONSE_GRACE` so the
+                // answer reaches the phone before the restart drops the link.
+                send_system_command_response(msg.message_id, Ok(None)).await;
                 SYSTEM_COMMAND_CHANNEL
                     .sender()
                     .send(proto::SystemCommand {

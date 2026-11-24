@@ -4,6 +4,7 @@ mod can_approval;
 mod can_logger;
 mod network;
 mod phone_validations;
+mod restart;
 
 use core_interface::SYSTEM_COMMAND_CHANNEL;
 
@@ -58,7 +59,11 @@ pub async fn system_command_task() {
         let cmd = SYSTEM_COMMAND_CHANNEL.receiver().receive().await;
         match cmd.action {
             Some(core_interface::proto::system_command::Action::RestartCommand(_)) => {
-                log::warn!("SYSTEM: restart requested (PC board stub)");
+                // The dispatcher has answered already: give the answer time to reach the
+                // app before the process goes away.
+                log::warn!("SYSTEM: restart requested");
+                embassy_time::Timer::after(core_interface::RESTART_RESPONSE_GRACE).await;
+                restart::flush_and_restart();
             }
             Some(core_interface::proto::system_command::Action::RemovePairedPhone(req)) => {
                 if !core_interface::is_pairing_window_open() {

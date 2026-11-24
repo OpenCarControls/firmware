@@ -64,7 +64,7 @@ The actual binary entry point. Generated fresh by `xtask` before every build fro
 | `MQTT_RX_CHANNEL` | board → core | `AppToDevice` | Raw inbound proto from MQTT driver |
 | `MQTT_TX_CHANNEL` | core → board | `DeviceToApp` | Responses and system state to the MQTT driver; only filled while the session is up |
 | `MQTT_STATE_TX` | core → board | `DeviceToApp` | Newest vehicle state for MQTT, basic only and throttled (a `Signal`); sent after `MQTT_TX_CHANNEL` |
-| `SYSTEM_COMMAND_CHANNEL` | core → board | `SystemCommand` | BLE only; board handles restart and phone removal (the CAN read-write commands, `ListPairedPhones` and phone validation are handled in core) |
+| `SYSTEM_COMMAND_CHANNEL` | core → board | `SystemCommand` | BLE only; board handles restart (already answered by core, see [BLE](ble.md#restart)) and phone removal (the CAN read-write commands, `ListPairedPhones` and phone validation are handled in core) |
 | `BASIC_CMD_CHANNEL` | core → vehicle | `InboundCommand` | From BLE (MQTT is rejected until authenticated) |
 | `ADVANCED_CMD_CHANNEL` | core → vehicle | `InboundCommand` | BLE only |
 | `CMD_RESP_CHANNEL` | vehicle → core | `(Transport, CommandResponse)` | Transport tag routes response back |

@@ -76,8 +76,8 @@ pub use types::{CanFilter, CanFrame, InboundCommand, Transport, VehicleStatePayl
 pub use channels::{
     ADVANCED_CMD_CHANNEL, BASIC_CMD_CHANNEL, BLE_RX_CHANNEL, BLE_STATE_TX, BLE_TX_CHANNEL,
     CAN_RX_CHANNEL, CAN_TX_CHANNELS, CMD_RESP_CHANNEL, MAX_CAN_BUSES, MQTT_RX_CHANNEL,
-    MQTT_STATE_TX, MQTT_TX_CHANNEL, SYSTEM_COMMAND_CHANNEL, VEHICLE_STATE_CHANNEL, can_tx_channel,
-    send_can_frame,
+    MQTT_STATE_TX, MQTT_TX_CHANNEL, RESTART_RESPONSE_GRACE, SYSTEM_COMMAND_CHANNEL,
+    VEHICLE_STATE_CHANNEL, can_tx_channel, send_can_frame,
 };
 
 // CAN TX classes (platform frames, command frames)
