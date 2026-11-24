@@ -35,7 +35,7 @@ Hardware filters are set to accept-all where driver constraints apply (TWAI on E
 
 *   RX is interrupt-driven (esp-hal ISR → 32-frame queue), which keeps frames from being lost on single-core chips while WiFi/BLE are busy.
 *   The session loop sleeps until a frame arrives, a TX frame is queued for this bus, the read-only flag changes, or the next RX stats report is due. TX waits are bounded to 100 ms, RX overruns clear the FIFO, and bus-off rebuilds the controller after 1 s. A bus-off also relocks every bus (`set_can_read_only(true)`), so the vehicle has to unlock again (see [Read-write policy](#read-write-policy)).
-*   Every 5 s each TWAI bus logs one `info` line with the frames received, how many matched the vehicle filters, RX errors (with the last error kind), overruns and bus-offs since the previous line. A silent bus logs zeros, so the serial console shows whether the car is sending anything. RX errors with no frames usually mean a wrong bitrate, a CAN FD bus or a wiring fault. The same window is reported for the app (see [Bus health](#bus-health)), and a bus-off or a switch between listen-only and normal mode ends the window early, so the app sees it at once (the window is reported under the mode it ran in). MCP2515 buses don't have this log or the bus health yet.
+*   Every 5 s each TWAI bus logs one `info` line with the frames received, how many matched the vehicle filters, RX errors (with the last error kind), overruns and bus-offs since the previous line. A silent bus logs zeros, so the serial console shows whether the car is sending anything. RX errors with no frames usually mean a wrong bitrate, a CAN FD bus or a wiring fault, but TWAI doesn't count RX errors yet (see [Bus health](#bus-health)). The same window is reported for the app, and a bus-off or a switch between listen-only and normal mode ends the window early, so the app sees it at once (the window is reported under the mode it ran in). MCP2515 buses don't have this log or the bus health yet.
 *   The blocking `nb` path was dropped because esp-hal's blocking `receive()` never releases the FIFO after an overrun, so RX stays dead permanently.
 
 ### MCP2515 (SPI)
@@ -46,7 +46,7 @@ Hardware filters are set to accept-all where driver constraints apply (TWAI on E
 
 ## Bus health
 
-The app shows each bus's health from `SystemState.can_bus_health`, a map from bus id to `CanBusHealth`. Board drivers count what they receive in a `core_interface::CanRxCounts` and hand each window to `report_can_bus_window(bus_id, &counts, listen_only)` when it ends (every 5 s, and at once after a bus-off or, on TWAI, a mode switch). `can_health.rs` adds it to the bus's totals since boot and judges the window (`can_bus_status`):
+The app shows each bus's health from `SystemState.can_bus_health`, a map from bus id to `CanBusHealth`. Board drivers count what they receive in a `core_interface::CanRxCounts` and hand each window to `report_can_bus_window(bus_id, &counts, window_ms, listen_only)` when it ends (every 5 s, and at once after a bus-off or, on TWAI, a mode switch), with how long it lasted. `can_health.rs` adds it to the bus's totals since boot and judges the window (`can_bus_status`):
 
 | Status | Window |
 |---|---|
@@ -56,11 +56,11 @@ The app shows each bus's health from `SystemState.can_bus_health`, a map from bu
 | `SILENT` | nothing at all: the car is asleep, or the bus isn't connected |
 | `OK` | frames, no errors |
 
-The counters sent are totals since boot (saturating), so a lost update loses nothing; the status is about the last window only. `listen_only` is whether the controller ran in hardware listen-only mode, and unset for a driver without one (SocketCAN on the PC board, which drops TX in software instead).
+The counters sent are totals since boot (saturating), so a lost update loses nothing; the status and `frames_per_second` (frames received over the window's length, rounded down) are about the last window only. The app shows the rate, which reads at a glance, rather than the frame total, which only grows. `listen_only` is whether the controller ran in hardware listen-only mode, and unset for a driver without one (SocketCAN on the PC board, which drops TX in software instead).
 
 It is BLE only (MQTT carries basic state only), in a `StateUpdate` of its own sent by `publish_can_bus_health_task`: at once when a bus changes status or mode, or first reports; otherwise every `CAN_BUS_HEALTH_REPEAT_MS` (5 s), with the new counters; and again when the app subscribes. A bus whose driver doesn't report (MCP2515 so far) is absent from the map.
 
-*   **ESP TWAI:** the counters behind the 5 s RX log (see [TWAI](#twai-built-in)).
+*   **ESP TWAI:** the counters behind the 5 s RX log (see [TWAI](#twai-built-in)). RX errors always read 0: esp-hal's `receive_async` only returns frames, bus-offs and overruns, and drops bus errors (bit, stuff, form, CRC, ACK); the error counters don't help either, because REC is held at 128 in listen-only mode (an errata workaround). So a TWAI bus never reads `NO_VALID_FRAMES`, or `DEGRADED` from RX errors: a wrong bitrate on a busy bus reads `SILENT` (seen in an E-GMP car). Tracked in [#117](https://github.com/OpenCarControls/firmware/issues/117).
 *   **PC (SocketCAN):** frames, plus error frames (the socket accepts all of them): a bus-off, a receive buffer overflow (counted as an overrun), or else an RX error. A `vcan` bus never sends error frames, so it only reads `OK` or `SILENT`.
 
 ## xtask CAN codegen

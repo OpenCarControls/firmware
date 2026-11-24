@@ -211,7 +211,7 @@ mod hardware {
             if core_interface::is_can_bus_listen_only(bus_id) != listen_only {
                 // End the window under the mode it ran in, so the app sees the new
                 // mode at once instead of at the end of the window.
-                end_rx_window(bus_id, listen_only, stats);
+                end_rx_window(bus_id, listen_only, stats, *next_report);
                 *next_report = Instant::now() + RX_STATS_INTERVAL;
                 return;
             }
@@ -248,7 +248,7 @@ mod hardware {
                         bus_id
                     );
                     // Report the bus-off now rather than at the end of the window.
-                    end_rx_window(bus_id, listen_only, stats);
+                    end_rx_window(bus_id, listen_only, stats, *next_report);
                     *next_report = Instant::now() + RX_STATS_INTERVAL;
                     Timer::after(Duration::from_secs(1)).await;
                     return;
@@ -266,7 +266,7 @@ mod hardware {
                 // The flag is re-checked at the top of the loop.
                 Either4::Third(_) => {}
                 Either4::Fourth(()) => {
-                    end_rx_window(bus_id, listen_only, stats);
+                    end_rx_window(bus_id, listen_only, stats, *next_report);
                     *next_report = Instant::now() + RX_STATS_INTERVAL;
                 }
             }
@@ -293,11 +293,21 @@ mod hardware {
 
     /// Ends one RX stats window: logs it, and reports it for the bus health the app shows.
     /// Called every [`RX_STATS_INTERVAL`], and early on a mode change or a bus-off, so the
-    /// log line can cover less than the interval.
-    fn end_rx_window(bus_id: u8, listen_only: bool, stats: &mut TwaiRxStats) {
+    /// log line can cover less than the interval. `next_report` is when the window was due
+    /// to end: it started one [`RX_STATS_INTERVAL`] before that.
+    fn end_rx_window(
+        bus_id: u8,
+        listen_only: bool,
+        stats: &mut TwaiRxStats,
+        next_report: embassy_time::Instant,
+    ) {
         let window = stats.take();
         log_rx_stats(bus_id, listen_only, &window);
-        core_interface::report_can_bus_window(bus_id, &window.counts, Some(listen_only));
+        let started = next_report - RX_STATS_INTERVAL;
+        let window_ms = embassy_time::Instant::now()
+            .saturating_duration_since(started)
+            .as_millis();
+        core_interface::report_can_bus_window(bus_id, &window.counts, window_ms, Some(listen_only));
     }
 
     /// Logs one RX stats window. A silent bus logs zeros, so "no data" is visible on the

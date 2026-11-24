@@ -121,8 +121,12 @@ mod linux_can {
             Timer::after(Duration::from_millis(1)).await;
 
             if Instant::now() >= next_report {
+                // The window started one interval before it was due.
+                let window_ms = Instant::now()
+                    .saturating_duration_since(next_report - RX_STATS_INTERVAL)
+                    .as_millis();
                 // SocketCAN has no listen-only mode here: read-only drops TX in software.
-                core_interface::report_can_bus_window(bus_id, &counts.take(), None);
+                core_interface::report_can_bus_window(bus_id, &counts.take(), window_ms, None);
                 next_report = Instant::now() + RX_STATS_INTERVAL;
             }
 

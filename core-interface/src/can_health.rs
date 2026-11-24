@@ -92,12 +92,23 @@ pub fn can_bus_status(window: &CanRxCounts) -> proto::CanBusStatus {
     }
 }
 
+/// Frames per second over a window of `window_ms`, rounded down and saturating. None for
+/// an empty window, whose rate means nothing.
+pub fn frames_per_second(window: &CanRxCounts, window_ms: u64) -> Option<u32> {
+    if window_ms == 0 {
+        return None;
+    }
+    let rate = u64::from(window.received) * 1000 / window_ms;
+    Some(u32::try_from(rate).unwrap_or(u32::MAX))
+}
+
 /// What is known about one bus: totals since boot and the last window's verdict.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct BusHealth {
     totals: CanRxCounts,
     status: proto::CanBusStatus,
     listen_only: Option<bool>,
+    frames_per_second: Option<u32>,
 }
 
 impl BusHealth {
@@ -110,6 +121,7 @@ impl BusHealth {
             rx_errors: Some(self.totals.errors),
             overruns: Some(self.totals.overruns),
             bus_offs: Some(self.totals.bus_offs),
+            frames_per_second: self.frames_per_second,
         }
     }
 }
@@ -122,11 +134,16 @@ static BUSES: Mutex<CriticalSectionRawMutex, RefCell<Buses>> =
 /// Wakes the publisher when a bus reports, or when the app subscribes.
 static CAN_HEALTH_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
-/// Records the end of one RX window of `bus_id`. Called by board CAN drivers, every few
-/// seconds and right after a bus-off. `listen_only` is whether the controller ran in
-/// hardware listen-only mode, or `None` for a driver that has no such mode. Never
-/// blocks. Ignores a bus id beyond [`MAX_CAN_BUSES`].
-pub fn report_can_bus_window(bus_id: u8, window: &CanRxCounts, listen_only: Option<bool>) {
+/// Records the end of one RX window of `bus_id`, `window_ms` long. Called by board CAN
+/// drivers, every few seconds and right after a bus-off. `listen_only` is whether the
+/// controller ran in hardware listen-only mode, or `None` for a driver that has no such
+/// mode. Never blocks. Ignores a bus id beyond [`MAX_CAN_BUSES`].
+pub fn report_can_bus_window(
+    bus_id: u8,
+    window: &CanRxCounts,
+    window_ms: u64,
+    listen_only: Option<bool>,
+) {
     let reported = BUSES.lock(|buses| {
         let mut buses = buses.borrow_mut();
         let Some(slot) = buses.get_mut(bus_id as usize) else {
@@ -138,6 +155,7 @@ pub fn report_can_bus_window(bus_id: u8, window: &CanRxCounts, listen_only: Opti
             totals,
             status: can_bus_status(window),
             listen_only,
+            frames_per_second: frames_per_second(window, window_ms),
         });
         true
     });
@@ -285,6 +303,21 @@ mod tests {
         c.record_bus_off();
         assert_eq!(c.take(), counts(2, 1, 1, 1).with_matched(1));
         assert_eq!(c, CanRxCounts::new());
+    }
+
+    #[test]
+    fn frames_per_second_of_a_window() {
+        assert_eq!(
+            frames_per_second(&counts(10_800, 0, 0, 0), 5_000),
+            Some(2_160)
+        );
+        assert_eq!(frames_per_second(&counts(7, 0, 0, 0), 2_000), Some(3));
+        assert_eq!(frames_per_second(&counts(0, 0, 0, 0), 5_000), Some(0));
+        assert_eq!(frames_per_second(&counts(10, 0, 0, 0), 0), None);
+        assert_eq!(
+            frames_per_second(&counts(u32::MAX, 0, 0, 0), 1),
+            Some(u32::MAX)
+        );
     }
 
     #[test]

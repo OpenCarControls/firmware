@@ -116,8 +116,8 @@ pub use can_access::{
 // CAN bus health (RX counters reported by the board drivers, published over BLE)
 pub use can_health::{
     CAN_BUS_HEALTH_REPEAT_MS, CanRxCounts, can_bus_health, can_bus_health_state_update,
-    can_bus_status, publish_can_bus_health, publish_can_bus_health_task, report_can_bus_window,
-    resend_can_bus_health, reset_can_bus_health_for_tests,
+    can_bus_status, frames_per_second, publish_can_bus_health, publish_can_bus_health_task,
+    report_can_bus_window, resend_can_bus_health, reset_can_bus_health_for_tests,
 };
 
 // CAN logging (SavvyCAN / GVRET)
