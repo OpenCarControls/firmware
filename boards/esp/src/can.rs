@@ -228,14 +228,14 @@ mod hardware {
                     };
                     core_interface::log_can_frame(&core_frame);
                     let matched = core_interface::passes_filter(&core_frame, filters);
-                    stats.record_frame(matched);
+                    stats.counts.record_frame(matched);
                     // The vehicle doesn't see frames while SavvyCAN has the buses.
                     if matched && !core_interface::is_can_logging() {
                         CAN_RX_CHANNEL.sender().send(core_frame).await;
                     }
                 }
                 Either4::First(Err(EspTwaiError::BusOff)) => {
-                    stats.record_bus_off();
+                    stats.counts.record_bus_off();
                     // A bus fault relocks every bus: the vehicle has to validate the car
                     // again before it can transmit.
                     core_interface::set_can_read_only(true);
@@ -243,11 +243,14 @@ mod hardware {
                         "CAN bus {}: TWAI bus-off, buses relocked, restarting controller in 1s",
                         bus_id
                     );
+                    // Report the bus-off now rather than at the end of the window.
+                    end_rx_window(bus_id, listen_only, stats);
+                    *next_report = Instant::now() + RX_STATS_INTERVAL;
                     Timer::after(Duration::from_secs(1)).await;
                     return;
                 }
                 Either4::First(Err(EspTwaiError::EmbeddedHAL(twai::ErrorKind::Overrun))) => {
-                    stats.record_overrun();
+                    stats.counts.record_overrun();
                     log::warn!("CAN bus {}: TWAI RX overrun, frames dropped", bus_id);
                     twai.clear_receive_fifo();
                 }
@@ -259,7 +262,7 @@ mod hardware {
                 // The flag is re-checked at the top of the loop.
                 Either4::Third(_) => {}
                 Either4::Fourth(()) => {
-                    log_rx_stats(bus_id, listen_only, &stats.take());
+                    end_rx_window(bus_id, listen_only, stats);
                     *next_report = Instant::now() + RX_STATS_INTERVAL;
                 }
             }
@@ -284,6 +287,13 @@ mod hardware {
 
     type TwaiRxStats = crate::can::RxStats<EspTwaiError>;
 
+    /// Ends one RX stats window: logs it, and reports it for the bus health the app shows.
+    fn end_rx_window(bus_id: u8, listen_only: bool, stats: &mut TwaiRxStats) {
+        let window = stats.take();
+        log_rx_stats(bus_id, listen_only, &window);
+        core_interface::report_can_bus_window(bus_id, &window.counts, Some(listen_only));
+    }
+
     /// Logs one RX stats window. A silent bus logs zeros, so "no data" is visible on the
     /// serial console; errors without frames usually mean a wrong bitrate or wiring.
     fn log_rx_stats(bus_id: u8, listen_only: bool, stats: &TwaiRxStats) {
@@ -295,22 +305,22 @@ mod hardware {
                 bus_id,
                 mode,
                 secs,
-                stats.received,
-                stats.matched,
-                stats.errors,
+                stats.counts.received,
+                stats.counts.matched,
+                stats.counts.errors,
                 e,
-                stats.overruns,
-                stats.bus_offs
+                stats.counts.overruns,
+                stats.counts.bus_offs
             ),
             None => log::info!(
                 "CAN bus {} ({}), last {}s: {} frames, {} matched filters, 0 RX errors, {} overruns, {} bus-offs",
                 bus_id,
                 mode,
                 secs,
-                stats.received,
-                stats.matched,
-                stats.overruns,
-                stats.bus_offs
+                stats.counts.received,
+                stats.counts.matched,
+                stats.counts.overruns,
+                stats.counts.bus_offs
             ),
         }
     }
@@ -537,16 +547,14 @@ mod hardware {
 #[cfg(feature = "hardware")]
 pub use hardware::*;
 
-/// RX counters behind the periodic CAN health log. `take` returns them and starts a fresh
-/// window, so each log line covers one reporting interval. `E` is the driver's error type.
+/// RX counters behind the periodic CAN health log and the bus health sent to the app
+/// (`core_interface::report_can_bus_window`), plus the last RX error for the log. `take`
+/// returns them and starts a fresh window, so each report covers one interval. `E` is the
+/// driver's error type.
 #[cfg_attr(not(feature = "hardware"), allow(dead_code))]
 #[derive(Debug, PartialEq)]
 pub(crate) struct RxStats<E> {
-    pub received: u32,
-    pub matched: u32,
-    pub errors: u32,
-    pub overruns: u32,
-    pub bus_offs: u32,
+    pub counts: core_interface::CanRxCounts,
     pub last_error: Option<E>,
 }
 
@@ -554,33 +562,14 @@ pub(crate) struct RxStats<E> {
 impl<E> RxStats<E> {
     pub const fn new() -> Self {
         Self {
-            received: 0,
-            matched: 0,
-            errors: 0,
-            overruns: 0,
-            bus_offs: 0,
+            counts: core_interface::CanRxCounts::new(),
             last_error: None,
         }
     }
 
-    pub fn record_frame(&mut self, matched: bool) {
-        self.received = self.received.saturating_add(1);
-        if matched {
-            self.matched = self.matched.saturating_add(1);
-        }
-    }
-
     pub fn record_error(&mut self, error: E) {
-        self.errors = self.errors.saturating_add(1);
+        self.counts.record_error();
         self.last_error = Some(error);
-    }
-
-    pub fn record_overrun(&mut self) {
-        self.overruns = self.overruns.saturating_add(1);
-    }
-
-    pub fn record_bus_off(&mut self) {
-        self.bus_offs = self.bus_offs.saturating_add(1);
     }
 
     pub fn take(&mut self) -> Self {
@@ -745,44 +734,24 @@ mod tests {
     }
 
     #[test]
-    fn rx_stats_count_frames_and_errors() {
+    fn rx_stats_count_errors_and_keep_the_last() {
         let mut stats = RxStats::<&str>::new();
-        stats.record_frame(true);
-        stats.record_frame(false);
+        stats.counts.record_frame(true);
         stats.record_error("bit");
         stats.record_error("stuff");
-        stats.record_overrun();
-        stats.record_bus_off();
-        assert_eq!(
-            stats,
-            RxStats {
-                received: 2,
-                matched: 1,
-                errors: 2,
-                overruns: 1,
-                bus_offs: 1,
-                last_error: Some("stuff"),
-            }
-        );
+        assert_eq!(stats.counts.errors, 2);
+        assert_eq!(stats.last_error, Some("stuff"));
     }
 
     #[test]
     fn rx_stats_take_starts_a_new_window() {
         let mut stats = RxStats::<&str>::new();
-        stats.record_frame(true);
+        stats.counts.record_frame(true);
         stats.record_error("bit");
         let report = stats.take();
-        assert_eq!(report.received, 1);
+        assert_eq!(report.counts.received, 1);
         assert_eq!(report.last_error, Some("bit"));
         assert_eq!(stats, RxStats::new());
-    }
-
-    #[test]
-    fn rx_stats_saturate_instead_of_wrapping() {
-        let mut stats = RxStats::<&str>::new();
-        stats.received = u32::MAX;
-        stats.record_frame(false);
-        assert_eq!(stats.received, u32::MAX);
     }
 
     /// Minimal stand-in for a driver's frame type.

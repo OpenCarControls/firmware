@@ -35,7 +35,7 @@ Hardware filters are set to accept-all where driver constraints apply (TWAI on E
 
 *   RX is interrupt-driven (esp-hal ISR → 32-frame queue), which keeps frames from being lost on single-core chips while WiFi/BLE are busy.
 *   The session loop sleeps until a frame arrives, a TX frame is queued for this bus, the read-only flag changes, or the next RX stats report is due. TX waits are bounded to 100 ms, RX overruns clear the FIFO, and bus-off rebuilds the controller after 1 s. A bus-off also relocks every bus (`set_can_read_only(true)`), so the vehicle has to unlock again (see [Read-write policy](#read-write-policy)).
-*   Every 5 s each TWAI bus logs one `info` line with the frames received, how many matched the vehicle filters, RX errors (with the last error kind), overruns and bus-offs since the previous line. A silent bus logs zeros, so the serial console shows whether the car is sending anything. RX errors with no frames usually mean a wrong bitrate, a CAN FD bus or a wiring fault. MCP2515 buses don't have this log yet.
+*   Every 5 s each TWAI bus logs one `info` line with the frames received, how many matched the vehicle filters, RX errors (with the last error kind), overruns and bus-offs since the previous line. A silent bus logs zeros, so the serial console shows whether the car is sending anything. RX errors with no frames usually mean a wrong bitrate, a CAN FD bus or a wiring fault. The same window is reported for the app (see [Bus health](#bus-health)), and a bus-off ends the window early so it is reported at once. MCP2515 buses don't have this log or the bus health yet.
 *   The blocking `nb` path was dropped because esp-hal's blocking `receive()` never releases the FIFO after an overrun, so RX stays dead permanently.
 
 ### MCP2515 (SPI)
@@ -43,6 +43,25 @@ Hardware filters are set to accept-all where driver constraints apply (TWAI on E
 
 ## PC driver
 `socket_can_task` (pool of 4) opens a non-blocking `SocketCAN` socket per bus and polls it every 1 ms via Embassy timer. Outbound frames are drained from this bus's `CAN_TX_CHANNELS` entry after each RX sweep. If the interface cannot be opened (e.g. `vcan0` does not exist), the task logs a warning and retries every 5 seconds — it does **not** panic, so MQTT, BLE, and the simulated state heartbeat continue running normally.
+
+## Bus health
+
+The app shows each bus's health from `SystemState.can_bus_health`, a map from bus id to `CanBusHealth`. Board drivers count what they receive in a `core_interface::CanRxCounts` and hand each window to `report_can_bus_window(bus_id, &counts, listen_only)` when it ends (every 5 s, and at once after a bus-off). `can_health.rs` adds it to the bus's totals since boot and judges the window (`can_bus_status`):
+
+| Status | Window |
+|---|---|
+| `BUS_OFF` | the controller went bus-off |
+| `NO_VALID_FRAMES` | RX errors and no frame: usually a wrong bitrate, a CAN FD bus or wiring |
+| `DEGRADED` | frames, with RX errors or overruns |
+| `SILENT` | nothing at all: the car is asleep, or the bus isn't connected |
+| `OK` | frames, no errors |
+
+The counters sent are totals since boot (saturating), so a lost update loses nothing; the status is about the last window only. `listen_only` is whether the controller ran in hardware listen-only mode, and unset for a driver without one (SocketCAN on the PC board, which drops TX in software instead).
+
+It is BLE only (MQTT carries basic state only), in a `StateUpdate` of its own sent by `publish_can_bus_health_task`: at once when a bus changes status or mode, or first reports; otherwise every `CAN_BUS_HEALTH_REPEAT_MS` (5 s), with the new counters; and again when the app subscribes. A bus whose driver doesn't report (MCP2515 so far) is absent from the map.
+
+*   **ESP TWAI:** the counters behind the 5 s RX log (see [TWAI](#twai-built-in)).
+*   **PC (SocketCAN):** frames, plus error frames (the socket accepts all of them): a bus-off, a receive buffer overflow (counted as an overrun), or else an RX error. A `vcan` bus never sends error frames, so it only reads `OK` or `SILENT`.
 
 ## xtask CAN codegen
 In `xtask_builder.rs` per board:

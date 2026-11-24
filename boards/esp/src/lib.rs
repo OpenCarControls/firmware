@@ -60,6 +60,7 @@ mod hardware {
         spawner.spawn(core_interface::publish_state_task().unwrap());
         spawner.spawn(core_interface::publish_can_access_task().unwrap());
         spawner.spawn(core_interface::publish_command_availability_task().unwrap());
+        spawner.spawn(core_interface::publish_can_bus_health_task().unwrap());
         spawner.spawn(system_command_task().unwrap());
         core_interface::set_random_source(fill_random);
     }
