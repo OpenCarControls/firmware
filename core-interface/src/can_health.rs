@@ -102,7 +102,8 @@ pub fn frames_per_second(window: &CanRxCounts, window_ms: u64) -> Option<u32> {
     Some(u32::try_from(rate).unwrap_or(u32::MAX))
 }
 
-/// What is known about one bus: totals since boot and the last window's verdict.
+/// What is known about one bus: totals since boot and the last window's verdict and
+/// rate. Only the error totals are sent: a frame total would saturate on a busy bus.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct BusHealth {
     totals: CanRxCounts,
@@ -116,12 +117,10 @@ impl BusHealth {
         proto::CanBusHealth {
             status: Some(self.status as i32),
             listen_only: self.listen_only,
-            frames_received: Some(self.totals.received),
-            frames_matched: Some(self.totals.matched),
+            frames_per_second: self.frames_per_second,
             rx_errors: Some(self.totals.errors),
             overruns: Some(self.totals.overruns),
             bus_offs: Some(self.totals.bus_offs),
-            frames_per_second: self.frames_per_second,
         }
     }
 }

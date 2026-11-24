@@ -51,6 +51,7 @@ fn a_report_is_published_with_totals_since_boot() {
     faulty.record_error();
     faulty.record_error();
     report_can_bus_window(1, &faulty, 5_000, None);
+    report_can_bus_window(1, &faulty, 5_000, None);
 
     assert!(publish_can_bus_health(1_000));
     let health = sent().unwrap();
@@ -59,8 +60,6 @@ fn a_report_is_published_with_totals_since_boot() {
     let bus0 = &health[&0];
     assert_eq!(status(bus0), S::Ok);
     assert_eq!(bus0.listen_only, Some(true));
-    assert_eq!(bus0.frames_received, Some(14));
-    assert_eq!(bus0.frames_matched, Some(7));
     assert_eq!(bus0.rx_errors, Some(0));
     assert_eq!(bus0.overruns, Some(0));
     assert_eq!(bus0.bus_offs, Some(0));
@@ -70,7 +69,7 @@ fn a_report_is_published_with_totals_since_boot() {
     let bus1 = &health[&1];
     assert_eq!(status(bus1), S::NoValidFrames);
     assert_eq!(bus1.listen_only, None);
-    assert_eq!(bus1.rx_errors, Some(2));
+    assert_eq!(bus1.rx_errors, Some(4));
 }
 
 #[test]
@@ -84,7 +83,7 @@ fn the_status_follows_the_last_window_only() {
     let bus0 = sent().unwrap()[&0];
     assert_eq!(status(&bus0), S::Silent);
     assert_eq!(bus0.bus_offs, Some(1));
-    assert_eq!(bus0.frames_received, Some(3));
+    assert_eq!(bus0.frames_per_second, Some(0));
 }
 
 #[test]
@@ -95,11 +94,11 @@ fn a_status_change_is_published_at_once_and_counters_only_after_the_repeat() {
     sent().unwrap();
 
     // Same status, new counters: held until the repeat interval.
-    report_can_bus_window(0, &frames(10), 5_000, Some(true));
+    report_can_bus_window(0, &frames(20), 5_000, Some(true));
     assert!(!publish_can_bus_health(2_000));
     assert!(BLE_TX_CHANNEL.try_receive().is_err());
     assert!(publish_can_bus_health(1_000 + CAN_BUS_HEALTH_REPEAT_MS));
-    assert_eq!(sent().unwrap()[&0].frames_received, Some(20));
+    assert_eq!(sent().unwrap()[&0].frames_per_second, Some(4));
 
     // A new status goes out at once.
     let now = 1_000 + CAN_BUS_HEALTH_REPEAT_MS + 100;

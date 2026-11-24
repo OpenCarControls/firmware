@@ -56,7 +56,7 @@ The app shows each bus's health from `SystemState.can_bus_health`, a map from bu
 | `SILENT` | nothing at all: the car is asleep, or the bus isn't connected |
 | `OK` | frames, no errors |
 
-The counters sent are totals since boot (saturating), so a lost update loses nothing; the status and `frames_per_second` (frames received over the window's length, rounded down) are about the last window only. The app shows the rate, which reads at a glance, rather than the frame total, which only grows. `listen_only` is whether the controller ran in hardware listen-only mode, and unset for a driver without one (SocketCAN on the PC board, which drops TX in software instead).
+The error counters sent (`rx_errors`, `overruns`, `bus_offs`) are totals since boot (saturating), so a lost update loses nothing; the status and `frames_per_second` (frames received over the window's length, rounded down) are about the last window only. Frames are sent as a rate rather than a total: on a busy bus (about 2,000 frames/s on E-GMP M-CAN) a `u32` total would saturate after a few weeks of the bus being awake. The serial log still shows the frame counts of each window. `listen_only` is whether the controller ran in hardware listen-only mode, and unset for a driver without one (SocketCAN on the PC board, which drops TX in software instead).
 
 It is BLE only (MQTT carries basic state only), in a `StateUpdate` of its own sent by `publish_can_bus_health_task`: at once when a bus changes status or mode, or first reports; otherwise every `CAN_BUS_HEALTH_REPEAT_MS` (5 s), with the new counters; and again when the app subscribes. A bus whose driver doesn't report (MCP2515 so far) is absent from the map.
 
