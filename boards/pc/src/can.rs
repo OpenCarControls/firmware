@@ -1,9 +1,9 @@
 #[cfg(target_os = "linux")]
 mod linux_can {
     use core_interface::{CAN_RX_CHANNEL, CanFilter, CanFrame};
-    use embassy_time::{Duration, Timer};
+    use embassy_time::{Duration, Instant, Timer};
     use embedded_can::{Frame as EmbeddedFrame, Id};
-    use socketcan::{CanSocket, Socket};
+    use socketcan::{CanError, CanSocket, Socket, SocketOptions};
     use std::io::ErrorKind;
 
     /// Converts a received `socketcan::CanDataFrame` into a `core_interface::CanFrame`,
@@ -38,6 +38,25 @@ mod linux_can {
         }
     }
 
+    /// How often each bus reports its RX counters for the bus health the app shows.
+    const RX_STATS_INTERVAL: Duration = Duration::from_secs(5);
+
+    /// Counts one SocketCAN error frame: a bus-off, a receive buffer overflow, or else a
+    /// receive error.
+    pub(crate) fn record_error_frame(counts: &mut core_interface::CanRxCounts, error: &CanError) {
+        use socketcan::ErrorCause;
+        use socketcan::errors::ControllerProblems;
+        if error.causes().any(|c| matches!(c, ErrorCause::BusOff)) {
+            counts.record_bus_off();
+        } else if error.causes().any(|c| {
+            matches!(c, ErrorCause::Controller(p) if p.contains(ControllerProblems::RX_OVERFLOW))
+        }) {
+            counts.record_overrun();
+        } else {
+            counts.record_error();
+        }
+    }
+
     /// Opens a SocketCAN socket on `interface` and runs a bidirectional CAN loop
     /// for bus number `bus_id`. Up to 4 concurrent instances are supported (`pool_size`).
     ///
@@ -45,6 +64,8 @@ mod linux_can {
     ///   received frames against `filters` and forwards matches to `CAN_RX_CHANNEL`.
     /// - TX: After each RX poll, drains this bus's `CAN_TX_CHANNELS` entry and writes
     ///   the frames to the socket.
+    /// - Health: counts frames and error frames, and reports them every 5 s for the bus
+    ///   health the app shows (`core_interface::report_can_bus_window`).
     ///
     /// If the interface cannot be opened (e.g. it does not exist), the task logs a
     /// warning and retries every 5 seconds so the rest of the system keeps running.
@@ -84,8 +105,30 @@ mod linux_can {
             return;
         };
 
+        // Error frames feed the bus health. A virtual (vcan) bus never sends any.
+        if let Err(e) = socket.set_error_filter_accept_all() {
+            log::warn!(
+                "CAN bus {}: no error frames from '{}': {}",
+                bus_id,
+                interface,
+                e
+            );
+        }
+        let mut counts = core_interface::CanRxCounts::new();
+        let mut next_report = Instant::now() + RX_STATS_INTERVAL;
+
         loop {
             Timer::after(Duration::from_millis(1)).await;
+
+            if Instant::now() >= next_report {
+                // The window started one interval before it was due.
+                let window_ms = Instant::now()
+                    .saturating_duration_since(next_report - RX_STATS_INTERVAL)
+                    .as_millis();
+                // SocketCAN has no listen-only mode here: read-only drops TX in software.
+                core_interface::report_can_bus_window(bus_id, &counts.take(), window_ms, None);
+                next_report = Instant::now() + RX_STATS_INTERVAL;
+            }
 
             // RX: drain all available frames from the kernel rx buffer
             loop {
@@ -93,15 +136,18 @@ mod linux_can {
                     Ok(socketcan::CanFrame::Data(f)) => {
                         let core_frame = socketcan_to_core_frame(&f, bus_id);
                         core_interface::log_can_frame(&core_frame);
+                        let matched = core_interface::passes_filter(&core_frame, filters);
+                        counts.record_frame(matched);
                         // The vehicle doesn't see frames while SavvyCAN has the buses.
-                        if core_interface::passes_filter(&core_frame, filters)
-                            && !core_interface::is_can_logging()
-                        {
+                        if matched && !core_interface::is_can_logging() {
                             CAN_RX_CHANNEL.sender().send(core_frame).await;
                         }
                     }
-                    // Remote frames and error frames are ignored
-                    Ok(_) => {}
+                    Ok(socketcan::CanFrame::Error(f)) => {
+                        record_error_frame(&mut counts, &f.into_error());
+                    }
+                    // Remote frames are ignored
+                    Ok(socketcan::CanFrame::Remote(_)) => {}
                     Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
                     Err(_) => break,
                 }
@@ -126,6 +172,25 @@ mod linux_can {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        fn counted(error: CanError) -> core_interface::CanRxCounts {
+            let mut counts = core_interface::CanRxCounts::new();
+            record_error_frame(&mut counts, &error);
+            counts
+        }
+
+        #[test]
+        fn error_frames_are_counted_by_cause() {
+            use socketcan::ErrorCause;
+            use socketcan::errors::ControllerProblems;
+            assert_eq!(counted(CanError::new(ErrorCause::BusOff)).bus_offs, 1);
+            let overflow = ErrorCause::Controller(ControllerProblems::RX_OVERFLOW);
+            assert_eq!(counted(CanError::new(overflow)).overruns, 1);
+            let both = CanError::from_multiple(overflow, [ErrorCause::BusOff]);
+            assert_eq!(counted(both.clone()).bus_offs, 1);
+            assert_eq!(counted(both).overruns, 0);
+            assert_eq!(counted(CanError::new(ErrorCause::NoAck)).errors, 1);
+        }
         use embedded_can::{ExtendedId, StandardId};
 
         fn sc_std_frame(raw_id: u16, data: &[u8]) -> socketcan::CanDataFrame {
@@ -249,7 +314,7 @@ pub use linux_can::socket_can_task;
 #[cfg(not(target_os = "linux"))]
 mod dummy_can {
     use core_interface::CanFilter;
-    use embassy_time::{Duration, Timer};
+    use embassy_time::{Duration, Instant, Timer};
 
     #[embassy_executor::task(pool_size = 4)]
     pub async fn socket_can_task(

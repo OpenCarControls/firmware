@@ -8,6 +8,7 @@ pub mod proto {
 mod availability;
 mod can;
 mod can_access;
+mod can_health;
 mod can_log;
 mod can_probe;
 mod can_tx;
@@ -110,6 +111,13 @@ pub use can_access::{
     publish_can_access_state, publish_can_access_task, resend_can_access_state,
     reset_can_access_for_tests, restore_can_read_write_approval, revoke_can_read_write_approval,
     set_can_dev_write_unlocked, try_take_can_read_write_approval_to_store,
+};
+
+// CAN bus health (RX counters reported by the board drivers, published over BLE)
+pub use can_health::{
+    CAN_BUS_HEALTH_REPEAT_MS, CanRxCounts, can_bus_health, can_bus_health_state_update,
+    can_bus_status, frames_per_second, publish_can_bus_health, publish_can_bus_health_task,
+    report_can_bus_window, resend_can_bus_health, reset_can_bus_health_for_tests,
 };
 
 // CAN logging (SavvyCAN / GVRET)

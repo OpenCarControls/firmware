@@ -990,8 +990,9 @@ mod hardware {
                     // so give it the current state now instead of at the next update.
                     // Not at once: a notification sent right as the CCCD write is
                     // accepted is lost before the app's notification stream is
-                    // listening (seen on Android). The CAN access state follows through
-                    // BLE_TX_CHANNEL, and is repeated every few seconds anyway.
+                    // listening (seen on Android). The CAN access state, command
+                    // availability and bus health follow through BLE_TX_CHANNEL, and are
+                    // repeated every few seconds anyway.
                     Either3::Third(()) => {
                         embassy_time::Timer::after(embassy_time::Duration::from_millis(
                             SUBSCRIBE_RESEND_DELAY_MS,
@@ -999,6 +1000,7 @@ mod hardware {
                         .await;
                         core_interface::resend_can_access_state();
                         core_interface::resend_command_availability();
+                        core_interface::resend_can_bus_health();
                         match core_interface::latest_ble_state() {
                             Some(msg) => msg,
                             None => continue,
