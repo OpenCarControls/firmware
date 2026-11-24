@@ -209,6 +209,10 @@ mod hardware {
 
         loop {
             if core_interface::is_can_bus_listen_only(bus_id) != listen_only {
+                // End the window under the mode it ran in, so the app sees the new
+                // mode at once instead of at the end of the window.
+                end_rx_window(bus_id, listen_only, stats);
+                *next_report = Instant::now() + RX_STATS_INTERVAL;
                 return;
             }
 
@@ -288,6 +292,8 @@ mod hardware {
     type TwaiRxStats = crate::can::RxStats<EspTwaiError>;
 
     /// Ends one RX stats window: logs it, and reports it for the bus health the app shows.
+    /// Called every [`RX_STATS_INTERVAL`], and early on a mode change or a bus-off, so the
+    /// log line can cover less than the interval.
     fn end_rx_window(bus_id: u8, listen_only: bool, stats: &mut TwaiRxStats) {
         let window = stats.take();
         log_rx_stats(bus_id, listen_only, &window);

@@ -35,7 +35,7 @@ Hardware filters are set to accept-all where driver constraints apply (TWAI on E
 
 *   RX is interrupt-driven (esp-hal ISR → 32-frame queue), which keeps frames from being lost on single-core chips while WiFi/BLE are busy.
 *   The session loop sleeps until a frame arrives, a TX frame is queued for this bus, the read-only flag changes, or the next RX stats report is due. TX waits are bounded to 100 ms, RX overruns clear the FIFO, and bus-off rebuilds the controller after 1 s. A bus-off also relocks every bus (`set_can_read_only(true)`), so the vehicle has to unlock again (see [Read-write policy](#read-write-policy)).
-*   Every 5 s each TWAI bus logs one `info` line with the frames received, how many matched the vehicle filters, RX errors (with the last error kind), overruns and bus-offs since the previous line. A silent bus logs zeros, so the serial console shows whether the car is sending anything. RX errors with no frames usually mean a wrong bitrate, a CAN FD bus or a wiring fault. The same window is reported for the app (see [Bus health](#bus-health)), and a bus-off ends the window early so it is reported at once. MCP2515 buses don't have this log or the bus health yet.
+*   Every 5 s each TWAI bus logs one `info` line with the frames received, how many matched the vehicle filters, RX errors (with the last error kind), overruns and bus-offs since the previous line. A silent bus logs zeros, so the serial console shows whether the car is sending anything. RX errors with no frames usually mean a wrong bitrate, a CAN FD bus or a wiring fault. The same window is reported for the app (see [Bus health](#bus-health)), and a bus-off or a switch between listen-only and normal mode ends the window early, so the app sees it at once (the window is reported under the mode it ran in). MCP2515 buses don't have this log or the bus health yet.
 *   The blocking `nb` path was dropped because esp-hal's blocking `receive()` never releases the FIFO after an overrun, so RX stays dead permanently.
 
 ### MCP2515 (SPI)
@@ -46,7 +46,7 @@ Hardware filters are set to accept-all where driver constraints apply (TWAI on E
 
 ## Bus health
 
-The app shows each bus's health from `SystemState.can_bus_health`, a map from bus id to `CanBusHealth`. Board drivers count what they receive in a `core_interface::CanRxCounts` and hand each window to `report_can_bus_window(bus_id, &counts, listen_only)` when it ends (every 5 s, and at once after a bus-off). `can_health.rs` adds it to the bus's totals since boot and judges the window (`can_bus_status`):
+The app shows each bus's health from `SystemState.can_bus_health`, a map from bus id to `CanBusHealth`. Board drivers count what they receive in a `core_interface::CanRxCounts` and hand each window to `report_can_bus_window(bus_id, &counts, listen_only)` when it ends (every 5 s, and at once after a bus-off or, on TWAI, a mode switch). `can_health.rs` adds it to the bus's totals since boot and judges the window (`can_bus_status`):
 
 | Status | Window |
 |---|---|
