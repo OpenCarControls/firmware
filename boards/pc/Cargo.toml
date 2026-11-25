@@ -13,6 +13,8 @@ rust-mqtt         = { workspace = true, features = ["log"] }
 embedded-io-async = { workspace = true, features = ["std"] }
 prost             = { workspace = true }
 log               = { workspace = true }
+# TLS for MQTT (mqtts://). ring instead of aws-lc-rs: it builds without cmake.
+rustls            = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 socketcan         = { version = "4.0.0", default-features = false }

@@ -17,6 +17,7 @@ mod dedupe;
 mod dispatch;
 mod isotp;
 mod lifecycle;
+mod mqtt_tls;
 mod pairing;
 mod phone_trust;
 mod requirements;
@@ -71,6 +72,7 @@ pub(crate) fn mqtt_client_id() -> Option<&'static str> {
 // ── Public re-exports ─────────────────────────────────────────────────────────
 
 // Types
+pub use mqtt_tls::{MqttClientCert, MqttTls};
 pub use types::{CanFilter, CanFrame, InboundCommand, Transport, VehicleStatePayload};
 
 // Channels

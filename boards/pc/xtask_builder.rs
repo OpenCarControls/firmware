@@ -189,13 +189,13 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str(&format!("log = \"{}\"\n", v("log")));
 
         // Build .app_build/src/main.rs from template
-        let mtls_certs = crate::generate_mtls_certs(config);
+        let mqtt_security = crate::checked_mqtt_security(config);
+        let (mqtt_tls, mqtt_username, mqtt_password) =
+            crate::mqtt_security_code(&config.network.mqtt, &mqtt_security);
 
         // Generate network constants and MQTT driver spawn
         let (broker_host, broker_port) = parse_broker_url(&config.network.mqtt.broker_url);
         let client_id = &config.network.mqtt.client_id;
-        let mqtt_username = escape_rust_string(config.network.mqtt.username.as_deref().unwrap_or(""));
-        let mqtt_password = escape_rust_string(config.network.mqtt.password.as_deref().unwrap_or(""));
         let mqtt_cmd_topic = escape_rust_string(&render_topic_from_template(
             &transport.mqtt.command_topic_template,
             client_id,
@@ -279,6 +279,7 @@ impl TargetBuilder for Builder {
              MQTT_DATA_TOPIC,\n\
              MQTT_USERNAME,\n\
              MQTT_PASSWORD,\n\
+             MQTT_TLS,\n\
              ).unwrap());\n".to_string();
 
         let can_logger = &config.network.can_logger;
@@ -298,7 +299,7 @@ impl TargetBuilder for Builder {
             .replace("{VEHICLE_CRATE_IDENT}", &vehicle_crate_ident)
             .replace("{CAN_SPAWNS}", &format!("{fd_declarations}{can_spawns}"))
             .replace("{BLE_HTTP_SPAWN}", &ble_http_spawn)
-            .replace("{MTLS_CERTS}", &mtls_certs)
+            .replace("{MQTT_TLS}", &mqtt_tls)
             .replace("{NETWORK_CONSTANTS}", &network_constants)
             .replace("{MQTT_DRIVER_SPAWN}", &mqtt_driver_spawn)
             .replace("{CAN_LOGGER_SPAWN}", &can_logger_spawn)

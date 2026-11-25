@@ -1,4 +1,6 @@
-use core_interface::{MQTT_RX_CHANNEL, MQTT_STATE_TX, MQTT_TX_CHANNEL, Transport, proto};
+use std::sync::Arc;
+
+use core_interface::{MQTT_RX_CHANNEL, MQTT_STATE_TX, MQTT_TX_CHANNEL, MqttTls, Transport, proto};
 use prost::Message as _;
 use rust_mqtt::{
     Bytes,
@@ -10,18 +12,17 @@ use rust_mqtt::{
     types::{MqttBinary, MqttString, TopicFilter, TopicName},
 };
 
-/// Adapts a non-blocking `std::net::TcpStream` to `embedded_io_async`'s
-/// `Read` and `Write` traits by polling every 1 ms via Embassy timer when the
-/// socket would block. This mirrors the pattern used by `socket_can_task`.
-pub(crate) struct NonBlockingTcpStream(pub(crate) std::net::TcpStream);
+/// Adapts a non-blocking stream (a `std::net::TcpStream`, or TLS over one) to
+/// `embedded_io_async`'s `Read` and `Write` traits by polling every 1 ms via Embassy
+/// timer when the socket would block. This mirrors the pattern used by `socket_can_task`.
+pub(crate) struct NonBlockingTcpStream<S = std::net::TcpStream>(pub(crate) S);
 
-impl embedded_io_async::ErrorType for NonBlockingTcpStream {
+impl<S> embedded_io_async::ErrorType for NonBlockingTcpStream<S> {
     type Error = embedded_io_async::ErrorKind;
 }
 
-impl embedded_io_async::Read for NonBlockingTcpStream {
+impl<S: std::io::Read + std::io::Write> embedded_io_async::Read for NonBlockingTcpStream<S> {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        use std::io::Read;
         loop {
             match self.0.read(buf) {
                 Ok(n) => return Ok(n),
@@ -34,9 +35,8 @@ impl embedded_io_async::Read for NonBlockingTcpStream {
     }
 }
 
-impl embedded_io_async::Write for NonBlockingTcpStream {
+impl<S: std::io::Read + std::io::Write> embedded_io_async::Write for NonBlockingTcpStream<S> {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-        use std::io::Write;
         loop {
             match self.0.write(buf) {
                 Ok(n) => return Ok(n),
@@ -49,18 +49,23 @@ impl embedded_io_async::Write for NonBlockingTcpStream {
     }
 
     async fn flush(&mut self) -> Result<(), Self::Error> {
-        use std::io::Write;
-        self.0
-            .flush()
-            .map_err(|_| embedded_io_async::ErrorKind::Other)
+        loop {
+            match self.0.flush() {
+                Ok(()) => return Ok(()),
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    embassy_time::Timer::after(embassy_time::Duration::from_millis(1)).await;
+                }
+                Err(_) => return Err(embedded_io_async::ErrorKind::Other),
+            }
+        }
     }
 }
 
 /// Shared MQTT session logic. Authenticates (if credentials provided),
 /// subscribes, then drives inbound/outbound message exchange until an error
 /// occurs, at which point it returns `Err(())` so the caller reconnects.
-async fn run_mqtt_session(
-    transport: NonBlockingTcpStream,
+async fn run_mqtt_session<S: std::io::Read + std::io::Write>(
+    transport: NonBlockingTcpStream<S>,
     client_id: &'static str,
     cmd_topic: &'static str,
     data_topic: &'static str,
@@ -176,8 +181,73 @@ async fn run_mqtt_session(
     }
 }
 
-/// Public MQTT driver task. Opens a non-blocking TCP connection to the broker,
-/// runs the session, and reconnects on any failure.
+/// The rustls client configuration for `tls`: the broker must chain to `ca_pem`;
+/// with a client certificate the device presents it (mTLS).
+fn tls_client_config(tls: &MqttTls) -> Result<Arc<rustls::ClientConfig>, String> {
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in CertificateDer::pem_slice_iter(tls.ca_pem) {
+        let cert = cert.map_err(|e| format!("CA certificate: {e}"))?;
+        roots
+            .add(cert)
+            .map_err(|e| format!("CA certificate: {e}"))?;
+    }
+    if roots.is_empty() {
+        return Err("CA certificate: no certificate in the PEM".into());
+    }
+    let builder = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| e.to_string())?
+    .with_root_certificates(roots);
+    let config = match &tls.client {
+        Some(client) => {
+            let chain = CertificateDer::pem_slice_iter(client.cert_pem)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("client certificate: {e}"))?;
+            let key = PrivateKeyDer::from_pem_slice(client.key_pem)
+                .map_err(|e| format!("client key: {e}"))?;
+            builder
+                .with_client_auth_cert(chain, key)
+                .map_err(|e| format!("client certificate: {e}"))?
+        }
+        None => builder.with_no_client_auth(),
+    };
+    Ok(Arc::new(config))
+}
+
+/// Runs the TLS handshake on a non-blocking `stream`, verifying the broker's
+/// certificate against `broker_host`.
+async fn tls_handshake(
+    config: &Arc<rustls::ClientConfig>,
+    broker_host: &'static str,
+    mut stream: std::net::TcpStream,
+) -> Result<rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>, String> {
+    let name = rustls::pki_types::ServerName::try_from(broker_host)
+        .map_err(|e| format!("broker host '{broker_host}': {e}"))?;
+    let mut conn =
+        rustls::ClientConnection::new(config.clone(), name).map_err(|e| e.to_string())?;
+    let deadline = embassy_time::Instant::now() + embassy_time::Duration::from_secs(30);
+    while conn.is_handshaking() {
+        match conn.complete_io(&mut stream) {
+            Ok(_) => {}
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if embassy_time::Instant::now() > deadline {
+                    return Err("handshake timed out".into());
+                }
+                embassy_time::Timer::after(embassy_time::Duration::from_millis(1)).await;
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(rustls::StreamOwned::new(conn, stream))
+}
+
+/// Public MQTT driver task. Opens a non-blocking TCP connection to the broker (with
+/// TLS when `tls` is set), runs the session, and reconnects on any failure.
 #[embassy_executor::task]
 pub async fn mqtt_driver_task(
     broker_host: &'static str,
@@ -187,8 +257,19 @@ pub async fn mqtt_driver_task(
     data_topic: &'static str,
     username: &'static str,
     password: &'static str,
+    tls: Option<MqttTls>,
 ) {
     use embassy_time::{Duration, Timer};
+
+    let tls_config = match tls.as_ref().map(tls_client_config).transpose() {
+        Ok(config) => config,
+        Err(e) => {
+            // A bad certificate won't fix itself: stay offline rather than fall back
+            // to plain TCP.
+            log::error!("MQTT: TLS settings rejected ({e}); MQTT stays off");
+            return;
+        }
+    };
 
     loop {
         let addr = format!("{}:{}", broker_host, broker_port);
@@ -206,14 +287,38 @@ pub async fn mqtt_driver_task(
             .set_nonblocking(true)
             .expect("set_nonblocking failed");
 
-        let transport = NonBlockingTcpStream(stream);
-
-        if run_mqtt_session(
-            transport, client_id, cmd_topic, data_topic, username, password,
-        )
-        .await
-        .is_err()
-        {
+        let result = match &tls_config {
+            None => {
+                run_mqtt_session(
+                    NonBlockingTcpStream(stream),
+                    client_id,
+                    cmd_topic,
+                    data_topic,
+                    username,
+                    password,
+                )
+                .await
+            }
+            Some(config) => match tls_handshake(config, broker_host, stream).await {
+                Ok(tls_stream) => {
+                    log::info!("MQTT: TLS established");
+                    run_mqtt_session(
+                        NonBlockingTcpStream(tls_stream),
+                        client_id,
+                        cmd_topic,
+                        data_topic,
+                        username,
+                        password,
+                    )
+                    .await
+                }
+                Err(e) => {
+                    log::warn!("MQTT: TLS handshake failed: {e}");
+                    Err(())
+                }
+            },
+        };
+        if result.is_err() {
             log::info!("MQTT: session ended, reconnecting in 5s");
         }
         // Drops what was queued for this session instead of sending it on the next.

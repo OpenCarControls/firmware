@@ -536,7 +536,15 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str("[package]\nname = \"app-build\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n");
         cargo_toml.push_str("[dependencies]\n");
         cargo_toml.push_str("core-interface = { path = \"../core-interface\" }\n");
-        cargo_toml.push_str("board-esp = { path = \"../boards/esp\", features = [\"hardware\"] }\n");
+        let mqtt_security = crate::checked_mqtt_security(config);
+        let board_features = if matches!(mqtt_security, crate::MqttSecurity::Tls { .. }) {
+            "\"hardware\", \"mqtt-tls\""
+        } else {
+            "\"hardware\""
+        };
+        cargo_toml.push_str(&format!(
+            "board-esp = {{ path = \"../boards/esp\", features = [{board_features}] }}\n"
+        ));
         cargo_toml.push_str(&format!(
             "{} = {{ path = \"../cars/{}\" }}\n",
             vehicle_crate_name, vehicle_platform
@@ -571,13 +579,12 @@ impl TargetBuilder for Builder {
         cargo_toml.push_str("\n[profile.dev]\nopt-level = \"s\"\ndebug = true\n");
 
         // Build .app_build/src/main.rs from template
-        let mtls_certs = crate::generate_mtls_certs(config);
+        let (mqtt_tls, mqtt_username, mqtt_password) =
+            crate::mqtt_security_code(&config.network.mqtt, &mqtt_security);
 
         // Generate network constants and WiFi/MQTT driver spawn
         let (broker_host, broker_port) = parse_broker_url(&config.network.mqtt.broker_url);
         let client_id = &config.network.mqtt.client_id;
-        let mqtt_username = escape_rust_string(config.network.mqtt.username.as_deref().unwrap_or(""));
-        let mqtt_password = escape_rust_string(config.network.mqtt.password.as_deref().unwrap_or(""));
         let mqtt_cmd_topic = escape_rust_string(&render_topic_from_template(
             &transport.mqtt.command_topic_template,
             client_id,
@@ -742,6 +749,7 @@ impl TargetBuilder for Builder {
                 "            MQTT_DATA_TOPIC,\n",
                 "            MQTT_USERNAME,\n",
                 "            MQTT_PASSWORD,\n",
+                "            MQTT_TLS,\n",
                 "        ).unwrap());\n",
             ).to_string()
         } else {
@@ -857,7 +865,7 @@ impl TargetBuilder for Builder {
             .replace("{CAN_HARDWARE_INIT}", &can_hardware_init)
             .replace("{CAN_TASK_DEFS}", &can_task_defs)
             .replace("{CAN_DRIVER_SPAWN}", &can_driver_spawn)
-            .replace("{MTLS_CERTS}", &mtls_certs)
+            .replace("{MQTT_TLS}", &mqtt_tls)
             .replace("{NETWORK_CONSTANTS}", &network_constants)
             .replace("{NETWORK_HARDWARE_INIT}", &network_hardware_init)
             .replace("{BLE_DRIVER_SPAWN}", &ble_driver_spawn)

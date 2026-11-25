@@ -33,10 +33,20 @@ hardware = [
     "dep:rand_core",
 ]
 
-# Chip features — `hardware` plus the chip on every ESP dependency, for rust-analyzer.
+# TLS for MQTT (mqtts://), through MbedTLS. xtask enables it only for a mqtts://
+# broker: it adds about 540 KB of flash.
+mqtt-tls = [
+    "hardware",
+    "dep:mbedtls-rs",
+    "dep:rand_core_010",
+    "dep:esp-alloc",
+]
+
+# Chip features — `hardware` (with `mqtt-tls`) plus the chip on every ESP dependency, for rust-analyzer.
 # Selected automatically by `cargo xtask ide` from the MCU in config.toml.
 esp32 = [
     "hardware",
+    "mqtt-tls",
     "esp-hal/esp32",
     "esp-println/esp32", "esp-println/auto",
     "esp-radio/esp32",
@@ -45,6 +55,7 @@ esp32 = [
 ]
 esp32s3 = [
     "hardware",
+    "mqtt-tls",
     "esp-hal/esp32s3",
     "esp-println/esp32s3", "esp-println/auto",
     "esp-radio/esp32s3",
@@ -53,6 +64,7 @@ esp32s3 = [
 ]
 esp32c3 = [
     "hardware",
+    "mqtt-tls",
     "esp-hal/esp32c3",
     "esp-println/esp32c3", "esp-println/jtag-serial",
     "esp-radio/esp32c3",
@@ -61,6 +73,7 @@ esp32c3 = [
 ]
 esp32c6 = [
     "hardware",
+    "mqtt-tls",
     "esp-hal/esp32c6",
     "esp-println/esp32c6", "esp-println/auto",
     "esp-radio/esp32c6",
@@ -100,6 +113,13 @@ sequential-storage = { version = "8" }
 embassy-embedded-hal = { version = "0.6.0", optional = true }
 embedded-storage-async = { version = "0.4", optional = true }
 rand_core = { version = "0.6", default-features = false, optional = true }
+# MbedTLS's RNG trait (`mbedtls-rs` takes a rand_core 0.10 `CryptoRng`).
+rand_core_010 = { package = "rand_core", version = "0.10", default-features = false, optional = true }
+# TLS for MQTT (mqtts://). 0.2 is the last release on esp-hal 1.1; software crypto,
+# from the prebuilt libraries (no chip feature, so no C toolchain needed).
+mbedtls-rs = { version = "=0.2.0", default-features = false, features = ["tls", "log"], optional = true }
+# Only for logging the free heap after the TLS handshake. Same version xtask injects.
+esp-alloc = { version = "0.10.0", optional = true }
 
 # Versions for crates injected into generated .app_build / .app_test_build by xtask.
 # These are not direct dependencies of board-esp itself.
